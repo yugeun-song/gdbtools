@@ -1,0 +1,22 @@
+{
+  "_comment": "gdbtools machine profile. Every field is OPTIONAL; a missing field falls back to the arch default. Apply with $GDBTOOLS_PROFILE=FILE before gdb starts, or mid-session: kearly profile FILE. Numbers accept hex strings or ints.",
+  "arch": "arm64",
+  "ram_base": "0x40000000",
+  "ram_size": "0x40000000",
+  "entry_pa": "0x40200000",
+  "scan": ["0x40000000:0x40800000"],
+  "phys_window": ["0x40000000", "0x50000000"],
+  "anchor": "primary_entry",
+  "break_kind": "sw",
+  "mmu": {"reg": "SCTLR_EL1", "bit": 0},
+  "_help": {
+    "arch": "x86_64 | arm64 | riscv64 -- informational; the real arch is auto-detected from the target",
+    "ram_base / ram_size": "physical RAM window; drives the Image-magic scan and the calibration sanity check",
+    "entry_pa": "pin the kernel image-base physical address (firmware / relocated / no-introspection loads)",
+    "scan": "explicit physical scan ranges 'lo:hi' for the Image magic (overrides the ram-derived ranges)",
+    "phys_window": "[lo, hi] plausible image phys range, used only to sanity-check the computed offset",
+    "anchor": "symbol where firmware enters the kernel (UEFI -> primary_entry / _start_kernel; default = image base)",
+    "break_kind": "sw | hw breakpoint at the entry (sw if the entry runs in place, hw if it gets overwritten)",
+    "mmu": "optional {reg, bit} to read the MMU-enable bit when the arch default register name does not apply"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "_comment": "TEMPLATE -- Raspberry Pi 4 (Broadcom BCM2711), arm64. VERIFY against your firmware/board before trusting: the RPi firmware loads the arm64 Image at 0x80000 by default and RAM base is 0x0. ram_size below is for a 2GB board; adjust for 1/4/8GB. On real HW the DTB is also auto-read from x0 at entry, so ram_base/size may not even be needed.",
+  "arch": "arm64",
+  "ram_base": "0x0",
+  "ram_size": "0x80000000",
+  "entry_pa": "0x80000",
+  "anchor": "_text",
+  "break_kind": "sw"
+}

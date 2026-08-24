@@ -1,0 +1,29 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# gdb / debugger scratch
+.gdb_history
+*.dtb
+*.log
+core
+
+# Kernel build trees and root filesystems live in a WORKSPACE, never here:
+# they are tens of gigabytes, they are not ours to version, and a built vmlinux
+# records absolute paths in DW_AT_comp_dir.  Listed anyway, because a workspace
+# is commonly placed beside a checkout and `git status` walking a kernel tree
+# takes minutes.
+/arm64-*/
+/x86_64-*/
+/riscv64-*/
+/buildroot-src/
+*.ext4
+*.qcow2
+*.img
+vmlinux
+System.map
+
+# Local editor / agent state
+/.vscode/
+/.claude/
+.claude/settings.local.json
