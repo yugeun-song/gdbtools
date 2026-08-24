@@ -189,9 +189,12 @@ class Session:
             return None
         pa = a.find_entry_pa()
         if pa is None:
-            print("[%s] the kernel image base was not found in the target, and none "
-                  "was given.  Set $GDBTOOLS_ENTRY_PA or $GDBTOOLS_PROFILE before "
-                  "starting gdb, or run `kearly calibrate <symbol>`." % NAME)
+            # A normal answer, not a failure: this is a query, several callers
+            # treat "not resolved yet" as a state to report, and calibration has
+            # other routes to the offset.  The one caller that cannot proceed
+            # without it -- bootbreak -- says so itself.
+            LOG.add("entry PA unresolved: nothing in the target reported it and "
+                    "$GDBTOOLS_ENTRY_PA/_PROFILE were not set")
             return None
         self.entry_pa = pa
         return pa
