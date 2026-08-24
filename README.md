@@ -86,7 +86,6 @@ starts. There is no second spelling and no search path.
 | variable | what it states |
 | --- | --- |
 | `GDBTOOLS_AUTO` | arm the kernel session on attach: stop hook, shadow symbols, MMU-transition notices. Without it nothing hooks the session and `kearly on` is manual |
-| `GDBTOOLS_KERNEL_ROOT` | the build tree being debugged |
 | `GDBTOOLS_ENTRY_PA` | physical address of the kernel image base. Needed whenever the target cannot report it — always on x86_64, whose decompressor relocates the image so there is no magic to find it by |
 | `GDBTOOLS_SCAN` | `lo:hi` physical range to search for the image magic |
 | `GDBTOOLS_RAM_BASE` | RAM base, as a shorthand for a scan range starting there |
