@@ -17,6 +17,24 @@ from ..pwndbg_glue import PWN
 from ..target import TARGET
 
 
+def _parse_range(text, name):
+    """'lo:hi' -> (lo, hi), or None after saying why.  A range that was supplied
+    and does not parse is a mistake worth hearing about: dropped silently, the
+    caller proceeds as though nothing was supplied and the operator never learns
+    their value was ignored."""
+    if ":" in text:
+        lo, hi = text.split(":", 1)
+        try:
+            return (int(lo, 0) & MASK, int(hi, 0) & MASK)
+        except Exception:
+            pass
+    msg = ("%s%s is set to %r, which is not a 'lo:hi' range; ignoring it"
+           % (_ENV_PREFIX, name, text))
+    LOG.add(msg)
+    print("[%s] %s" % (NAME, msg))
+    return None
+
+
 class KernelArch:
     entry_symbol = None          # symbol whose PA == $pc at the first frozen stop
     entry_break_kind = "hw"      # "sw": entry not overwritten -> sw bp ok; "hw":
@@ -57,12 +75,10 @@ class KernelArch:
         check against and the caller skips it rather than testing against a range
         that describes some other board."""
         pw = _env("PHYS_WINDOW")
-        if pw and ":" in pw:
-            try:
-                lo, hi = pw.split(":", 1)
-                return (int(lo, 0) & MASK, int(hi, 0) & MASK)
-            except Exception:
-                pass
+        if pw:
+            r = _parse_range(pw, "PHYS_WINDOW")
+            if r:
+                return r
         return TARGET.phys_window(self)
 
     # --- locate the kernel entry PA (scan the Image magic, else the hint) ---
@@ -75,12 +91,10 @@ class KernelArch:
         belongs to a different board."""
         out = []
         sc = _env("SCAN")
-        if sc and ":" in sc:
-            try:
-                lo, hi = sc.split(":", 1)
-                out.append((int(lo, 0) & MASK, int(hi, 0) & MASK))
-            except Exception:
-                pass
+        if sc:
+            r = _parse_range(sc, "SCAN")
+            if r:
+                out.append(r)
         rb = _env_int("RAM_BASE")
         if rb is not None:
             out.append((rb, (rb + 0x8000000) & MASK))   # ram_base .. +128 MiB

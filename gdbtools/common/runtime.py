@@ -150,12 +150,22 @@ def _env(name):
 
 
 def _env_int(name):
+    """An injected override as an int, or None if it was not set.
+
+    A value that WAS set and does not parse is reported, not discarded.  Silently
+    returning None there is the worst outcome available: the caller falls through
+    to auto-discovery, usually finds a plausible answer, and the session comes up
+    looking calibrated while the value the operator thought they set was never
+    used."""
     v = _env(name)
     if v is None:
         return None
     try:
         return int(v, 0) & MASK
     except Exception:
+        msg = "%s%s is set to %r, which is not a number; ignoring it" % (_ENV_PREFIX, name, v)
+        LOG.add(msg)
+        print("[%s] %s" % (NAME, msg))
         return None
 
 

@@ -59,13 +59,12 @@ def _x86_decomp_offsets(cv):
 
 class X86_64(X86_64Common, KernelArch):
     entry_symbol = "startup_64"
-    # arm64 and riscv keep a FIXED physical base under QEMU -kernel (0x40200000 /
-    # 0x80200000) and randomize only the virtual base, so a narrow window is right
-    # there.  x86 KASLR randomizes the PHYSICAL base as well: the decompressor picks
-    # a slot anywhere in usable RAM, and measured boots land at 0x52a00000 and
-    # 0x7ba00000 -- both far outside the 256MB this used to allow.  That made every
-    # sanity check and every `b *0xLINKVA` adoption fail on x86 under KASLR.
-    entry_break_kind = "hw"             # decompressor relocates vmlinux over 0x1000000
+    # x86 KASLR randomizes the PHYSICAL base, not just the virtual one: the
+    # decompressor picks a slot anywhere in usable RAM, and measured boots have
+    # landed hundreds of megabytes apart.  Whoever supplies $GDBTOOLS_PHYS_WINDOW
+    # for this machine has to allow for that -- a window sized for a fixed base,
+    # as arm64 and riscv can use, fails every sanity check here under KASLR.
+    entry_break_kind = "hw"             # the decompressor relocates vmlinux over the entry
     KBASE = 0xFFFFFFFF80000000          # __START_KERNEL_map (config-stable)
     def _is_va(self, addr):
         return (addr >> 63) & 1 == 1     # high half == kernel map
