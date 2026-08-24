@@ -16,11 +16,8 @@ from .base import KernelArch
 
 class Arm64(Arm64Common, KernelArch):
     entry_symbol = "_text"
-    expected_entry_pa = 0x40200000       # QEMU 11 virt: RAM 0x40000000 + 2MB (fallback)
-    phys_window = (0x40000000, 0x50000000)
     entry_break_kind = "sw"              # entry executes in place; sw bp is reliable
     entry_magic = (0x644D5241, 0x38)     # arm64 Image magic "ARM\x64" at _text+0x38
-    ram_scan = (0x40000000, 0x40800000)
     dtb_pointer_reg = "x0"               # bootloader leaves the DTB PA in x0 at _text
     return_reg = "lr"                    # x30; head.S calls via bl, so lr = ret addr
     # first virtual code after __enable_mmu: primary via __primary_switch ->

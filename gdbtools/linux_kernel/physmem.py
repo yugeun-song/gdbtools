@@ -60,20 +60,18 @@ def _pa_in_ram(pa):
     regs = [(b, sz) for b, sz in (TARGET.ram_regions(a) or []) if sz]
     if regs:
         return any(b <= pa < b + sz for b, sz in regs)
-    # No DTB/profile to describe RAM -- the boot register that carries the DTB no
-    # longer holds it this late.  Fall back to the arch's known RAM floor: on these
-    # machines everything BELOW it is device space (arm64 virt keeps the GIC at
-    # 0x8000000 and the UART at 0x9000000), and it is exactly those low addresses a
-    # stray page-table descriptor resolves to.  A floor with no ceiling stays
-    # permissive for every legitimate kernel physical address.
-    for attr in ("ram_scan", "phys_window"):
-        w = getattr(a, attr, None) if a is not None else None
-        if isinstance(w, tuple) and len(w) == 2 and w[0]:
-            return pa >= w[0]
-        if isinstance(w, (list, tuple)) and w and isinstance(w[0], tuple):
-            lo = min(x[0] for x in w if x and x[0])
-            if lo:
-                return pa >= lo
+    # No DTB/profile described RAM -- the boot register that carries the DTB no
+    # longer holds it this late.  Use the supplied physical window's floor instead:
+    # everything below it is device space (arm64 virt keeps the GIC at 0x8000000
+    # and the UART at 0x9000000), and those low addresses are exactly what a stray
+    # page-table descriptor resolves to.  A floor with no ceiling stays permissive
+    # for every legitimate kernel physical address.
+    w = a.eff_phys_window() if a is not None else None
+    if isinstance(w, tuple) and len(w) == 2 and w[0]:
+        return pa >= w[0]
+    # Nothing described this machine's RAM, so there is no floor to test against.
+    # Declining to filter is not the same as guessing a floor: the read below will
+    # fail on its own if the address is not really there.
     return True
 
 

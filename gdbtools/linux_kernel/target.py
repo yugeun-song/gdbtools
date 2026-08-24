@@ -24,15 +24,23 @@ class Target:
 
     @safe()
     def load(self):
+        """Read the machine description that was handed in.
+
+        Not quiet: a $GDBTOOLS_PROFILE or $GDBTOOLS_DTB that does not load is a
+        mistake by whoever launched gdb, and swallowing it produces a session that
+        silently runs on arch defaults while the operator believes their board
+        description is in effect."""
         if self._loaded:
             return
         self._loaded = True
         pf = _env("PROFILE")
-        if pf:
-            self.set_profile(pf, quiet=True)
+        if pf and not self.set_profile(pf):
+            print("[%s] $GDBTOOLS_PROFILE was set to %s and could not be read; "
+                  "no machine description is in effect." % (NAME, pf))
         dt = _env("DTB")
-        if dt:
-            self.set_dtb(dt, quiet=True)
+        if dt and not self.set_dtb(dt):
+            print("[%s] $GDBTOOLS_DTB was set to %s and could not be read; "
+                  "no device tree is in effect." % (NAME, dt))
 
     @safe(default=False)
     def set_profile(self, path, quiet=False):

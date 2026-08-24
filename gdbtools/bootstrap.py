@@ -25,7 +25,7 @@ KERNEL_COMMANDS = (
     (KEarly, "kearly"), (P2V, "kp2v"), (V2P, "kv2p"), (KB, "kb"), (KW, "kw"),
     (KSr, "ksr"), (KSregs, "ksregs"), (KFin, "kfin"), (KCensus, "kcensus"),
     (KPt, "kpt"), (KPgd, "kpgd"), (KPtHex, "kpthex"), (KOff, "koff"), (KX, "kx"),
-    (KDtb, "kdtb"), (KConnect, "kconnect"), (MmView, "mmview"), (MmView, "memlayout"),
+    (KDtb, "kdtb"), (MmView, "mmview"), (MmView, "memlayout"),
 )
 
 # Names this package has already claimed in this gdb session.  It is kept on the

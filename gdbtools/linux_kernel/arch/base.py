@@ -19,12 +19,9 @@ from ..target import TARGET
 
 class KernelArch:
     entry_symbol = None          # symbol whose PA == $pc at the first frozen stop
-    expected_entry_pa = None     # PA the QEMU machine loads the entry at (hint)
-    phys_window = (0, MASK)      # plausible physical image range (sanity check)
     entry_break_kind = "hw"      # "sw": entry not overwritten -> sw bp ok; "hw":
                                  # entry gets relocated over, so a sw bp is clobbered
     entry_magic = None           # (word, offset_from_text): scan RAM for the Image
-    ram_scan = None              # (start,end): header magic to LOCATE the load addr
     dtb_pointer_reg = None       # reg holding the DTB PA at entry (arm64 x0/riscv a1)
     return_reg = None            # reg holding a just-called fn's return addr (lr/ra)
     post_mmu_symbols = ()        # virtual landing(s) reached just after the MMU is on
@@ -53,16 +50,29 @@ class KernelArch:
         return reg(self.return_reg) if self.return_reg else None
 
     def eff_phys_window(self):
-        """Profile/DTB phys window if supplied, else the arch default."""
-        w = TARGET.phys_window(self)
-        return w or self.phys_window
+        """The physical range the kernel image may plausibly sit in, or None.
+
+        Supplied, never assumed: $GDBTOOLS_PHYS_WINDOW ("lo:hi") or the machine
+        profile.  With neither, the sanity check that uses this has nothing to
+        check against and the caller skips it rather than testing against a range
+        that describes some other board."""
+        pw = _env("PHYS_WINDOW")
+        if pw and ":" in pw:
+            try:
+                lo, hi = pw.split(":", 1)
+                return (int(lo, 0) & MASK, int(hi, 0) & MASK)
+            except Exception:
+                pass
+        return TARGET.phys_window(self)
 
     # --- locate the kernel entry PA (scan the Image magic, else the hint) ---
     def _scan_ranges(self):
         """Candidate (start,end) physical ranges to scan for the Image magic.
-        Honors, in priority: explicit env ($GDBTOOLS_SCAN 'lo:hi', $GDBTOOLS_RAM_BASE),
-        then the JSON profile scan / profile+DTB RAM regions, then the arch
-        default (ram_scan may be one tuple OR a list of tuples)."""
+
+        Every range is supplied: $GDBTOOLS_SCAN 'lo:hi', $GDBTOOLS_RAM_BASE, the
+        JSON profile, or RAM regions read out of a DTB.  Empty when nothing was
+        supplied, which makes the scan find nothing rather than sweep a range that
+        belongs to a different board."""
         out = []
         sc = _env("SCAN")
         if sc and ":" in sc:
@@ -79,11 +89,6 @@ class KernelArch:
         for base, size in TARGET.ram_regions(self):
             span = size if (size and size < 0x8000000) else 0x8000000
             out.append((base, (base + span) & MASK))
-        rs = self.ram_scan
-        if isinstance(rs, list):
-            out.extend(rs)
-        elif isinstance(rs, tuple):
-            out.append(rs)
         return out
 
     def discover_load_pa(self):
@@ -121,7 +126,9 @@ class KernelArch:
             LOG.add("entry PA %s from profile" % fmt(pe))
             return pe
         if self.entry_magic is None:
-            return self.expected_entry_pa     # x86: decompressor relocates -> constant
+            # x86: the decompressor relocates the image, so there is no magic in
+            # guest memory to find it by.  The entry PA has to be stated.
+            return None
         # 1. DYNAMIC: QEMU reports the actual load address (no scan, no hardcode)
         pa = self.discover_load_pa()
         if pa is not None:
@@ -133,8 +140,8 @@ class KernelArch:
             m = re.search(r"0x([0-9a-fA-F]{6,16})", out or "")
             if m:
                 return (int(m.group(1), 16) - off) & MASK
-        # 3. last resort: the arch hint (expected_entry_pa)
-        return self.expected_entry_pa
+        # Nothing in the target answered.  Say so; do not invent a plausible one.
+        return None
 
     # --- MMU state (architectural flag, if cheaply available; else None) ---
     def mmu_translation_on(self):

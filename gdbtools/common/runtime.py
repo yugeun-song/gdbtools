@@ -135,25 +135,18 @@ def monitor_reg(name):
         return None
 
 
-# Launcher/override variables are read under the GDBTOOLS_ prefix.  The tool was
-# once called kgdb-earlyboot and exported KGDB_*; those names are still accepted
-# so an older launcher, an exported shell profile or a stale nvim session keeps
-# working.  Pass the bare suffix ("AUTO"), not the whole variable name.
-_ENV_PREFIXES = ("GDBTOOLS_", "KGDB_")
+# Configuration reaches this package one way: a GDBTOOLS_-prefixed environment
+# variable set by whoever launched gdb.  Nothing here searches for a value it was
+# not given, and there is no second spelling to fall back to -- a name that is
+# almost right must fail, not quietly resolve to something else.  Pass the bare
+# suffix ("AUTO"); the prefix is added here.
+_ENV_PREFIX = "GDBTOOLS_"
 
 
 def _env(name):
-    """An override env var, or None if unset/empty.  `name` may be given either
-    bare ("AUTO") or fully qualified ("GDBTOOLS_AUTO"/"KGDB_AUTO")."""
-    for p in _ENV_PREFIXES:
-        if name.startswith(p):
-            name = name[len(p):]
-            break
-    for p in _ENV_PREFIXES:
-        v = os.environ.get(p + name)
-        if v:
-            return v
-    return None
+    """An injected override, or None if it was not set."""
+    v = os.environ.get(_ENV_PREFIX + name)
+    return v if v else None
 
 
 def _env_int(name):
@@ -180,4 +173,4 @@ def _as_int(v):
 
 # Underscore-prefixed helpers are part of this module's public surface for the
 # rest of the package (`from .runtime import *`), which would otherwise skip them.
-__all__ = ['MASK', 'NAME', '_Ring', 'LOG', 'safe', 'ev', 'evi', 'execstr', 'exec_confirmless', 'reg', 'symval', 'fmt', '_h', 'read_guest_bytes', 'monitor_reg', '_ENV_PREFIXES', '_env', '_env_int', '_as_int']
+__all__ = ['MASK', 'NAME', '_Ring', 'LOG', 'safe', 'ev', 'evi', 'execstr', 'exec_confirmless', 'reg', 'symval', 'fmt', '_h', 'read_guest_bytes', 'monitor_reg', '_ENV_PREFIX', '_env', '_env_int', '_as_int']

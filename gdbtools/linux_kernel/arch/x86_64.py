@@ -59,19 +59,14 @@ def _x86_decomp_offsets(cv):
 
 class X86_64(X86_64Common, KernelArch):
     entry_symbol = "startup_64"
-    expected_entry_pa = 0x1000000
     # arm64 and riscv keep a FIXED physical base under QEMU -kernel (0x40200000 /
     # 0x80200000) and randomize only the virtual base, so a narrow window is right
     # there.  x86 KASLR randomizes the PHYSICAL base as well: the decompressor picks
     # a slot anywhere in usable RAM, and measured boots land at 0x52a00000 and
     # 0x7ba00000 -- both far outside the 256MB this used to allow.  That made every
     # sanity check and every `b *0xLINKVA` adoption fail on x86 under KASLR.
-    phys_window = (0x100000, 0x100000000)
     entry_break_kind = "hw"             # decompressor relocates vmlinux over 0x1000000
     KBASE = 0xFFFFFFFF80000000          # __START_KERNEL_map (config-stable)
-    DECOMP_LOAD_PA = 0x100000           # QEMU -kernel bzImage protected-mode load PA
-                                        # (decompressor startup_32; env GDBTOOLS_X86_DECOMP_PA)
-    # x86 boots via boot_params/zeropage, not a DTB -> no dtb_pointer_reg.
     def _is_va(self, addr):
         return (addr >> 63) & 1 == 1     # high half == kernel map
 
@@ -186,7 +181,7 @@ class X86_64(X86_64Common, KernelArch):
         # to a RANDOM physical base, so the nominal entry PA is wrong and bootbreak
         # misses.  Recover the real base from the decompressor, which loads at a FIXED
         # low PA (0x100000):
-        #   1. break at the decompressor entry (startup_32, DECOMP_LOAD_PA);
+        #   1. break at the decompressor entry (startup_32, $GDBTOOLS_X86_DECOMP_PA);
         #   2. break at startup_64's self-relocation `jmp *%rax` -- %rax = moved_base +
         #      IMM, so moved_base rbx = %rax - IMM;
         #   3. break at extract_kernel (rbx + off), then `finish` -> %rax = the
@@ -203,7 +198,8 @@ class X86_64(X86_64Common, KernelArch):
         jmp_off, lea_imm, ek_off = offs
         load = _env_int("X86_DECOMP_PA")
         if load is None:
-            load = self.DECOMP_LOAD_PA
+            LOG.add("x86 decompressor recovery needs $GDBTOOLS_X86_DECOMP_PA")
+            return None
         if not sess._hbreak_to(load):                       # decompressor entry (fixed)
             return None
         if not sess._hbreak_to((load + jmp_off) & MASK):    # self-relocation jmp *%rax

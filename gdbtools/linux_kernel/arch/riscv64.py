@@ -15,11 +15,8 @@ from .base import KernelArch
 
 class Riscv64(Riscv64Common, KernelArch):
     entry_symbol = "_start"
-    expected_entry_pa = 0x80200000       # QEMU virt: after OpenSBI at 0x80000000 (fallback)
-    phys_window = (0x80200000, 0x81000000)
     entry_break_kind = "sw"              # entry executes in place; sw bp is reliable
     entry_magic = (0x05435352, 0x38)     # RISCV_IMAGE_MAGIC2 "RSC\x05" at _start+0x38
-    ram_scan = (0x80200000, 0x80C00000)
     dtb_pointer_reg = "a1"               # SBI leaves the DTB PA in a1 at _start
     return_reg = "ra"                    # x1; head calls via jal, so ra = ret addr
 

@@ -173,9 +173,11 @@ class Session:
     @safe(default=None)
     def resolve_entry(self):
         """Physical address of the kernel IMAGE BASE (entry_symbol: _text/_start/
-        startup_64).  Sources, high -> low: $GDBTOOLS_ENTRY_PA
-        -> JSON profile entry_pa -> QEMU 'info roms' -> Image-magic scan over the
-        profile/DTB/arch RAM ranges -> arch hint.  Cached."""
+        startup_64).  Sources, high -> low: $GDBTOOLS_ENTRY_PA -> JSON profile
+        entry_pa -> QEMU 'info roms' -> Image-magic scan over the supplied RAM
+        ranges.  None when none of them answered; there is no hint to fall back
+        on, because a hint that is wrong produces a calibrated-looking session in
+        which every address is silently off.  Cached."""
         if self.entry_pa is not None:
             return self.entry_pa
         ovr = _env_int("ENTRY_PA")
@@ -187,7 +189,10 @@ class Session:
             return None
         pa = a.find_entry_pa()
         if pa is None:
-            pa = a.expected_entry_pa
+            print("[%s] the kernel image base was not found in the target, and none "
+                  "was given.  Set $GDBTOOLS_ENTRY_PA or $GDBTOOLS_PROFILE before "
+                  "starting gdb, or run `kearly calibrate <symbol>`." % NAME)
+            return None
         self.entry_pa = pa
         return pa
 
@@ -214,16 +219,15 @@ class Session:
             return True
         return symval("_stext") is not None
 
-    @safe(default=None)
     def _compressed_vmlinux(self):
         """Path to the x86 COMPRESSED kernel (arch/x86/boot/compressed/vmlinux), used
-        to recover the decompressor-randomized physical base under x86 KASLR.  None if
-        absent (e.g. cleaned by the build) -- caller degrades to the nominal entry."""
-        vm = self.vmlinux_path()
-        if not vm:
-            return None
-        cand = os.path.join(os.path.dirname(vm), "arch/x86/boot/compressed/vmlinux")
-        return cand if os.path.exists(cand) else None
+        to recover the decompressor-randomized physical base under x86 KASLR.
+
+        Handed in through $GDBTOOLS_X86_DECOMP_VMLINUX.  It is not derived from the
+        loaded vmlinux: where that file sits relative to the build tree is a fact
+        about the caller's tree layout, not about the kernel, and guessing it means
+        silently analysing the wrong binary when the guess is close but wrong."""
+        return _env("X86_DECOMP_VMLINUX")
 
     @safe(default=False)
     def _hbreak_to(self, pa):
@@ -1674,7 +1678,9 @@ class Session:
                 # this point the kernel is not there, so the scan runs to completion over
                 # all of guest memory and takes minutes.
                 _pc = reg("pc")
-                _need_x86 = _pc is not None and (_pc & MASK) < a.DECOMP_LOAD_PA
+                _dpa = _env_int("X86_DECOMP_PA")
+                _need_x86 = (_pc is not None and _dpa is not None
+                             and (_pc & MASK) < _dpa)
                 if _need_x86:
                     LOG.add("x86: pc=%s below decompressor load -> auto decompressor recovery" % fmt(_pc))
         if _need_x86:
@@ -2694,7 +2700,8 @@ class Session:
             # Leave it uncalibrated and say what to run instead.
             if getattr(a, "key", None) == "x86_64" and self._compressed_vmlinux():
                 _pc = reg("pc")
-                if _pc is not None and (_pc & MASK) < getattr(a, "DECOMP_LOAD_PA", 0):
+                _dpa = _env_int("X86_DECOMP_PA")
+                if _pc is not None and _dpa is not None and (_pc & MASK) < _dpa:
                     LOG.add("catcher: x86 still compressed -- not calibrating from the reset vector")
                     print("[%s] kaslr: the kernel is still compressed at this point, so there is "
                           "nothing to calibrate against yet.  Run `kearly bootbreak` (it recovers "

@@ -14,14 +14,10 @@ class ArchCommon:
     key = "base"
     aliases = ()                 # substrings matched against gdb arch name
     entry_symbol = None          # symbol whose PA == $pc at the first frozen stop
-    expected_entry_pa = None     # PA the QEMU machine loads the entry at (hint)
-    phys_window = (0, MASK)      # plausible physical image range (sanity check)
     entry_break_kind = "hw"      # "sw": entry not overwritten -> sw bp ok (no hw-bp
                                  # dependency); "hw": entry gets relocated/decompressed
                                  # over, so a sw bp there would be clobbered
     entry_magic = None           # (word, offset_from_text): scan RAM for the Image
-    ram_scan = None              # (start,end): header magic to LOCATE the load addr,
-                                 # so we don't hardcode QEMU's load offset
     dtb_pointer_reg = None       # reg holding the DTB PA at entry (arm64 x0/riscv a1)
     return_reg = None            # reg holding a just-called fn's return addr (lr/ra)
     post_mmu_symbols = ()        # virtual landing(s) reached just after the MMU is

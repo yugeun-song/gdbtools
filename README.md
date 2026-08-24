@@ -24,7 +24,7 @@ phys-shifted shadow symbol file, which revives stock gdb and pwndbg alike
 without patching either.
 
 It adds `kearly kp2v kv2p kb kw ksr ksregs kfin kcensus kpt kpgd kpthex koff kx
-kdtb kconnect mmview`, and stays inert until a vmlinux is loaded, so sourcing it
+kdtb mmview`, and stays inert until a vmlinux is loaded, so sourcing it
 globally costs an ordinary session nothing.
 
 Targets arm64, x86_64 and riscv64.
@@ -69,6 +69,42 @@ attach. Boards that QEMU cannot describe take a JSON profile through
 
 `docs/early-boot.md` is the full manual: calibration, MMU regimes, page tables,
 system registers, watchpoints and the crossing catcher.
+
+## Configuration is injected, not discovered
+
+This package operates on what it is handed. It carries no machine constants, it
+does not scan the host for a VM to attach to, and it does not derive a path from
+another path. Whoever launches gdb — a lab script, an editor's debug adapter —
+states the machine; if what they state is wrong, the tool fails and says which
+value was missing rather than substituting a plausible one. A constant like "this
+board boots at 0x40200000" is right until the day it is not, and on that day it
+produces a session that looks calibrated while every address is quietly off.
+
+Everything arrives as a `GDBTOOLS_`-prefixed environment variable set before gdb
+starts. There is no second spelling and no search path.
+
+| variable | what it states |
+| --- | --- |
+| `GDBTOOLS_AUTO` | arm the kernel session on attach: stop hook, shadow symbols, MMU-transition notices. Without it nothing hooks the session and `kearly on` is manual |
+| `GDBTOOLS_KERNEL_ROOT` | the build tree being debugged |
+| `GDBTOOLS_ENTRY_PA` | physical address of the kernel image base. Needed whenever the target cannot report it — always on x86_64, whose decompressor relocates the image so there is no magic to find it by |
+| `GDBTOOLS_SCAN` | `lo:hi` physical range to search for the image magic |
+| `GDBTOOLS_RAM_BASE` | RAM base, as a shorthand for a scan range starting there |
+| `GDBTOOLS_PHYS_WINDOW` | `lo:hi` range the image may plausibly occupy, for the sanity check. Absent, the check is skipped rather than run against some other board's range |
+| `GDBTOOLS_PROFILE` | JSON machine description (see `profiles/`) |
+| `GDBTOOLS_DTB` | device tree blob describing the board |
+| `GDBTOOLS_PRESET` | boot-combination preset: firmware entry symbol and breakpoint kind |
+| `GDBTOOLS_ANCHOR` | calibration anchor symbol, overriding the preset |
+| `GDBTOOLS_BREAK_KIND` | `sw` or `hw` for the entry breakpoint |
+| `GDBTOOLS_X86_KASLR` | recover the decompressor-randomized physical base on attach |
+| `GDBTOOLS_X86_DECOMP_PA` | where the bzImage decompressor is loaded |
+| `GDBTOOLS_X86_DECOMP_VMLINUX` | path to `arch/x86/boot/compressed/vmlinux`, which KASLR recovery reads |
+| `GDBTOOLS_NO_COLOR`, `GDBTOOLS_KDIS_ASCII` | plain output, for terminals that need it |
+
+What the tool still works out for itself is the *target*, not the environment:
+the architecture gdb reports, the load address QEMU names through `monitor info
+roms`, an image magic found in guest RAM, a device tree the bootloader left in
+memory. Those are readings, not guesses.
 
 ## Dependencies
 
