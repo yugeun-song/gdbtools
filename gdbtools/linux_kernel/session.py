@@ -23,6 +23,8 @@ class Session:
         self.arch = None
         self.offset = None          # PA - VA (mod 2^64)
         self.entry_pa = None        # resolved kernel entry physical address (cached)
+        self._entry_recovered = False  # entry_pa came from x86 decompressor recovery
+                                       # (already the ELF entry PA, not the image base)
         self.shadow_addr = None     # PA where the shadow's text is loaded
         self.vmlinux = None
         self.enabled = False
@@ -323,6 +325,31 @@ class Session:
         if self.offset is None:
             return None
         return (resolved - self.offset) & MASK
+
+    @safe(default=None)
+    def _slide_via_pc_pa(self):
+        # Virtual-regime KASLR anchor that needs no kernel global populated yet
+        # (unlike kimage_voffset / kernel_map.virt_addr, which are 0 just after the
+        # crossing).  Translate the live $pc to its true physical address with a
+        # hardware page-table walk (slide-independent, NEVER resumes the CPU), then
+        # use the fixed-load identity PA(byte)=linkVA(byte)+offset to close the loop
+        # non-circularly:  slide = pc - linkVA(pc) = pc - (PA(pc) - offset).
+        # Fixed physical load only (arm64/riscv); x86 never reaches here -- its
+        # detect resolves first, and its base recovery runs while pc is physical.
+        a = self.ensure_arch()
+        if a is None or self.offset is None:
+            return None
+        pc = reg("pc")
+        if pc is None or not a._is_va(pc):          # high-VA regime only
+            return None
+        pw = a.pagewalk(pc)                          # monitor-xp walk; no CPU resume
+        if not pw or pw.get("leaf_pa") is None:
+            return None
+        pa = pw["leaf_pa"] & MASK
+        sym = self.symbolize(pa)                     # pa -> link VA (slide 0) -> symbol
+        if not sym or sym[2] is None:                # not in-image -> defer, no guess
+            return None
+        return (pc - pa + self.offset) & MASK
 
     @safe(default=None)
     def _loc_resolve(self, loc):
@@ -1700,15 +1727,30 @@ class Session:
                 self._shadow_unload()
                 self._kaslr_pending = None
                 self.entry_pa = _b               # overwrite the nominal (auto-cached) PA
+                self._entry_recovered = True     # _b is the ELF entry PA, not image base
                 print("[%s] x86 KASLR: recovered main-kernel phys base %s via the "
                       "decompressor; breaking there." % (NAME, fmt(_b)))
             else:
                 print("[%s] x86 KASLR: decompressor recovery unavailable (compressed "
                       "vmlinux missing?); trying nominal entry -- pass --entry-pa if it misses."
                       % NAME)
-        base = self.resolve_entry()              # image-base (entry_symbol) PA
+        base = self.resolve_entry()              # image base (_text load address) PA
+        # x86_64: $GDBTOOLS_ENTRY_PA / info-roms report the IMAGE BASE (where the
+        # loader places _text), but the CPU enters at the ELF entry point,
+        # startup_64.  Older kernels emit startup_64 at _text, so the two coincide;
+        # newer ones place it in .init.text, well above _text, and a break at the
+        # image base is never reached.  Shift the base to the entry by its link
+        # offset from _text (a build constant, read from vmlinux, so a rebuild that
+        # moves startup_64 needs no reconfiguration).  Skipped when the base was
+        # RECOVERED (that value is already the ELF entry PA) and a no-op on
+        # arm64/riscv, whose load address IS the entry symbol.
+        if a.key == "x86_64" and base is not None and not self._entry_recovered:
+            _e, _t = symval(a.entry_symbol), symval("_text")
+            if _e is not None and _t is not None and _e != _t:
+                base = (base + (_e - _t)) & MASK
+                self.entry_pa = base
         anchor = self.current_anchor()
-        # break target PA = image_base_PA + (&anchor - &entry_symbol)
+        # break target PA = entry_PA + (&anchor - &entry_symbol)
         break_pa = base
         if base is not None and anchor and a.entry_symbol and anchor != a.entry_symbol:
             d, e = symval(anchor), symval(a.entry_symbol)
@@ -2006,7 +2048,7 @@ class Session:
         # kaslr_slide == 0); apply_kaslr re-arms kb groups itself.
         if m == "virtual" and self.kaslr_slide == 0 and self.offset is not None \
                 and not self._in_advance:
-            _s = self.detect_kaslr_slide()
+            _s = self.detect_kaslr_slide() or self._slide_via_pc_pa()
             if _s:
                 self.apply_kaslr(_s)
         # Otherwise, once relocated, still correct any kb IMG armed before the slide.
@@ -2885,6 +2927,10 @@ class Session:
             s2 = self._advance_to_crossing()      # frozen boot: advance to the crossing, read slide
             if s2 is not None:
                 s = s2
+        if not s:
+            s3 = self._slide_via_pc_pa()          # fresh high-VA attach: derive from pc's PA
+            if s3 is not None:
+                s = s3
         if s is None:
             a = self.ensure_arch()
             arch = a.key if a else "?"
