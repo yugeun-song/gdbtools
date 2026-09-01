@@ -12,6 +12,7 @@ has to be a kernel.
 | `sym` | name the symbol at an address |
 | `stackscan` | read the stack word by word and name every value that resolves, for when `backtrace` cannot work |
 | `chain` | follow a pointer chain, bounded and cycle-guarded |
+| `enumvals` | list every value of a C/C++ enum as this build defines them, decimal by default or `/x` for hex |
 
 **`gdbtools/linux_kernel/`** is a Linux early-boot debugger. In `head.S`, before
 the MMU is switched to the kernel's high mapping, `$pc` and pointers hold
