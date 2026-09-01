@@ -1246,6 +1246,16 @@ so "observed == expected" holds even if the slide is wrong. Two witnesses outsid
   restore it — follow it with `cfgdis`'s symbol+offset disassembly and `stepi`.
   On arm64 v4.6 the same code is in `.text` so line info is normal (head.S:772/788/811).
 
+- **pwndbg's own `context` can abort gdb at a post-early-boot kernel-thread stop (e.g. `kernel_init`) on some gdb/pwndbg builds.**
+  At such a stop, pwndbg's register-context render trips gdb's `inferior_thread` assertion (`current_thread_ != nullptr`) and aborts gdb
+  (core dumped). It reproduces with pwndbg alone (this plugin disabled) and with the running thread explicitly selected, so it is an upstream
+  pwndbg-vs-gdb issue, not this tool; being a C-level assertion it cannot be caught from Python, so this tool cannot guard it the way it guards
+  the QEMU debug-read SEGV or the version-tuple exception. gdbtools' own views (the `kgdb`/`flow` context sections, `kearly where`, `kcensus`,
+  `mmview`) and plain gdb (`p`/`x`/`bt`/`info`) all work at those stops. Workaround: narrow pwndbg's sections
+  (`set context-sections 'kgdb flow'`) or use the tool's commands there. Measured on mainline v7.2 (gdb 17.2); early boot up to and including
+  `start_kernel` renders normally, and the whole memory lifecycle (head.S -> MMU enable -> start_kernel -> setup_arch -> mm_core_init ->
+  kmem_cache_init/SLUB -> kernel_init) walks in a single session on arm64, riscv64 and x86_64 with `kb`/`kw` and the tool's own views.
+
 ---
 
 ## Cross-validation (direct boot, measured)
