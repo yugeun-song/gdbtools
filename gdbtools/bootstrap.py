@@ -69,19 +69,10 @@ def _register():
     if taken:
         print("[%s] took over existing gdb command(s): %s"
               % (NAME, ", ".join(sorted(set(taken)))))
-    # pwndbg probes the memory map by reading page-aligned addresses; one that
-    # translates outside RAM crashes QEMU's debug-read path.  Wrap that funnel so
-    # an unmapped probe fails the ordinary way instead of killing the VM.
-    SAFEPROBE.install()
-    # pwndbg's krelease() throws 'Linux version tuple not found' on the fragile early
-    # start_kernel banner read and takes the whole context down with it -- make it
-    # return None (unknown) instead, which pwndbg's own callers already handle.
-    install_kernel_guards()
 
 
 @safe()
 def _autostart():
-    a = SESSION.ensure_arch()
     # AUTO-enable (stop hook + shadow + banner + per-stop sysreg line) ONLY when
     # launched via the kernel runner, which sets $GDBTOOLS_AUTO.  A plain
     # `gdb vmlinux` must NOT auto-attach: the commands are still registered (type
@@ -90,6 +81,7 @@ def _autostart():
     if not _env("AUTO"):
         LOG.add("not autostarting (no $GDBTOOLS_AUTO; plain gdb -> manual `kearly on`)")
         return
+    a = SESSION.ensure_arch()
     if a is not None and SESSION.looks_like_kernel():
         SESSION.enable()
         SESSION.load_overrides()

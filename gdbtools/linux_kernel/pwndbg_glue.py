@@ -180,9 +180,21 @@ class _SafeProbe:
         except Exception:
             cls = None
         if cls is not None and callable(getattr(cls, "read_memory", None)):
-            self._mod, self._orig = cls, cls.read_memory
+            # Stash the true original once on the class so an edit/re-source cycle
+            # (which rebuilds this module and this instance) recovers it and never
+            # wraps a wrapper. Strip an orphaned wrapper from a prior source first.
+            orig = getattr(cls, "_gdbtools_orig_read_memory", None)
+            if orig is None:
+                orig = cls.read_memory
+                try:
+                    cls._gdbtools_orig_read_memory = orig
+                except Exception:
+                    pass
+            elif getattr(cls.read_memory, "_gdbtools_safeprobe", False):
+                cls.read_memory = orig
+            self._mod, self._orig = cls, orig
             guard = self                       # SAFEPROBE instance, closed over
-            _orig = cls.read_memory
+            _orig = orig
             def _wrapped(inferior, address, size, partial=False, _g=guard, _o=_orig):
                 # Bound as a CLASS method: `inferior` is the GDBProcess self.
                 #
@@ -215,6 +227,7 @@ class _SafeProbe:
                     if r is not None:
                         return r
                     raise
+            _wrapped._gdbtools_safeprobe = True
             cls.read_memory = _wrapped
             self.installed = True
             self._level = "GDBProcess.read_memory"
@@ -230,7 +243,14 @@ class _SafeProbe:
                 return False
         if not callable(getattr(_m, "read", None)):
             return False
-        self._mod, self._orig = _m, _m.read
+        orig = getattr(_m, "_gdbtools_orig_read", None)
+        if orig is None:
+            orig = _m.read
+            try:
+                _m._gdbtools_orig_read = orig
+            except Exception:
+                pass
+        self._mod, self._orig = _m, orig
         _m.read = self._read
         self.installed = True
         self._level = "%s.read" % _m.__name__
@@ -242,9 +262,22 @@ class _SafeProbe:
         if self.installed and self._mod is not None and self._orig is not None:
             lvl = getattr(self, "_level", "")
             if lvl == "GDBProcess.read_memory":
-                self._mod.read_memory = self._orig
+                cls = self._mod
+                orig = getattr(cls, "_gdbtools_orig_read_memory", None) or self._orig
+                if getattr(cls.read_memory, "_gdbtools_safeprobe", False):
+                    cls.read_memory = orig
+                try:
+                    del cls._gdbtools_orig_read_memory
+                except Exception:
+                    pass
             else:
-                self._mod.read = self._orig
+                m = self._mod
+                orig = getattr(m, "_gdbtools_orig_read", None) or self._orig
+                m.read = orig
+                try:
+                    del m._gdbtools_orig_read
+                except Exception:
+                    pass
             LOG.add("safeprobe: restored %s" % lvl)
         self.installed = False
 
@@ -561,5 +594,22 @@ def install_kernel_guards():
     return installed
 
 
+def uninstall_kernel_guards():
+    try:
+        import pwndbg.aglib.kernel as _k
+    except Exception:
+        return False
+    restored = False
+    for name in ("krelease", "kversion"):
+        orig = getattr(getattr(_k, name, None), "_kgdb_orig", None)
+        if orig is None:
+            continue
+        setattr(_k, name, orig)
+        restored = True
+    if restored:
+        LOG.add("kguard: krelease/kversion restored")
+    return restored
+
+
 __all__ = ['_Pwndbg', 'PWN', '_SafeProbe', 'SAFEPROBE', 'context_kgdb', 'context_flow',
-           'install_kernel_guards']
+           'install_kernel_guards', 'uninstall_kernel_guards']

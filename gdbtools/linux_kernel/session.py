@@ -6,7 +6,8 @@ import os
 import re
 from ..common.runtime import *
 from .physmem import *
-from .pwndbg_glue import PWN, SAFEPROBE, context_kgdb, context_flow
+from .pwndbg_glue import (PWN, SAFEPROBE, context_kgdb, context_flow,
+                          install_kernel_guards, uninstall_kernel_guards)
 from .target import TARGET
 from ..common.arch import ARCHES, detect_arch, _arch_name
 from .presets import PRESETS
@@ -654,7 +655,7 @@ class Session:
         that is genuinely undecided until the crossing shows a `?`, and it says what
         it is waiting for."""
         disabled = self._kaslr_disabled()
-        tag = "  (KASLR 비활성화)" if disabled else ""
+        tag = "  (KASLR disabled)" if disabled else ""
         if self.kaslr_slide:
             return "0x%x%s" % (self.kaslr_slide, tag)
         if disabled:
@@ -2989,6 +2990,14 @@ class Session:
             gdb.events.stop.connect(self.on_stop)
             self._hooked = True
         self.enabled = True
+        # pwndbg probes the memory map by reading page-aligned addresses; one that
+        # translates outside RAM crashes QEMU's debug-read path.  Wrap that funnel so
+        # an unmapped probe fails the ordinary way instead of killing the VM.
+        SAFEPROBE.install()
+        # pwndbg's krelease() throws 'Linux version tuple not found' on the fragile early
+        # start_kernel banner read and takes the whole context down with it -- make it
+        # return None (unknown) instead, which pwndbg's own callers already handle.
+        install_kernel_guards()
         self._install_pwndbg_section()       # render badge+sysregs inside pwndbg ctx
         self._install_kdisasm_section()      # arrowed disasm next to SOURCE(CODE)
         self._quiet_pagescan()               # silence the useless auto-explore-pages spam
@@ -3057,6 +3066,9 @@ class Session:
         self._remove_pwndbg_section()
         self._remove_kdisasm_section()
         self._shadow_unload()
+        if SAFEPROBE.mode != "on":
+            SAFEPROBE.uninstall()
+        uninstall_kernel_guards()
 
 
 try:
