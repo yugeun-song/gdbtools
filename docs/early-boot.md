@@ -1,32 +1,34 @@
-# gdbtools — head.S(부팅 극초기) 커널 디버깅 도구
+# gdbtools — head.S (earliest boot) kernel debugging tools
 
-`gdbtools.py`는 QEMU gdbstub에 붙은 호스트 gdb(+pwndbg) 위에서 동작하는 커스텀
-플러그인이다. `source` 대상은 이 파일 하나 그대로이고, 구현은 옆의 `kgdb/` 패키지에 들어 있다
-(`runtime` → `physmem` → `pwndbg_glue`/`dtb`/`target` → `arch_*` → `session` → `commands`/`cfgdis`
-→ `bootstrap` 순의 의존 그래프; `state`가 헬퍼↔세션 순환을 끊는다). MMU가 켜지기 전 `head.S` 구간에서는 `$pc`·포인터가 **물리주소**라, 가상주소로
-링크된 gdb 심볼표로는 아무것도 안 풀린다(`info symbol`·pwndbg `telescope`/`context` 무력화).
-이 도구는 런타임에 phys↔virt 오프셋을 **보정(calibration)** 해 물리주소를 다시 심볼로 풀고,
-페이지테이블 워크·메모리 레이아웃·레지스터 전수조사 같은 커널 전용 편의 기능을 얹는다.
+`gdbtools.py` is a custom plugin that runs on top of a host gdb (+pwndbg)
+attached to a QEMU gdbstub. The `source` target is this one file as-is, and the
+implementation lives in the sibling `kgdb/` package (dependency graph:
+`runtime` → `physmem` → `pwndbg_glue`/`dtb`/`target` → `arch_*` → `session` → `commands`/`cfgdis`
+→ `bootstrap`; `state` breaks the helper↔session cycle). In the `head.S` region before the MMU is on, `$pc` and pointers are **physical addresses**, so
+the gdb symbol table linked at virtual addresses resolves nothing (`info symbol`, pwndbg `telescope`/`context` are dead).
+This tool **calibrates** the phys↔virt offset at runtime to resolve physical addresses back to symbols,
+and adds kernel-only conveniences such as page-table walks, memory layout, and a full register census.
 
-- pwndbg는 **라이브러리로만** 쓰고 **개조하지 않는다**. pwndbg가 없어도 평문으로 그대로 동작한다.
-- arm64 · x86_64 · riscv64 3종, 커널 버전 무관. 모든 명령이 **MMU 꺼진 물리단계부터 런타임까지** 동작한다.
-- 어떤 gdb 호출이 실패해도 no-op/None으로 degrade해 **메인 gdb·리모트 세션을 절대 깨지 않는다**.
+- pwndbg is used **as a library only** and is **never modified**. It works in plain text even without pwndbg.
+- arm64 · x86_64 · riscv64, kernel-version independent. Every command works **from the MMU-off physical stage through to runtime**.
+- If any gdb call fails it degrades to a no-op/None, so it **never breaks the main gdb or the remote session**.
 
-이 문서의 모든 출력은 QEMU를 실제로 부팅·접속해 **직접 캡처한 실측 텍스트**다(색상코드 제거).
+Every output in this document is **captured directly from a real run** by actually booting and attaching to QEMU (color codes stripped).
 
 ---
 
-## 실행 방법
+## How to run
 
-이 도구는 gdb 안에서 도는 파이썬 확장이다. VM을 띄우는 스크립트나 gdb를 대신
-실행해 주는 런처는 여기에 들어 있지 않다. 필요한 것은 `gdbtools.py`를 `source`
-하는 것뿐이고, `setup.sh`를 한 번 돌려두면 gdb가 시작할 때 알아서 읽는다.
+This tool is a Python extension that runs inside gdb. The script that launches
+the VM, and any launcher that runs gdb for you, are not included here. All you
+need is to `source` `gdbtools.py`, and once you run `setup.sh` once, gdb reads it
+automatically at startup.
 
 ```bash
-# 터미널 1: 프리즈된 VM (-S, gdbstub 대기)
+# terminal 1: frozen VM (-S, waiting on the gdbstub)
 qemu-system-aarch64 -M virt -cpu cortex-a72 -kernel Image -S -gdb tcp::1235 ...
 
-# 터미널 2
+# terminal 2
 aarch64-linux-gnu-gdb vmlinux
 (gdb) target remote :1235
 (gdb) kearly on
@@ -34,92 +36,93 @@ aarch64-linux-gnu-gdb vmlinux
 (gdb) kearly status
 ```
 
-매번 치기 싫으면 gdb를 띄우기 전에 `GDBTOOLS_AUTO=1`을 내보내면 된다. 접속
-시점에 위 세 줄이 자동으로 돌고, stop hook과 shadow 심볼, MMU 전환 안내가 함께
-켜진다. 커널이 아닌 타깃에서는 아무 일도 일어나지 않는다.
+If you would rather not type it every time, export `GDBTOOLS_AUTO=1` before
+starting gdb. At attach time the three lines above run automatically, and the
+stop hook, shadow symbols, and MMU-transition notices come up with them. Nothing
+happens on a non-kernel target.
 
-머신 정보가 필요한 보드(QEMU가 아닌 실물 등)는 `$GDBTOOLS_PROFILE`로 JSON
-프로파일을, `$GDBTOOLS_DTB`로 DTB를 지정한다. 세션 도중에는 `kearly profile
-FILE` / `kearly dtb FILE`로도 된다.
+Boards that need machine information (a real board rather than QEMU, etc.) take a
+JSON profile through `$GDBTOOLS_PROFILE` and a DTB through `$GDBTOOLS_DTB`. Mid
+session you can also use `kearly profile FILE` / `kearly dtb FILE`.
 
-**`kearly bootbreak`가 하는 일**
+**What `kearly bootbreak` does**
 
-5. **접속 + 엔트리 진행 + 캘리브레이션** — `target remote :PORT` 후 기본으로 `kearly bootbreak`(리셋/펌웨어를
-   지나 커널 엔트리까지 진행 + phys↔virt 오프셋 보정) → `kearly status`를 자동 실행.
-6. **자동 훅 활성** — `$GDBTOOLS_AUTO`를 세팅해 stop hook·shadow 심볼·MMU on/off 전환 안내가 켜진다
-   (plain `gdb vmlinux`에는 절대 자동부착하지 않는다 — 이 신호가 있을 때만).
+5. **attach + advance to the entry + calibrate** — after `target remote :PORT`, by default `kearly bootbreak` (advance
+   past reset/firmware to the kernel entry + calibrate the phys↔virt offset) → then `kearly status` runs automatically.
+6. **arm the automatic hooks** — setting `$GDBTOOLS_AUTO` turns on the stop hook, shadow symbols, and the MMU on/off transition notices
+   (it never auto-attaches to a plain `gdb vmlinux` — only when this signal is present).
 
-접속 직후 배너가 전체 명령을 나열한다:
+Right after attach, a banner lists all the commands:
 
 ```
 [kgdb] early-boot symbolizer loaded (commands: kearly | kp2v | kv2p | sym |
        stackscan | ksr | ksregs | kcensus | kpt | kpgd | koff | mmview/memlayout | kfin | chain | cfgdis | kdtb)
 ```
 
-**안전 계약** — ① 아무 것도 죽이지 않는다(no pkill/fuser, 떠 있는 VM·세션 불가침). ② 스텁이 없으면
-접속을 강행해 gdb를 매달지 않고, 심볼·도구만 로드한 채 **살아있는 인터랙티브 프롬프트로 떨어진다**
-(나중에 `target remote :기본포트`를 수동으로 치면 됨). ③ 전역 gdb/pwndbg 설정은 건드리지 않는다.
+**Safety contract** — (1) it kills nothing (no pkill/fuser; running VMs and sessions are untouchable). (2) if there is no stub it does not
+force the connection and hang gdb; it loads only the symbols and tools and **drops to a live interactive prompt**
+(you can type `target remote :DEFAULT_PORT` by hand later). (3) it does not touch global gdb/pwndbg settings.
 
-**주요 옵션**
+**Main options**
 
-| 옵션 | 효과 |
+| option | effect |
 |---|---|
-| `target remote :PORT` | gdbstub 접속 |
-| `-p, --port N` | gdbstub 포트 강제 |
-| `--gdb BIN` | gdb 바이너리 강제 |
-| `--no-connect` | 심볼·도구만 로드, 접속 안 함 |
-| `--no-calibrate` | 접속만, `kearly bootbreak` 생략 |
-| `--earliest` (`--raw`) | head.S 앞(리셋 벡터/펌웨어)에 멈춤 — 나중에 `kearly bootbreak`로 진행 |
-| `-x, --ex CMD` | 접속 후 임의 gdb 명령 실행(반복 가능) |
-| `--preset NAME` | 부팅 조합 프리셋(arm64-uefi, x86-pvh, riscv-uefi …) |
-| `--entry-pa` / `--anchor` / `--break-kind` / `--ram-base` / `--scan` | 자동탐지 안 되는 조합 수동 지정 |
-| `--profile FILE.json` / `--dtb FILE` | 비-QEMU 보드 머신 기술자 주입 |
+| `target remote :PORT` | connect to the gdbstub |
+| `-p, --port N` | force the gdbstub port |
+| `--gdb BIN` | force the gdb binary |
+| `--no-connect` | load symbols and tools only, do not connect |
+| `--no-calibrate` | connect only, skip `kearly bootbreak` |
+| `--earliest` (`--raw`) | stop before head.S (reset vector/firmware) — advance later with `kearly bootbreak` |
+| `-x, --ex CMD` | run an arbitrary gdb command after connecting (repeatable) |
+| `--preset NAME` | boot-combination preset (arm64-uefi, x86-pvh, riscv-uefi …) |
+| `--entry-pa` / `--anchor` / `--break-kind` / `--ram-base` / `--scan` | manually specify a combination that is not auto-detected |
+| `--profile FILE.json` / `--dtb FILE` | inject a machine descriptor for a non-QEMU board |
 
-> 요약: **프리즈된 VM에 붙어 `kearly bootbreak` 한 줄** 이면, 엔트리 진행부터
-> vmlinux+도구 로드, 엔트리까지 진행, 캘리브레이션, 자동 훅까지 끝난다. 그 다음부터 아래 명령들을 친다.
+> Summary: **attach to a frozen VM and type the single line `kearly bootbreak`**, and everything from advancing the entry,
+> loading vmlinux+tools, advancing to the entry, calibration, and the automatic hooks is done. From there you type the commands below.
 
 ---
 
-## 명령 오버뷰
+## Command overview
 
-| 명령 | 한 줄 요약 |
+| command | one-line summary |
 |---|---|
-| `kearly bootbreak` | 커널 엔트리까지 진행 + phys↔virt 오프셋 캘리브레이션 ($GDBTOOLS_AUTO 이면 자동 실행) |
-| `kearly status` / `kearly mmu` | arch·오프셋·맵·MMU on/off·설정 상태 |
-| `kearly overmmu [SYM]` | MMU-enable 경계를 안전하게 통과(가상 랜딩에 임시 bp + continue) |
-| `kearly steplock on\|off\|auto` | MMU off 동안 싱글스텝 시 다른 코어 동결(SMP 소음 제거) |
-| `kearly saferender warn\|on\|off\|auto` | arm64 pwndbg 에뮬레이션 디스어셈 SIGABRT 가드(`on/auto`=`set emulate off`, `kearly off` 시 복원). **기본 `auto`**가 arm64에서 자동 차단; `off`=즉시 복원, `warn`=경고만 |
-| `kearly bpfix <on\|off>` | dual 물리+가상 브레이크 정리(선택): **가상 위치는 항상 켜둠**(MMU-on 코드가 발화), MMU-on일 때 잠자는 물리 위치만 끔. **기본 off** — QEMU SW 브레이크는 가상 PC 매칭이라 네이티브 dual로도 걸림 |
-| `kearly kaslr [auto\|off\|status\|<hex>]` | KASLR 슬라이드 자동 감지 후 `symbol-file -o`로 전 심볼을 런타임 VA로 재배치 → `b SYM`이 KASLR에서도 걸림. `auto`: 이미 읽을 수 있으면 전역(`kimage_voffset`/`kernel_map.virt_addr`) 리드, 아니면(콜드 프로즌) **arch별 물리→고VA 크로싱 앵커**까지 진행해 전이 레지스터에서 slide를 읽는다(start_kernel 이전에 정지 → 이어서 `b start_kernel`이 걸림). `$GDBTOOLS_X86_KASLR=1`이면 자동 실행. **CPU를 움직이는 건 `auto`뿐** — 인자 없는 `kearly kaslr`은 usage와 현재 slide만 출력하고 아무것도 재개하지 않는다. `auto`는 이미 크로싱 위에 정지해 있어도 재진입 안전(계속 진행하지 않고 그 자리에서 slide를 읽는다). **대개 직접 칠 필요가 없다** — slide 미상일 때 고VA를 겨냥한 브레이크/워치포인트를 걸면 툴이 크로싱에 캐처를 자동 무장해, `b start_kernel` + `continue`만으로 걸린다(아래 11절) |
-| `kb SYM \| *ADDR \| FILE:LINE` | **regime 인지 브레이크(whitelist 없음)**: 심볼을 불변 물리주소 `PA(S)=linkVA+offset`과 런타임 VA `IMG(S)=linkVA+slide` 양쪽에 HW 브레이크로 건다. MMU-off/idmap 실행(head.S·pi·secondary·cpu_resume)은 PA가, 고VA 실행(start_kernel·정상가동 코드)은 IMG가 발화 — 실행 regime이 맞는 쪽만 걸리고 반대편은 사문(死文)이라 안 맞는다. slide가 나중에 알려지면 IMG는 자동 재무장 |
-| `kw [-r\|-a] SYM \| *ADDR [SIZE]` | **regime 인지 워치포인트** — `kb`의 데이터판. 커널 전역은 MMU-off/idmap에서는 물리주소로, 고VA 가동 뒤에는 `linkVA+slide`로 접근되므로 `watch SYM` 하나로는 크로싱 반대편이 사각이 된다. `kw`는 `PA(S)`와 `IMG(S)` 양쪽에 HW 워치포인트를 걸고, slide가 확정되면 IMG를 자동 재무장한다. `-r`=rwatch, `-a`=awatch. **HW 슬롯을 2개 소비** — 실기 arm64 코어는 보통 4개뿐이고 QEMU TCG는 더 너그럽다(6개 실측 수용). 슬롯을 채우는 건 목적이 아니므로 필요한 만큼만 걸 것 |
-| `kearly census off\|compact\|full` | 아래 `kcensus`를 매 stop 패널에 상주 표시할지 토글 |
-| `kearly chaindepth N` | 텔레스코프(체인) 깊이 조절 — 항상 유한·순환감지 |
-| `kp2v ADDR` / `kv2p ADDR` | 물리↔가상 변환 |
-| `sym ADDR` | 물리·가상 주소 → 커널 심볼 |
-| `stackscan [N]` | 스택에서 코드 포인터를 찾아 심볼화(backtrace 죽은 head.S용) |
-| `ksr NAME` / `ksregs` | sysreg 1개 / 핵심 sysreg 일괄 덤프(+디코드) |
-| **`kcensus`** | **head.S+호출체인이 건드리는 모든 제어/시스템 레지스터**를 값·디코드와 함께 전수 나열 |
-| **`kpt [VA] [hex]`** | **하드웨어 페이지테이블 워크** — L0~L3 / PML4~PT / Sv39-57 (`hex`=각 레벨 디스크립터의 raw LE 바이트도 표시) |
-| **`kpgd [PA] [N]`** | 최상위(또는 지정) 페이지 디렉토리의 비어있지 않은 엔트리 덤프 |
-| **`kpthex [PA] [N\|full]`** | 페이지테이블 엔트리를 **바이트 단위 hex 뷰**로(엔트리별 8바이트 분해; `full`=4KB xxd 덤프). 물리 리드라 MMU on 뒤에도 동작 |
-| **`koff [SYM]`** | **왜 런타임 주소 ≠ vmlinux ELF(nm) 값** — MMU on/off를 가르는 CPU 플래그·레지스터·`$pc`를 단서로, ELF값-vs-현재주소 offset 요약 |
-| **`mmview` / `memlayout [all\|noidmap]`** | **커널용 vmmap** — 심볼 랜드마크 + 라이브 ptdump |
-| `kfin` | CFI 없는 head.S용 `finish` 대체 |
-| `chain [ADDR] [N]` | N워드 텔레스코프(물리/가상 인지, 심볼화) |
-| **`cfgdis [ascii\|mono] [WHAT]`** | **분기 화살표 디스어셈블** — radare2 `pdf`처럼 화면 안 점프마다 좌측 여백에 중첩 화살표(출발·도착 길이 정렬). arch 자동 판별, 호출 제외, 물리·가상 모두 동작. run-gdb 접속 시 context에 `flow` 섹션 자동 |
-| **`kdtb [옵션] [ADDR]`** | **라이브 FDT 전체 덤프** — 헤더·메모리 예약 블록·모든 노드·모든 속성을 DTS 형태로, 잘라내기 없이. 주소는 `initial_boot_params`에서 자동 탐색(MMU 상태별 후보를 순서대로 매직 검사). 옵션: `--header` `--rsv` `--tree` `--path P` `--grep RE` `--hex` `--terse` `--phys` `--save FILE` `--stats`. 외부 도구 없이 gdb 안에서 `dtc -I dtb -O dts`와 같은 결과 |
+| `kearly bootbreak` | advance to the kernel entry + calibrate the phys↔virt offset (runs automatically if $GDBTOOLS_AUTO) |
+| `kearly status` / `kearly mmu` | arch · offset · map · MMU on/off · configuration state |
+| `kearly overmmu [SYM]` | cross the MMU-enable boundary safely (temp bp at the virtual landing + continue) |
+| `kearly steplock on\|off\|auto` | freeze the other cores while single-stepping during MMU off (removes SMP noise) |
+| `kearly saferender warn\|on\|off\|auto` | arm64 pwndbg emulation-disassembly SIGABRT guard (`on/auto`=`set emulate off`, restored on `kearly off`). **Default `auto`** blocks it automatically on arm64; `off`=restore immediately, `warn`=warn only |
+| `kearly bpfix <on\|off>` | tidy up the dual physical+virtual breakpoints (optional): the **virtual location is always kept on** (MMU-on code fires it), only the physical location that sleeps while MMU-on is turned off. **Default off** — a QEMU SW breakpoint matches on the virtual PC, so a native dual works too |
+| `kearly kaslr [auto\|off\|status\|<hex>]` | auto-detect the KASLR slide then relocate every symbol to its runtime VA via `symbol-file -o` → `b SYM` fires even under KASLR. `auto`: if it is already readable, read the globals (`kimage_voffset`/`kernel_map.virt_addr`); otherwise (cold frozen) advance to the **arch-specific phys→high-VA crossing anchor** and read the slide from the transition registers (stops before start_kernel → a following `b start_kernel` then fires). Runs automatically if `$GDBTOOLS_X86_KASLR=1`. **Only `auto` moves the CPU** — a bare `kearly kaslr` with no argument only prints usage and the current slide and resumes nothing. `auto` is re-entry safe even when already stopped on the crossing (it reads the slide in place rather than continuing). **You usually do not need to type it yourself** — when the slide is unknown, setting a breakpoint/watchpoint aimed at a high VA makes the tool auto-arm a catcher on the crossing, so `b start_kernel` + `continue` alone catches it (section 11 below) |
+| `kb SYM \| *ADDR \| FILE:LINE` | **regime-aware breakpoint (no whitelist)**: sets HW breakpoints on both the invariant physical address `PA(S)=linkVA+offset` and the runtime VA `IMG(S)=linkVA+slide`. MMU-off/idmap execution (head.S · pi · secondary · cpu_resume) fires PA, high-VA execution (start_kernel · normal running code) fires IMG — only the one whose execution regime matches fires; the other is dead code and does not match. IMG auto-re-arms once the slide becomes known |
+| `kw [-r\|-a] SYM \| *ADDR [SIZE]` | **regime-aware watchpoint** — the data counterpart of `kb`. A kernel global is accessed by physical address in MMU-off/idmap and by `linkVA+slide` once running at high VA, so a single `watch SYM` blinds the far side of the crossing. `kw` sets HW watchpoints on both `PA(S)` and `IMG(S)`, and auto-re-arms IMG once the slide is fixed. `-r`=rwatch, `-a`=awatch. **Consumes 2 HW slots** — a real arm64 core usually has only 4, while QEMU TCG is more generous (6 observed to be accepted). Filling slots is not the goal, so set only as many as you need |
+| `kearly census off\|compact\|full` | toggle whether `kcensus` below is kept in the panel at every stop |
+| `kearly chaindepth N` | adjust the telescope (chain) depth — always finite, with cycle detection |
+| `kp2v ADDR` / `kv2p ADDR` | physical↔virtual translation |
+| `sym ADDR` | physical/virtual address → kernel symbol |
+| `stackscan [N]` | find code pointers on the stack and symbolize them (for head.S where backtrace is dead) |
+| `ksr NAME` / `ksregs` | one sysreg / a batch dump of the core sysregs (+decode) |
+| **`kcensus`** | enumerate **every control/system register that head.S and its call chain touch**, with value and decode |
+| **`kpt [VA] [hex]`** | **hardware page-table walk** — L0~L3 / PML4~PT / Sv39-57 (`hex`=also show the raw LE bytes of each level's descriptor) |
+| **`kpgd [PA] [N]`** | dump the non-empty entries of the top-level (or the given) page directory |
+| **`kpthex [PA] [N\|full]`** | show page-table entries as a **byte-level hex view** (per-entry 8-byte breakdown; `full`=4KB xxd dump). Reads physically, so it works even after the MMU is on |
+| **`koff [SYM]`** | **why the runtime address ≠ the vmlinux ELF (nm) value** — using the CPU flags/registers/`$pc` that split MMU on/off as clues, summarize the ELF-value-vs-current-address offset |
+| **`mmview` / `memlayout [all\|noidmap]`** | **vmmap for the kernel** — symbol landmarks + live ptdump |
+| `kfin` | a `finish` replacement for CFI-less head.S |
+| `chain [ADDR] [N]` | N-word telescope (physical/virtual aware, symbolized) |
+| **`cfgdis [ascii\|mono] [WHAT]`** | **branch-arrow disassembly** — like radare2's `pdf`, nested arrows in the left margin for every on-screen jump (source/destination lengths aligned). Auto-detects arch, excludes calls, works in both physical and virtual. A `flow` section is added to the context automatically when attached via run-gdb |
+| **`kdtb [options] [ADDR]`** | **full live FDT dump** — header · memory reservation block · every node · every property in DTS form, with no truncation. The address is found automatically from `initial_boot_params` (candidates per MMU state are magic-checked in order). Options: `--header` `--rsv` `--tree` `--path P` `--grep RE` `--hex` `--terse` `--phys` `--save FILE` `--stats`. The same result as `dtc -I dtb -O dts`, inside gdb with no external tool |
 
-> 순수 gdb 명령어만 쓰는 버전은 별도 파일 `fdt.gdb`에 있다(`source fdt.gdb` → `fdt` / `fdt-header` / `fdt-rsv` / `fdt-tree`). python도 플러그인도 필요 없으므로 stock gdb에서 그대로 동작한다.
+> A version that uses only pure gdb commands is in a separate file `fdt.gdb` (`source fdt.gdb` → `fdt` / `fdt-header` / `fdt-rsv` / `fdt-tree`). It needs neither python nor a plugin, so it works as-is in stock gdb.
 
 ---
 
-## 1. 준비 — `kearly`
+## 1. Preparation — `kearly`
 
 ### `kearly bootbreak` / `kearly status`
 
-`$GDBTOOLS_AUTO`가 설정되어 있으면 접속 시 `kearly bootbreak`가 돌아 QEMU 리셋/펌웨어를 지나 커널
-엔트리까지 진행하고 오프셋을 잡는다. 이후 상태:
+If `$GDBTOOLS_AUTO` is set, `kearly bootbreak` runs at attach, advancing past the QEMU reset/firmware to the kernel
+entry and fixing the offset. The state afterward:
 
 ```
 (gdb) kearly status
@@ -130,11 +133,11 @@ FILE` / `kearly dtb FILE`로도 된다.
       vmlinux=.../arm64-v4.6/kernel/vmlinux  shadow=0x0000000040080000
 ```
 
-- `offset(PA-VA)` — 물리=가상+offset. 여기선 `0x0001000038000000`.
-- `map` / `MMU` — 지금 물리(physical)인지 가상(virtual)인지, MMU on/off.
-- `shadow` — 물리주소도 심볼로 풀리도록 얹은 phys-shifted 심볼 파일 주소.
+- `offset(PA-VA)` — physical = virtual + offset. Here it is `0x0001000038000000`.
+- `map` / `MMU` — whether the current map is physical or virtual, and MMU on/off.
+- `shadow` — the address of the phys-shifted symbol file laid down so physical addresses resolve to symbols too.
 
-### `kearly mmu` — MMU 상태 상세
+### `kearly mmu` — MMU state detail
 
 ```
 (gdb) kearly mmu
@@ -142,17 +145,17 @@ FILE` / `kearly dtb FILE`로도 된다.
       pre-MMU: $pc/pointers are PHYSICAL; shadow symbols active.
 ```
 
-MMU가 켜진 뒤:
+After the MMU is turned on:
 
 ```
 [kgdb] MMU=on [ctrl-reg]  map=physical  pc=0x00000000408b003c  SCTLR_EL1.M=1
       MMU on: kernel VAs resolve natively; kp2v/kv2p translate either way.
 ```
 
-### `kearly overmmu` — MMU 경계 통과
+### `kearly overmmu` — crossing the MMU boundary
 
-`__enable_mmu`를 `stepi`로 넘으면 QEMU gdbstub가 그 지점에서 싱글스텝을 흘려 CPU가 폭주한다.
-대신 가상 랜딩(예: `start_kernel`)에 임시 브레이크를 걸고 `continue`로 넘는다:
+Stepping over `__enable_mmu` with `stepi` makes the QEMU gdbstub leak the single-step at that point and the CPU runs away.
+Instead, set a temporary breakpoint at the virtual landing (e.g. `start_kernel`) and cross with `continue`:
 
 ```
 (gdb) kearly overmmu start_kernel
@@ -163,9 +166,9 @@ MMU가 켜진 뒤:
 
 ---
 
-## 2. 주소 변환·심볼화 — `kp2v` / `kv2p` / `sym` / `stackscan`
+## 2. Address translation and symbolization — `kp2v` / `kv2p` / `sym` / `stackscan`
 
-물리↔가상 변환과 심볼화. MMU on 이후엔 양방향 다 동작한다(실측, 런타임 `$pc`=`cpu_do_idle+8`):
+Physical↔virtual translation and symbolization. After the MMU is on, both directions work (measured, runtime `$pc`=`cpu_do_idle+8`):
 
 ```
 (gdb) kv2p $pc
@@ -181,8 +184,8 @@ PA 0x0000000040099f58 -> VA 0xffff000008099f58  cpu_do_idle + 8 in section .text
 0x0000000040099f58 (PHYS) -> VA 0xffff000008099f58  cpu_do_idle + 8 in section .text of …/vmlinux
 ```
 
-`stackscan [N]` — backtrace가 죽는 head.S에서 스택 워드 중 커널 포인터를 찾아 심볼화한다.
-물리(PA)·가상(VA)을 구분해 표기한다(실측 발췌):
+`stackscan [N]` — in head.S where backtrace is dead, find kernel pointers among the stack words and symbolize them.
+It distinguishes and labels physical (PA) and virtual (VA) (measured excerpt):
 
 ```
 (gdb) stackscan 24
@@ -195,9 +198,9 @@ PA 0x0000000040099f58 -> VA 0xffff000008099f58  cpu_do_idle + 8 in section .text
 
 ---
 
-## 3. 시스템 레지스터 — `ksr` / `ksregs`
+## 3. System registers — `ksr` / `ksregs`
 
-`ksregs`는 핵심 sysreg를 값·디코드와 함께 일괄 덤프한다(실측, arm64 런타임):
+`ksregs` batch-dumps the core sysregs with value and decode (measured, arm64 runtime):
 
 ```
 (gdb) ksregs
@@ -218,25 +221,25 @@ PA 0x0000000040099f58 -> VA 0xffff000008099f58  cpu_do_idle + 8 in section .text
   NZCV         0x0000000000000000  (0)   [n z c v]
 ```
 
-`ksr NAME`은 1개만 읽는다(예: `ksr CurrentEL`). 읽기 경로는 pstate 유도 → gdb 레지스터 →
-QEMU monitor 폴백 순이라, 스텁이 숨기는 레지스터도 최대한 값을 잡는다.
+`ksr NAME` reads just one (e.g. `ksr CurrentEL`). The read path is pstate-derived → gdb register →
+QEMU monitor fallback, so it captures a value even for registers the stub hides, as far as possible.
 
 ---
 
-## 4. `kcensus` — head.S 레지스터 전수조사
+## 4. `kcensus` — head.S register census
 
-**무엇을 하나** — `head.S`와 그것이 (호출체인 전체를 따라) 도달하는 모든 파일에서 **한 번이라도
-read/write에 관여되는 모든 시스템/제어 레지스터**를 카테고리별로, 현재 값·필드 디코드·용도와 함께
-나열한다. pwndbg의 REGISTERS 패널이 안 보여주는 바로 그 레지스터들이다(범용 x0~x30은 제외).
-arm64 88개 / x86 CR·MSR·세그먼트 / riscv CSR.
+**What it does** — it enumerates **every system/control register that is involved in a read/write at least once**
+in `head.S` and in every file it reaches (following the entire call chain), by category, with the current value,
+field decode, and purpose. These are exactly the registers pwndbg's REGISTERS panel does not show (general-purpose x0~x30 excluded).
+arm64 88 / x86 CR·MSR·segment / riscv CSR.
 
-**어떻게 치나**
+**How to type it**
 
 ```
 (gdb) kcensus
 ```
 
-**실측 출력 (arm64, 발췌 — 총 88개)**
+**Measured output (arm64, excerpt — 88 total)**
 
 ```
 [kgdb] head.S early-boot register census -- arm64   [MMU=on pc=VA]   (88 registers)
@@ -265,11 +268,11 @@ feature-id
   ...
 ```
 
-- `RW`/`R`/`W` = head.S가 그 레지스터를 어떻게 쓰는지.
-- `?` = 지금 EL/시점에서 gdbstub/monitor가 못 내주는 것(예: EL1에 있는데 EL2 레지스터). **정직하게 `?`** 로 표기.
-- `[6.12]`/`[4.6]`/`[M-mode]` = 버전·모드 한정 레지스터.
+- `RW`/`R`/`W` = how head.S uses that register.
+- `?` = something the gdbstub/monitor cannot provide at the current EL/moment (e.g. an EL2 register while at EL1). Marked **honestly as `?`**.
+- `[6.12]`/`[4.6]`/`[M-mode]` = a version/mode-specific register.
 
-**실측 출력 (riscv, 전체 — 21 CSR)**
+**Measured output (riscv, full — 21 CSRs)**
 
 ```
 translation
@@ -286,8 +289,8 @@ status-control
 ...
 ```
 
-**패널 상주** — `kearly census compact`를 켜면 매 stop마다 pwndbg context(또는 자동 라인)에
-카테고리별 한 줄로 붙는다:
+**Kept in the panel** — turning on `kearly census compact` attaches a one-line-per-category summary to the
+pwndbg context (or the automatic line) at every stop:
 
 ```
  translation:     TTBR0_EL1=0x6d0000b7f34000  TTBR1_EL1=0x41200000  TCR_EL1=0x34b5103510
@@ -299,17 +302,17 @@ status-control
 
 ---
 
-## 5. `kpt` — 하드웨어 페이지테이블 워크
+## 5. `kpt` — hardware page-table walk
 
-**무엇을 하나** — 한 VA를 하드웨어처럼 걸어(L0~L3 arm64 / PML4~PT x86 / Sv39·48·57 riscv),
-각 레벨의 raw descriptor·타입(table/block/page/invalid)·다음테이블 또는 출력 PA·리프 속성을
-보여준다. **핵심**: MMU가 켜진 뒤에는 gdb `x`/pwndbg `hexdump`가 물리주소를 "지금 페이지테이블로
-번역"해 읽으므로 PT 원본을 못 읽는다(`Cannot access memory`). `kpt`는 QEMU HMP `monitor xp`
-(물리 examine)로 읽어 **MMU on 이후에도 정확**하다.
+**What it does** — it walks one VA the way the hardware would (L0~L3 arm64 / PML4~PT x86 / Sv39·48·57 riscv),
+showing each level's raw descriptor, type (table/block/page/invalid), the next table or output PA, and the leaf attributes.
+**The key point**: after the MMU is on, gdb `x`/pwndbg `hexdump` read a physical address by "translating it through the current page tables",
+so they cannot read the raw PT (`Cannot access memory`). `kpt` reads through QEMU HMP `monitor xp`
+(physical examine), so it is **accurate even after the MMU is on**.
 
-**어떻게 치나** — `kpt [VA]` (VA 생략 시 `$pc`, 표현식 가능: `kpt &_stext`)
+**How to type it** — `kpt [VA]` (VA omitted → `$pc`; expressions allowed: `kpt &_stext`)
 
-**실측 (arm64 런타임, 4KB 페이지로 매핑된 커널 텍스트)**
+**Measured (arm64 runtime, kernel text mapped with 4KB pages)**
 
 ```
 (gdb) kpt
@@ -323,11 +326,11 @@ VA 0xffff000008099f58   TTBR1_EL1 (kernel/high)   [4KB granule, 4-level (L0..L3)
      (kv2p(VA)=0x40099f58  MATCH)
 ```
 
-- 각 레벨: `[인덱스] @그 엔트리의 물리주소  desc=raw값  타입 -> 다음/출력`.
-- 리프 속성: `AF`(access) `RO-`(읽기전용, 커널텍스트) `AttrIdx`(MAIR 인덱스) `ISh`(inner share) `UXN`(EL0 실행금지).
-- `=> LEAF` = 최종 물리주소 + 심볼. `MATCH` = 소프트웨어 kv2p 값과 하드웨어 워크 결과가 일치(정합성 확인).
+- each level: `[index] @the physical address of that entry  desc=raw value  type -> next/output`.
+- leaf attributes: `AF` (access) `RO-` (read-only, kernel text) `AttrIdx` (MAIR index) `ISh` (inner share) `UXN` (execute-never at EL0).
+- `=> LEAF` = the final physical address + symbol. `MATCH` = the software kv2p value and the hardware-walk result agree (consistency check).
 
-**실측 (arm64 부팅 극초기 — 초기 스와퍼가 2MB 블록으로 매핑)**
+**Measured (arm64 earliest boot — the initial swapper maps with 2MB blocks)**
 
 ```
 (gdb) kpt &_stext
@@ -340,10 +343,10 @@ VA 0xffff000008082000   TTBR1_EL1 (kernel/high)   [4KB granule, 4-level (L0..L3)
      (kv2p(VA)=0x40082000  MATCH)
 ```
 
-> 같은 `_stext`인데 초기엔 **2MB BLOCK**(L2에서 종료), 부팅 후엔 **4KB PAGE**(L3까지) — 커널이
-> `paging_init`에서 세분 매핑으로 다시 까는 과정을 그대로 관찰할 수 있다.
+> The same `_stext`, but a **2MB BLOCK** early (ending at L2) and a **4KB PAGE** after boot (down to L3) — you can watch, exactly as it happens,
+> the kernel re-laying the mapping into finer granularity in `paging_init`.
 
-**실측 (미매핑을 정직하게 보고)**
+**Measured (reports "not mapped" honestly)**
 
 ```
 (gdb) kpt &_text
@@ -352,10 +355,10 @@ VA 0xffff000008082000   TTBR1_EL1 (kernel/high)   [4KB granule, 4-level (L0..L3)
   => NOT MAPPED (no valid leaf descriptor)
 ```
 
-> `_text`(efi/head 페이지)나 `start_kernel`(부팅 후 해제된 `.init.text`)은 실제로 안 매핑돼 있고,
-> `kpt`는 그 사실을 그대로 보고한다.
+> `_text` (the efi/head page) and `start_kernel` (the `.init.text` freed after boot) really are not mapped,
+> and `kpt` reports that as-is.
 
-**실측 (MMU 꺼진 상태에서는 깔끔하게 거절)**
+**Measured (cleanly refuses while the MMU is off)**
 
 ```
 (gdb) kpt &_stext
@@ -363,7 +366,7 @@ VA 0xffff000008082000   TTBR1_EL1 (kernel/high)   [4KB granule, 4-level (L0..L3)
        (MMU/satp/CR0.PG). Try after MMU-enable.
 ```
 
-**실측 (riscv Sv57, 5단계)**
+**Measured (riscv Sv57, 5-level)**
 
 ```
 (gdb) kpt
@@ -377,13 +380,13 @@ VA 0xffffffff80be9fce   satp Sv57 (PPN 0x838bf)   [Sv57, 5-level, 4KB pages]
      (kv2p(VA)=0x80de9fce  MATCH)
 ```
 
-**실측 (x86, 4단계와 5단계 모두)**
+**Measured (x86, both 4-level and 5-level)**
 
 ```
-# 기본(LA57): 5단계
+# default (LA57): 5-level
 VA ...   CR3 (5-level)   [5-level paging (LA57 5-level)]
 
-# no5lvl 부팅: 4단계
+# booted with no5lvl: 4-level
 VA 0xffffffff821132cf   CR3 (4-level)   [4-level paging (4-level)]
   PML4    [511] @PA 0x4cfeff8    desc=0x0000000003231067  table -> 0x3231000  (level3_kernel_pgt)
   PDPT    [510] @PA 0x3231ff0    desc=0x0000000003232063  table -> 0x3232000  (level2_kernel_pgt)
@@ -391,20 +394,20 @@ VA 0xffffffff821132cf   CR3 (4-level)   [4-level paging (4-level)]
      (kv2p(VA)=0x21132cf  MATCH)
 ```
 
-> 레벨 수는 하드웨어 설정 레지스터(x86 `CR4.LA57` / arm64 `TCR` T0SZ·T1SZ / riscv `satp` MODE)에서
-> 런타임 계산하므로 3/4/5단계에 자동 적응한다. 페이지테이블 페이지도 `level3_kernel_pgt`처럼 심볼화된다.
+> The number of levels is computed at runtime from the hardware configuration registers (x86 `CR4.LA57` / arm64 `TCR` T0SZ·T1SZ / riscv `satp` MODE),
+> so it adapts to 3/4/5 levels automatically. Page-table pages are symbolized too, like `level3_kernel_pgt`.
 
 ---
 
-## 6. `kpgd` — 페이지 디렉토리 덤프
+## 6. `kpgd` — page directory dump
 
-**무엇을 하나** — 최상위 페이지 디렉토리(또는 지정한 테이블 PA)의 **비어있지 않은 엔트리**를
-인덱스·raw값·타입·출력PA(+심볼)와 함께 덤프한다. `kpt`가 준 `table -> 0x...` PA를 넘겨 하위
-레벨을 파고들 수도 있다.
+**What it does** — it dumps the **non-empty entries** of the top-level page directory (or a given table PA)
+with index, raw value, type, and output PA (+symbol). You can also pass the `table -> 0x...` PA that `kpt` gave
+to dig into a lower level.
 
-**어떻게 치나** — `kpgd [PA] [N]` (생략 시 `$pc` 레짐의 최상위, N=표시 상한)
+**How to type it** — `kpgd [PA] [N]` (omitted → the top of `$pc`'s regime; N = display limit)
 
-**실측 (arm64 런타임, 최상위 L0/PGD)**
+**Measured (arm64 runtime, top-level L0/PGD)**
 
 ```
 (gdb) kpgd
@@ -415,19 +418,19 @@ top table L0/PGD @PA 0x41200000   regime TTBR1_EL1 (kernel/high)   (non-zero of 
   [256] 0x00000000beff7003  table   -> 0xbeff7000
 ```
 
-> 512개 중 4개만 유효 — 커널 이미지/선형맵/fixmap 영역에 해당. `bm_pud`처럼 심볼도 붙는다.
+> Only 4 of 512 are valid — corresponding to the kernel image / linear map / fixmap regions. Symbols like `bm_pud` are attached too.
 
-### `kpthex` — 엔트리를 진짜 바이트 단위로 (hex 뷰)
+### `kpthex` — entries as real bytes (hex view)
 
-**무엇을 하나** — `kpgd`가 64비트 디스크립터를 한 덩어리로 보여주는 것과 달리, 각 엔트리를
-**메모리에 실제로 놓인 리틀엔디언 바이트 8개로 쪼개어** raw 값·디코드와 나란히 보여준다.
-`full`을 주면 4KB 페이지 전체를 xxd식(16바이트/줄 + ASCII)으로 덤프한다. 물리 메모리를 QEMU
-monitor(`xp`)로 읽으므로 **MMU가 켜진 뒤에도** 동작한다(gdb `x`/pwndbg `hexdump`가 물리
-페이지테이블 주소에서 실패하는 바로 그 상황).
+**What it does** — unlike `kpgd`, which shows a 64-bit descriptor as one lump, it **breaks each entry into the 8 little-endian bytes as actually laid out in memory**,
+showing them alongside the raw value and decode.
+Passing `full` dumps the entire 4KB page xxd-style (16 bytes/line + ASCII). Because it reads physical memory through the QEMU
+monitor (`xp`), it works **even after the MMU is on** (exactly the situation where gdb `x`/pwndbg `hexdump` fail at a physical
+page-table address).
 
-**어떻게 치나** — `kpthex [TABLE_PA] [N | full]` (생략 시 `$pc` 레짐 최상위, N=비어있지 않은 엔트리 상한 64)
+**How to type it** — `kpthex [TABLE_PA] [N | full]` (omitted → the top of `$pc`'s regime; N = non-empty entry cap of 64)
 
-**실측 (arm64-v4.6 런타임, 커널 L0/PGD)**
+**Measured (arm64-v4.6 runtime, kernel L0/PGD)**
 
 ```
 (gdb) kpthex
@@ -437,19 +440,18 @@ page-table page @PA 0x41200000   regime TTBR1_EL1 (kernel/high)   little-endian,
   [255] 0x412007f8     03 d0 1b 41 00 00 00 00   0x00000000411bd003   TABLE -> 0x411bd000  (bm_pud)
 ```
 
-> 값 `0x…beffe003`이 메모리에는 `03 e0 ff be 00 00 00 00`로 놓인다(LE). `kpt VA hex`를 쓰면 워크의
-> 각 레벨 디스크립터에도 `[03 e0 ff be 00 00 00 00]`처럼 바이트가 붙고, `kpthex 0x… full`은 그
-> 테이블 페이지 4KB를 통째로 xxd식으로 찍는다.
+> The value `0x…beffe003` is laid out in memory as `03 e0 ff be 00 00 00 00` (LE). With `kpt VA hex`, each level's descriptor in the walk
+> gets bytes attached too, like `[03 e0 ff be 00 00 00 00]`, and `kpthex 0x… full` prints that whole 4KB table page xxd-style.
 
 ---
 
-## 6.5 `koff` — 왜 런타임 주소가 vmlinux ELF(nm) 값과 다른가
+## 6.5 `koff` — why the runtime address differs from the vmlinux ELF (nm) value
 
-`nm`/`readelf`가 보여주는 심볼 주소(= vmlinux에 링크된 VA)와, 지금 그 심볼이 실제로 놓인 주소는
-regime에 따라 **서로 다른 이유로** 다르다. `koff [SYM]`(SYM 생략 시 이미지 베이스)은 그 이유를
-**서술이 아니라, 그걸 직접 규정하는 CPU 플래그·제어 레지스터·`$pc` 값**을 단서로 요약한다.
-regime은 MMU 플래그가 아니라 **실제 `$pc`가 물리인지 가상인지**(`which_map`)로 가른다 — x86처럼
-페이징이 늘 켜져 있어도 초기엔 identity/저주소로 도는 경우를 정확히 잡기 위해서다.
+The symbol address that `nm`/`readelf` shows (= the VA linked into vmlinux) and the address where that symbol
+actually sits right now differ **for different reasons depending on the regime**. `koff [SYM]` (SYM omitted → the image base) summarizes that reason
+**not as narration, but using the CPU flags/control registers/`$pc` value that directly determine it** as clues.
+The regime is split not by the MMU flag but by **whether `$pc` is actually physical or virtual** (`which_map`) — precisely to catch
+the case, as on x86, where paging is always on but early execution runs at identity/low addresses.
 
 ```
 # arm64, MMU off (head.S)                        # x86_64, startup_64 (paging ON but identity)
@@ -468,29 +470,29 @@ regime은 MMU 플래그가 아니라 **실제 `$pc`가 물리인지 가상인지
   ELF value = address now = 0xffff000008080000    KASLR slide = 0 (nokaslr -> VA==ELF, confirmed)
 ```
 
-단서는 arch별로: **arm64** SCTLR_EL1.M / TTBR1_EL1 / kimage_voffset, **x86** CR0.PG / CR3 / CR4.PAE /
-EFER.LMA / phys_base, **riscv** satp.MODE(Bare/Sv39-57) / satp.PPN. 공통으로 `$pc`(고반부 VA인지
-물리/저주소인지)와 cmdline의 `nokaslr` 표지를 얹는다. KASLR 슬라이드: **`kearly kaslr`를 적용했다면**
-그 slide를 반영해 **진짜 링크 VA**(심볼값 − 적용 slide)·**런타임 VA**·**slide**를 정확히 찍는다. 아직
-적용 전이면 cmdline에 `nokaslr`가 있으면 `0`(확정), 없으면 `kearly kaslr`로 측정하라고 안내한다(koff
-단독으로는 재배치된 심볼표만 보므로 slide를 직접 못 잰다). 런타임에
-붙어 offset이 아직 없으면 조용히 `calibrate`를 시도한다.
+The clues are arch-specific: **arm64** SCTLR_EL1.M / TTBR1_EL1 / kimage_voffset, **x86** CR0.PG / CR3 / CR4.PAE /
+EFER.LMA / phys_base, **riscv** satp.MODE (Bare/Sv39-57) / satp.PPN. Common to all, it adds `$pc` (whether it is a high-half VA
+or a physical/low address) and the cmdline `nokaslr` marker. KASLR slide: **if you have applied `kearly kaslr`**,
+it reflects that slide and prints the **true link VA** (symbol value − applied slide), the **runtime VA**, and the **slide** exactly. Before it is applied,
+it reports `0` (confirmed) if `nokaslr` is on the cmdline, otherwise it advises measuring with `kearly kaslr` (koff alone sees only the
+relocated symbol table, so it cannot measure the slide itself). If you are attaching at runtime
+and the offset does not yet exist, it quietly tries `calibrate`.
 
 ---
 
-## 7. `mmview` / `memlayout` — 커널용 vmmap
+## 7. `mmview` / `memlayout` — vmmap for the kernel
 
-**무엇을 하나** — pwndbg `vmmap`은 커널 타겟을 못 읽으므로 그 자리를 대체한다. 두 부분으로 구성:
+**What it does** — pwndbg `vmmap` cannot read a kernel target, so this takes its place. Two parts:
 
-1. **심볼 랜드마크(VA→PA)** — 심볼표+캘리브레이션만 필요 → **MMU 이전 물리단계에서도 동작**.
-2. **라이브 ptdump** — 페이지테이블을 걸어 연속 리전을 병합하고 권한·`kernel image` 라벨을 붙임.
+1. **Symbol landmarks (VA→PA)** — needs only the symbol table + calibration → **works even in the pre-MMU physical stage**.
+2. **Live ptdump** — walks the page tables, merges contiguous regions, and attaches permissions and a `kernel image` label.
 
-MMU가 꺼져 있으면 라이브 매핑 대신 **물리 배치 + RAM**을 보여준다. 통합 루트(x86 CR3 / riscv satp)는
-유저+커널이 섞이므로 기본은 **커널 절반만** (`mmview all`로 유저 포함, `noidmap`으로 arm64 TTBR0 생략).
+While the MMU is off, it shows the **physical placement + RAM** instead of live mappings. Because a unified root (x86 CR3 / riscv satp)
+mixes user and kernel, the default is **the kernel half only** (`mmview all` to include user, `noidmap` to skip arm64 TTBR0).
 
-**어떻게 치나** — `mmview` 또는 별칭 `memlayout` (옵션: `all` / `noidmap`)
+**How to type it** — `mmview` or the alias `memlayout` (options: `all` / `noidmap`)
 
-**실측 (arm64, MMU 꺼진 극초기 — 물리 배치 표시)**
+**Measured (arm64, earliest boot with the MMU off — physical placement shown)**
 
 ```
 (gdb) mmview
@@ -515,16 +517,16 @@ live VA mappings: NONE yet -- MMU is off (paging not active).
   RAM (DTB/profile):   0x40000000+0x80000000
 ```
 
-**실측 (arm64, MMU 켜진 직후 초기 스와퍼 — 리전 병합)**
+**Measured (arm64, right after the MMU is on, the initial swapper — regions merged)**
 
 ```
 live mappings: kernel  TTBR1_EL1  root@PA 0x41200000   (1 regions)   [4KB granule, 4-level (L0..L3), 9-bit index/level]
   0xffff000008000000-0xffff0000093fffff    20M -> 0x40000000    block AF=1 RW- AttrIdx=4 ISh kernel image {_text,_stext,_etext+}
 ```
 
-> 초기 스와퍼가 이미지 영역 20MB를 2MB 블록들로 매핑한 것을 **하나의 리전으로 병합**해 보여준다.
+> It shows the initial swapper's 20MB image region — mapped as 2MB blocks — **merged into a single region**.
 
-**실측 (x86, 커널 공간만 필터 — 유저 474개 숨김)**
+**Measured (x86, kernel space only filtered — 474 user regions hidden)**
 
 ```
 live mappings: kernel+user  CR3  root@PA 0x4714000   (14161/14635 regions)   [5-level paging (LA57 5-level)]
@@ -536,10 +538,10 @@ live mappings: kernel+user  CR3  root@PA 0x4714000   (14161/14635 regions)   [5-
   ...
 ```
 
-> `0xff11...` = LA57 선형맵(직접 매핑), `0xffa0...` = vmalloc/ioremap(디바이스 `0xfed00000` 등),
-> `R/W S A D G NX` = x86 PTE 플래그. 유저 프로세스 매핑은 숨겨 커널 지도에 집중한다.
+> `0xff11...` = the LA57 linear map (direct mapping), `0xffa0...` = vmalloc/ioremap (devices like `0xfed00000`),
+> `R/W S A D G NX` = x86 PTE flags. User-process mappings are hidden to keep the focus on the kernel map.
 
-**실측 (riscv Sv57)**
+**Measured (riscv Sv57)**
 
 ```
 live mappings: kernel  satp  root@PA 0x838bf000   (112/564 regions)   [Sv57, 5-level, 4KB pages]
@@ -552,55 +554,55 @@ live mappings: kernel  satp  root@PA 0x838bf000   (112/564 regions)   [Sv57, 5-l
 
 ---
 
-## 8. 텔레스코프와 `kearly chaindepth`
+## 8. Telescope and `kearly chaindepth`
 
-주소형 sysreg(TTBR/VBAR/ELR/SP 등)은 패널에서 **텔레스코프**(→ 체인)로 렌더된다. 단, pwndbg의
-기본 체인을 **그대로 쓰지 않는다**: TTBR 같은 페이지테이블 베이스를 주면 pwndbg가 그 값을 포인터로
-착각해 PGD→PUD→PMD… **테이블 트리 전체를 따라가다 gdb의 C 스택을 오버플로해 세션(과 QEMU)을 죽인다**.
-그래서 자체 구현 `safe_chain`(항상 유한 깊이 + 순환감지)로 렌더하며, TTBR은 **물리읽기로 PGD→PUD→PMD
-베이스만 안전하게** 따라간다.
+Address-shaped sysregs (TTBR/VBAR/ELR/SP etc.) are rendered in the panel as a **telescope** (→ chain). But it does **not use
+pwndbg's default chain as-is**: given a page-table base like TTBR, pwndbg mistakes the value for a pointer and follows PGD→PUD→PMD…
+**down the whole table tree, overflowing gdb's C stack and killing the session (and QEMU)**.
+So it renders with its own `safe_chain` (always finite depth + cycle detection), and for TTBR it follows **only the PGD→PUD→PMD
+bases safely, via physical reads**.
 
-**실측 (패널의 TTBR 텔레스코프 — 안전하지만 그대로 유지)**
+**Measured (the panel's TTBR telescope — safe but kept as-is)**
 
 ```
  TTBR1_EL1  0x41200000  PTbase 0x41200000  ->  0xbeffe000  ->  0xbeffd000  ->  0x0
  TTBR0_EL1  0x6d0000b7f34000  PTbase 0xb7f34000  ->  0x0  ASID 0x6d
 ```
 
-**깊이를 명령창에서 라이브로 조절** — `kearly chaindepth N`
+**Adjust the depth live from the command line** — `kearly chaindepth N`
 
 ```
 (gdb) kearly chaindepth 2
 [kgdb] telescope depth = 2 hops  (safe_chain: bounded, cycle-guarded; ...)
-# -> TTBR1_EL1  0x41200000  PTbase 0x41200000  ->  0xbeffe000        (2홉에서 멈춤)
+# -> TTBR1_EL1  0x41200000  PTbase 0x41200000  ->  0xbeffe000        (stops at 2 hops)
 
-(gdb) kearly chaindepth 8       # 기본값
+(gdb) kearly chaindepth 8       # default
 # -> TTBR1_EL1  0x41200000  PTbase 0x41200000  ->  0xbeffe000  ->  0xbeffd000  ->  0x0
 ```
 
-`chain [ADDR] [N]`도 같은 안전 텔레스코프를 쓴다. `kfin`은 CFI 없는 head.S에서 `finish` 대체로,
-복귀주소를 `lr`/`ra`/스택톱에서 잡아 그 지점까지 실행한다.
+`chain [ADDR] [N]` uses the same safe telescope. `kfin` is a `finish` replacement for CFI-less head.S:
+it takes the return address from `lr`/`ra`/the stack top and runs to that point.
 
 ---
 
-## 9. `cfgdis` — 분기 화살표 디스어셈블
+## 9. `cfgdis` — branch-arrow disassembly
 
-radare2의 `pdf`처럼, 디스어셈블 좌측 여백에 함수 내부 점프의 **제어흐름 화살표**를 그린다.
-화면에 보이는 명령을 타깃으로 하는 직접 점프마다 엣지를 만들고, 겹치지 않는 세로 트랙에
-(넓은 span이 바깥쪽) 쌓아 코너·세로선·교차(`┌│└─┼┬┴`)로 그린다. **출발점과 도착점의 가로선
-길이를 맞춰**(둘 다 같은 트랙 열에서 시작해 주소 열까지 뻗음) 도착점 끝에 화살촉 `>`, 출발점
-끝에 평선 `─`를 찍는다.
+Like radare2's `pdf`, it draws the **control-flow arrows** of in-function jumps in the left margin of the disassembly.
+It makes an edge for every direct jump that targets an on-screen instruction, stacks them on non-overlapping vertical tracks
+(wider span on the outside), and draws them with corners, vertical lines, and crossings (`┌│└─┼┬┴`). It **matches the horizontal-line
+length of the source and the destination** (both start at the same track column and extend to the address column), putting an arrowhead `>`
+at the destination end and a flat `─` at the source end.
 
-- **`WHAT`은 gdb `disassemble` 인자 그대로** — 생략 시 현재 함수(프레임이 함수 밖이면 `$pc,+0x60`),
-  심볼/주소/범위(`cfgdis start_kernel`, `cfgdis 0x80200000, +0x80`, `cfgdis __memset, __memset+0x40`).
-  표시 수식어 `/r`·`/s`·`/m`은 무시한다(kdis가 자체 컬럼을 그리므로).
-- **조건분기 + 무조건 점프만** 화살표 대상 — 호출(`jal ra`/`bl`/`callq`)·복귀·간접점프는 제외(radare2 선형 뷰와 동일).
-  arch별 mnemonic 자동 판별(riscv `b*`/`j`, x86 `jcc`/`jmp`/`loop`, arm64 `b`/`b.cond`/`cbz`/`tbz`).
-- **레짐 무관** — gdb의 `disassemble`를 그대로 몰기 때문에 물리 조기부팅 주소든 MMU 켜진 뒤의
-  가상 주소(16자리 커널 VA)든 동일하게 동작한다. MMU가 켜져 가상 주소가 되어도 계속 쓴다.
-- 옵션 `ascii`(비-UTF 터미널용 ASCII 글리프), `mono`(색 끔; `$GDBTOOLS_NO_COLOR`로도 끔). 색은 기본 on.
+- **`WHAT` is exactly gdb's `disassemble` argument** — omitted, it is the current function (`$pc,+0x60` if the frame is outside a function),
+  a symbol/address/range (`cfgdis start_kernel`, `cfgdis 0x80200000, +0x80`, `cfgdis __memset, __memset+0x40`).
+  The display modifiers `/r`·`/s`·`/m` are ignored (kdis draws its own columns).
+- **Only conditional branches + unconditional jumps** are arrow targets — calls (`jal ra`/`bl`/`callq`), returns, and indirect jumps are excluded (same as radare2's linear view).
+  The mnemonic is auto-detected per arch (riscv `b*`/`j`, x86 `jcc`/`jmp`/`loop`, arm64 `b`/`b.cond`/`cbz`/`tbz`).
+- **Regime-independent** — because it drives gdb's `disassemble` directly, it works the same on a physical earliest-boot address
+  or a virtual address after the MMU is on (a 16-digit kernel VA). It keeps working even after the MMU turns the address virtual.
+- Options `ascii` (ASCII glyphs for non-UTF terminals), `mono` (color off; also off via `$GDBTOOLS_NO_COLOR`). Color is on by default.
 
-실측(riscv64 런타임, 커널 VA — 출발·도착 가로선이 주소 열까지 같은 길이로 정렬):
+Measured (riscv64 runtime, kernel VA — source and destination horizontal lines aligned to the same length up to the address column):
 
 ```
 (gdb) cfgdis mono memchr
@@ -622,26 +624,26 @@ Dump of assembler code for function memchr
    └─── 0xffffffff80e8ffe6  j       0xffffffff80e8ffcc <memchr+12>
 ```
 
-> **pwndbg 창과 mnemonic 일치** — gdb/binutils와 Capstone(pwndbg)은 일부 니모닉 철자가 다르다
-> (arm64 조건분기: binutils `b.cc`/`b.cs` ↔ Capstone `b.lo`/`b.hs`). `cfgdis`/`flow`는 표시할 때
-> `Arch.MNEM_ALIASES`로 **Capstone 철자로 정규화**해 pwndbg의 `[ DISASM ]` 창과 니모닉이 그대로
-> 맞는다. 아울러 binutils가 붙이는 `// b.none` 같은 별칭 주석은 표시에서 떼되(pwndbg엔 없음),
-> `tbz w0, #0x1f, <타깃>`의 `#imm`처럼 실제 피연산자는 보존한다.
+> **Mnemonics match the pwndbg window** — gdb/binutils and Capstone (pwndbg) spell some mnemonics differently
+> (arm64 conditional branches: binutils `b.cc`/`b.cs` ↔ Capstone `b.lo`/`b.hs`). When rendering, `cfgdis`/`flow`
+> **normalize to the Capstone spelling** via `Arch.MNEM_ALIASES`, so the mnemonics match pwndbg's `[ DISASM ]` window exactly.
+> It also strips the alias comments binutils adds, like `// b.none` (pwndbg has none), while
+> preserving the actual operands, like the `#imm` in `tbz w0, #0x1f, <target>`.
 
-### 자동 context 섹션 — `$GDBTOOLS_AUTO` 전용 (`flow` = radare2 화살표 창, pwndbg disasm과 병렬)
+### Automatic context section — `$GDBTOOLS_AUTO` only (`flow` = radare2 arrow window, parallel to pwndbg disasm)
 
-`$GDBTOOLS_AUTO`로 접속하면 도구는 pwndbg에 **섹션 두 개(`kgdb`·`flow`)만 추가**한다 —
-**pwndbg 기본은 하나도 제거·변경하지 않는다.** 그래서 **두 disasm 창이 나란히, 각자 독립적으로** 뜬다:
+When attached via `$GDBTOOLS_AUTO`, the tool **adds only two sections (`kgdb`·`flow`) to pwndbg** —
+**it removes or changes none of pwndbg's defaults.** So **two disasm windows come up side by side, each independent**:
 
-- **`[ DISASM / … / set emulate on ]`** — pwndbg 자신의 창. 완전히 손대지 않으므로 에뮬레이션(`X3 => 4`·
-  `CPSR` flags·`✔`/`✘` 분기예측·telescope)·색상 전부 그대로. hang-prone 지점(`_text` 등)은 pwndbg의
-  자체 섹션 렌더링이 알아서 처리한다.
-- **`[ DISASM + ARROWS ]`** (우리 `flow`) — **radare2식 분기 화살표** 뷰. `cfgdis`와 같은 **자체
-  gdb+python 렌더러**로 그린다(gdb `disassemble` → 정확한 hex 타깃 → `┌│└─┬>` 화살표). pwndbg 창과
-  겹치지 않는 별개 관점이라, 순수 gdb+python이라 **절대 hang·crash하지 않는다.**
+- **`[ DISASM / … / set emulate on ]`** — pwndbg's own window. Fully untouched, so its emulation (`X3 => 4`,
+  `CPSR` flags, `✔`/`✘` branch prediction, telescope) and colors are all as-is. Hang-prone spots (`_text` etc.) are handled by
+  pwndbg's own section rendering.
+- **`[ DISASM + ARROWS ]`** (our `flow`) — a **radare2-style branch-arrow** view. Drawn by the **same
+  gdb+python renderer** as `cfgdis` (gdb `disassemble` → exact hex target → `┌│└─┬>` arrows). A separate perspective that does not
+  overlap the pwndbg window, and being pure gdb+python it **never hangs or crashes.**
 
 ```
-[ DISASM / aarch64 / set emulate on ]        [ DISASM + ARROWS ]  (우리 flow)
+[ DISASM / aarch64 / set emulate on ]        [ DISASM + ARROWS ]  (our flow)
  ► 0x…13d8 <memset+24>  cmp x2,#0xf           =>      0x…13d8  cmp   x2, #0xf
    0x…14b0 cmp … CPSR => 0x20000000 [ … C … ] ┌───    0x…13dc  b.hi  0x…1404 <+68>
                                               │┌──    0x…13e0  tbz   w2,#3,0x…13e8
@@ -649,84 +651,83 @@ Dump of assembler code for function memchr
                                               └──>    0x…1404  neg   x4, x8
 ```
 
-이전에는 `flow`가 pwndbg 라인을 재활용하려다 (1) pwndbg 창과 거의 판박이가 되고 (2) pwndbg가 분기
-타깃을 심볼명으로 찍는 경우 화살표가 안 그려지는 문제가 있었다. 지금은 **자체 렌더러**라 두 창이
-확실히 갈린다: pwndbg = 리치 주석, 우리 = 화살표.
+Previously `flow` tried to reuse the pwndbg lines, which (1) made it nearly a carbon copy of the pwndbg window and
+(2) failed to draw arrows when pwndbg printed a branch target as a symbol name. Now, being a **standalone renderer**, the two windows
+split cleanly: pwndbg = rich annotation, ours = arrows.
 
-> **arm64-v4.6 참고 (SIGABRT 가드)**: pwndbg의 *자체* disasm 창은 이 EOL 커널의 일부 명령에서
-> 에뮬레이션(Unicorn) 세그폴트할 수 있다(pwndbg 고유 버그, 도구와 무관). 대표 사례가 **세컨더리 CPU
-> 극초기 stop** — `b __secondary_switched`(`head.S:722`, `sp`/`x29`가 아직 미초기화)에서 pwndbg가 그
-> 지점부터 앞으로 에뮬레이트하다 폴트를 내 **gdb 프로세스 자체가 SIGABRT(core dumped)**로 죽는다
-> (`----- Backtrace -----`에 찍히는 건 커널이 아니라 gdb의 crash dump다). 네이티브 세그폴트라 파이썬
-> 예외로는 못 잡는다(첫 stop이 곧바로 크래시면 손쓸 틈도 없다 — 접속 직후 `cpu_do_idle` 같은 지점).
-> 그래서 도구는 **기본 `auto`**로 arm64 접속 시 도구의 stop 훅이 pwndbg 컨텍스트 렌더링보다 **먼저**
-> 돌며 `emulate`를 자동으로 꺼 크래시를 원천 차단하고(1줄 안내 출력), `kearly off`/`saferender off` 시
-> 복원한다 — 즉 **별도 조작 없이 안 죽는다**. 에뮬레이션을 그대로 쓰려면 `kearly saferender off`(즉시
-> 복원)나 `warn`(경고만, 설정 불변). 우리 `flow`(별도 gdb+python 화살표 창)는 어느 커널에서도 안
-> 깨진다. 일반 `gdb vmlinux`는 pwndbg를 안 건드리고 수동 `cfgdis`만 남긴다.
+> **arm64-v4.6 note (SIGABRT guard)**: pwndbg's *own* disasm window can emulation (Unicorn) segfault on some instructions of this EOL kernel
+> (a pwndbg-specific bug, unrelated to this tool). The canonical case is the **secondary-CPU earliest stop** —
+> at `b __secondary_switched` (`head.S:722`, with `sp`/`x29` not yet initialized), pwndbg emulates forward from that point and faults,
+> so **the gdb process itself dies of SIGABRT (core dumped)**
+> (what prints under `----- Backtrace -----` is not the kernel but gdb's crash dump). Being a native segfault, a Python exception cannot catch it
+> (if the first stop crashes immediately there is no time to react — a spot like `cpu_do_idle` right after attach).
+> So the tool, at its **default `auto`**, runs its stop hook **before** pwndbg's context render on an arm64 attach
+> and turns `emulate` off automatically to block the crash at the source (with a one-line notice), restoring it on
+> `kearly off`/`saferender off` — i.e. **it does not die, with no extra action.** To keep emulation, use `kearly saferender off` (restore immediately)
+> or `warn` (warn only, setting unchanged). Our `flow` (a separate gdb+python arrow window) does not break on any kernel.
+> A plain `gdb vmlinux` does not touch pwndbg and leaves only the manual `cfgdis`.
 
-> **shadow 브레이크포인트 (`kearly bpfix`, 기본 off)**: MMU-off 심볼화를 위해 물리 주소에 shadow
-> 심볼표를 얹는 부작용으로, `b start_kernel` 같은 이름 브레이크가 **물리(0x40c365f0) + 가상
-> (0xffff000008c365f0) 두 위치**로 잡힌다(프롬프트엔 물리가 primary로 표시). 하지만 **QEMU의 SW 브레이크는
-> 가상 PC로 매칭**하므로, MMU-on 심볼은 `continue`하면 **가상 위치가 알아서 발화**한다(실측:
-> `b start_kernel; c` → `Breakpoint 2.2, start_kernel` clean hit). 즉 **네이티브 dual 브레이크로도 그냥
-> 걸리며, `bpfix`는 필수가 아니다.**
+> **shadow breakpoints (`kearly bpfix`, default off)**: as a side effect of laying a shadow symbol table on physical addresses for MMU-off symbolization,
+> a name breakpoint like `b start_kernel` gets set at **two locations, physical (0x40c365f0) + virtual
+> (0xffff000008c365f0)** (the prompt shows physical as primary). But since **QEMU's SW breakpoint matches on the virtual PC**,
+> an MMU-on symbol **fires the virtual location on its own** when you `continue` (measured:
+> `b start_kernel; c` → `Breakpoint 2.2, start_kernel` clean hit). That is, **it catches with the native dual breakpoint alone; `bpfix` is not required.**
 >
-> `bpfix on`은 선택적 정리용이다: **가상 위치는 항상 켜두고**(MMU-on 코드가 발화하는 위치), MMU-on일 때
-> 잠자는 물리 위치만 끈다. 가상 위치는 절대 끄지 않는다(초기 버전은 MMU-off에서 가상 위치를 꺼
-> `b start_kernel`이 안 걸리는 회귀가 있었다 — 수정됨). 기본 off인 이유: 네이티브가 이미 걸리므로.
+> `bpfix on` is for optional tidying: it **always keeps the virtual location on** (the one MMU-on code fires) and turns off only the physical location
+> that sleeps while MMU-on. It never turns off the virtual location (an early version turned the virtual location off in MMU-off and regressed
+> `b start_kernel` into not catching — fixed). It is off by default because the native dual already catches.
 
-> **KASLR 디버깅(물리 크로싱 앵커)**: KASLR가 켜지면 gdb 심볼(링크 VA) ≠ 런타임 VA(링크+슬라이드)라
-> `b SYM`이 안 걸린다. 슬라이드는 relocation(각 arch의 조기 asm) 이후에만 정해지는데, **콜드 프로즌 부팅에는
-> relocation과 start_kernel 사이에 자연스러운 정지점이 없다**(chicken/egg). 그래서 슬라이드 비의존 **물리
-> 크로싱 앵커**를 쓴다: relocation 직후·start_kernel 이전에, MMU가 idmap/물리로 켜진 채 실행되는 "물리→고VA
-> 전이 명령"에 HW 브레이크를 건다(그 주소는 VA==PA라 slide 없이도 발화). 전이 레지스터에서 착지 심볼의 런타임
-> VA를 읽어 `slide = 런타임VA − 링크VA`를 확정한다.
+> **KASLR debugging (physical crossing anchor)**: with KASLR on, the gdb symbols (link VA) ≠ the runtime VA (link+slide),
+> so `b SYM` does not catch. The slide is only fixed after relocation (each arch's early asm), but **in a cold frozen boot there is no
+> natural stopping point between relocation and start_kernel** (chicken/egg). So it uses a slide-independent **physical
+> crossing anchor**: right after relocation and before start_kernel, it sets a HW breakpoint on the "physical→high-VA
+> transition instruction" that executes while the MMU is on with idmap/physical (that address is VA==PA, so it fires without the slide).
+> From the transition registers it reads the runtime VA of the landing symbol and fixes `slide = runtimeVA − linkVA`.
 >
-> | arch | 크로싱 앵커 | slide 획득 |
+> | arch | crossing anchor | slide acquisition |
 > |---|---|---|
-> | arm64 6.12 | `__primary_switch`의 `br x8` → `__primary_switched` | `x8 − linkVA(__primary_switched)` |
-> | arm64 4.6 | `__enable_mmu`의 `br x27` → `__mmap_switched` | `x27 − linkVA(__mmap_switched)` (= x23) |
-> | riscv 6.12 | `relocate_enable_mmu` 진입 (setup_vm 이후·MMU-off) | `kernel_map.virt_addr − linkVA(_start)` |
-> | x86 6.12 | `startup_64`의 `jmp *0f` (CR3 로드 후) → `common_startup_64` | stepi 후 `$pc − linkVA(common_startup_64)` |
+> | arm64 6.12 | `br x8` in `__primary_switch` → `__primary_switched` | `x8 − linkVA(__primary_switched)` |
+> | arm64 4.6 | `br x27` in `__enable_mmu` → `__mmap_switched` | `x27 − linkVA(__mmap_switched)` (= x23) |
+> | riscv 6.12 | entry of `relocate_enable_mmu` (after setup_vm, MMU-off) | `kernel_map.virt_addr − linkVA(_start)` |
+> | x86 6.12 | `jmp *0f` in `startup_64` (after loading CR3) → `common_startup_64` | after stepi, `$pc − linkVA(common_startup_64)` |
 >
-> 크로싱 명령은 함수의 물리 바이트를 opcode 스캔(arm64 `br xN`=`0xD61F0000|N<<5`, `ret`에서 정지)하거나
-> disasm(x86 `jmp *..(%rip)` — AT&T·Intel 양쪽 문법)으로 찾는다 → 버전별 주소 하드코딩 없음. nokaslr에서도
-> 레지스터가 링크 VA를 담아 slide=0으로 정확히 착지한다.
+> The crossing instruction is found by opcode-scanning the function's physical bytes (arm64 `br xN`=`0xD61F0000|N<<5`, stopping at `ret`) or by
+> disasm (x86 `jmp *..(%rip)` — both AT&T and Intel syntax) → no per-version address hardcoding. Even under nokaslr the register
+> holds the link VA and it lands exactly with slide=0.
 >
-> **`kearly kaslr auto`** (권장): bootbreak 후 크로싱까지 진행해 slide를 읽고
-> `symbol-file -o`로 전 심볼을 런타임 VA로 재배치한다. **start_kernel 이전**에 멈추므로 이어서
-> `b start_kernel; continue`가 걸린다. 실측(직접 부팅, snapshot): arm64 6.12 `0x4de1aec00000` · arm64 4.6
-> `0x2c4cf5c00000` · riscv 6.12 `0x38c00000` — 모두 **크로싱 레지스터 값 == kimage_voffset/kernel_map 독립
-> 검출값**으로 교차검증 일치, start_kernel clean hit. `kearly kaslr <hex>`로 명시 슬라이드도 적용 가능.
+> **`kearly kaslr auto`** (recommended): after bootbreak it advances to the crossing, reads the slide, and
+> relocates every symbol to its runtime VA via `symbol-file -o`. It stops **before start_kernel**, so a following
+> `b start_kernel; continue` catches. Measured (direct boot, snapshot): arm64 6.12 `0x4de1aec00000`, arm64 4.6
+> `0x2c4cf5c00000`, riscv 6.12 `0x38c00000` — all cross-validated with the **crossing-register value == the kimage_voffset/kernel_map independent
+> detection value**, and a clean start_kernel hit. You can also apply an explicit slide with `kearly kaslr <hex>`.
 >
-> **x86 KASLR — 디컴프레서 물리 베이스 복구**: x86은 물리 KASLR이 bzImage 디컴프레서에서 커널을 **랜덤 물리
-> 주소**로 배치한다(arm64/riscv은 물리 로드 고정 → 물리 앵커가 항상 유효). 그래서 콜드 프로즌엔 `startup_64`의
-> 로드 PA를 미리 알 수 없어, `--kaslr`가 x86에서는 먼저 **디컴프레서**를 앵커로 그 랜덤 베이스를 복구한다(디컴프
-> 레서는 KASLR 무관하게 `0x100000`에 고정 적재):
+> **x86 KASLR — recovering the decompressor physical base**: on x86, physical KASLR places the kernel at a **random physical
+> address** in the bzImage decompressor (arm64/riscv have a fixed physical load → the physical anchor is always valid). So in a cold frozen boot
+> the load PA of `startup_64` is not known in advance, and `--kaslr` on x86 first recovers that random base using the **decompressor**
+> as the anchor (the decompressor loads at the fixed `0x100000` regardless of KASLR):
 >
-> 1. 디컴프레서 진입(`0x100000`)에 HW 브레이크 → 2. `startup_64`의 self-relocation `jmp *%rax`에서 `%rax`를 읽어
-> 이동 베이스 `rbx`(= `%rax − IMM`) 확보 → 3. `extract_kernel`(rbx+off)에서 `finish` → `%rax` = 압축해제된 메인
-> 커널 물리 진입점(= 랜덤 KASLR 베이스). 이 베이스를 entry로 잡으면 이후는 위 크로싱 앵커가 그대로 가상 slide를
-> 확정한다. 오프셋은 `arch/x86/boot/compressed/vmlinux`를 `nm`/`objdump`로 읽어 버전 무관하게 도출한다(빌드시
-> 자동 생성; 없으면 `--entry-pa`로 폴백). 실측: 부팅마다 다른 랜덤 베이스(`0x52600000`·`0x28a00000`·`0x0ca00000`
-> …)를 매번 복구, slide(`0x25600000`·`0x27400000` …) 교차검증 일치, start_kernel clean hit. x86은 조기부팅 HW
-> 브레이크 결정성을 위해 QEMU를 TCG로 띄운다.
+> 1. HW breakpoint at the decompressor entry (`0x100000`) → 2. read `%rax` at the self-relocation `jmp *%rax` in `startup_64` to get the
+> moved base `rbx` (= `%rax − IMM`) → 3. `finish` at `extract_kernel` (rbx+off) → `%rax` = the decompressed main-kernel physical
+> entry point (= the random KASLR base). With that base as the entry, the crossing anchor above then fixes the virtual slide.
+> The offset is derived version-independently by reading `arch/x86/boot/compressed/vmlinux` with `nm`/`objdump` (auto-generated at build time;
+> falls back to `--entry-pa` if absent). Measured: it recovers a different random base each boot (`0x52600000`, `0x28a00000`, `0x0ca00000`
+> …) every time, the slide (`0x25600000`, `0x27400000` …) cross-validates, and start_kernel hits cleanly. On x86 QEMU is run under TCG for
+> deterministic earliest-boot HW breakpoints.
 >
-> 참고: MMU-off/idmap head.S와 pi 코드는 **재배치 없이** 물리/idmap 주소로 그냥 걸린다(`kb`의 PA 위치) —
-> relocation이 필요한 건 재배치 고VA에서 도는 start_kernel 이후 코드뿐이다.
+> Note: MMU-off/idmap head.S and pi code just catch at physical/idmap addresses **without relocation** (`kb`'s PA location) —
+> only the code after start_kernel, running at the relocated high VA, needs relocation.
 
 ---
 
-## 10. `kw` — regime 인지 워치포인트
+## 10. `kw` — regime-aware watchpoint
 
-브레이크포인트와 같은 문제가 **데이터 쪽**에도 있다. head.S는 `__bss`·부트 인자·`kernel_map`·자기가
-만드는 페이지테이블을 **물리주소로** 쓰고, 고VA 가동 뒤의 코드는 같은 전역을 `linkVA+slide`로 쓴다.
-gdb의 `watch SYM`은 **입력한 그 순간 심볼이 가리키던 주소 하나만** 감시하므로 크로싱 반대편이 사각이
-된다. `kw`는 `kb`와 동일하게 `PA(S)`·`IMG(S)` 양쪽을 걸고, slide가 확정되면 IMG를 자동 재무장한다.
+The same problem as breakpoints exists on the **data side**. head.S writes `__bss`·the boot arguments·`kernel_map`·the page tables it
+builds **by physical address**, and the code after high-VA running uses the same globals by `linkVA+slide`.
+gdb's `watch SYM` watches **only the single address the symbol pointed at the moment you typed it**, so it blinds the far side of the crossing.
+`kw`, like `kb`, sets both `PA(S)` and `IMG(S)`, and auto-re-arms IMG once the slide is fixed.
 
 ```
-# MMU off (head.S 진입), slide 아직 미상 상태에서 무장
+# armed while MMU off (head.S entry), with the slide still unknown
 (gdb) kw kimage_voffset
 [kgdb] kw 'kimage_voffset'  linkVA=0xffff800082148000  watch  8-byte
         watch @ 0x0000000042348000  PA  MMU-off/idmap  (head.S data writes, page tables)  [wp 2]
@@ -736,19 +737,19 @@ gdb의 `watch SYM`은 **입력한 그 순간 심볼이 가리키던 주소 하�
 (gdb) kearly kaslr auto
 [kgdb] KASLR slide = 0x253005a00000 applied: ...
 
-(gdb) info watchpoints          # IMG가 linkVA+slide 로 이동해 있다
+(gdb) info watchpoints          # IMG has moved to linkVA+slide
 2       hw watchpoint  keep y   *(unsigned long long *)0x42348000
 5       hw watchpoint  keep y   *(unsigned long long *)0xffffa53087b48000
 
-(gdb) continue                  # 재배치된 VA 쪽 기록에서 발화
+(gdb) continue                  # fires on a write to the relocated VA side
 Thread 1 hit Hardware watchpoint 5: *(unsigned long long *)0xffffa53087b48000
 Old value = 0x0
 New value = 0xffffa53045800000
 __primary_switched () at arch/arm64/kernel/head.S:234
 ```
 
-PA 쪽 발화도 대칭으로 동작한다 — `kw boot_args` 뒤 `continue`하면 MMU가 아직 꺼진
-`preserve_boot_args`(head.S:174)에서 걸리며 QEMU가 넘긴 DTB 포인터 저장을 그대로 잡는다.
+The PA side fires symmetrically too — after `kw boot_args`, `continue` catches at `preserve_boot_args` (head.S:174) while the MMU is
+still off, catching the store of the DTB pointer QEMU handed over exactly.
 
 ```
 Thread 1 hit Hardware watchpoint 3: *(unsigned long long *)0x43a56000
@@ -758,37 +759,37 @@ preserve_boot_args () at arch/arm64/kernel/head.S:174
 [kgdb] MMU=off [ctrl-reg]  map=physical  pc=0x0000000042bca710  SCTLR_EL1.M=0
 ```
 
-`-r`(rwatch)·`-a`(awatch)와 `kw *ADDR [SIZE]`(SIZE ∈ {1,2,4,8})도 같은 방식으로 걸린다.
-**HW 워치포인트 슬롯을 항목당 2개 소비**한다. 실기 arm64 코어는 보통 4개뿐이라 두 개만 걸어도
-포화되지만, QEMU TCG는 더 너그럽다(`kw` 3개 = 6워치포인트가 모두 무장되는 것을 실측). 어느 쪽이든
-슬롯을 채우는 것 자체가 목적이 아니므로 필요한 지점에만 걸고, 무장에 실패하면 `kw`가 아무것도
-걸지 못했음을 명시적으로 알린다.
+`-r` (rwatch)·`-a` (awatch) and `kw *ADDR [SIZE]` (SIZE ∈ {1,2,4,8}) work the same way.
+It **consumes 2 HW watchpoint slots per item**. A real arm64 core usually has only 4, so two entries already saturate it,
+but QEMU TCG is more generous (three `kw` = 6 watchpoints all armed, measured). Either way, filling
+slots is not itself the goal, so set only where needed; if arming fails, `kw` explicitly reports that it
+armed nothing.
 
 ---
 
-## 10.2 상태 패널의 KASLR 칸
+## 10.2 The KASLR field of the status panel
 
-pwndbg `kgdb` 섹션(및 `kearly where`)의 `KASLR=` 칸은 **알 수 있는 값이면 언제나 숫자**를 보인다.
-패널을 보는 이유가 그것이기 때문이다 — 슬라이드 0은 "없음"이 아니라 하나의 정보다.
+The `KASLR=` field of the pwndbg `kgdb` section (and `kearly where`) shows **a number whenever the value is knowable**,
+because that is the reason to look at the panel — a slide of 0 is not "absent", it is information.
 
 ```
-KASLR=0x4ca043800000                  KASLR 켜짐, 크로싱에서 확정된 값
-KASLR=0  (KASLR 비활성화)              nokaslr -- 리셋 벡터에서부터 확정
+KASLR=0x4ca043800000                  KASLR on, the value fixed at the crossing
+KASLR=0  (KASLR disabled)              nokaslr -- fixed from the reset vector on
 KASLR=? (undecided until the crossing -- still physical, MMU off)
 ```
 
-`nokaslr` 판정은 DTB의 `/chosen/bootargs`에서 읽는다. QEMU가 arm64·riscv에 cmdline을 그 경로로
-넘기므로 커널이 아직 아무것도 파싱하지 않은 리셋 벡터에서도 답할 수 있다(x86은 DTB가 없어
-`start_kernel` 이후에야 확정된다). 커널 전역(`saved_command_line`)은 fallback이다.
+The `nokaslr` decision is read from the DTB's `/chosen/bootargs`. Since QEMU passes the cmdline to arm64·riscv by that path,
+it can answer even at the reset vector, before the kernel has parsed anything (x86 has no DTB, so it is fixed only after
+`start_kernel`). The kernel global (`saved_command_line`) is a fallback.
 
-KASLR을 켠 채 크로싱 이전이면 `?`다. 그 시점에는 슬라이드가 **어디에도 존재하지 않으므로**
-0을 지어내지 않고 무엇을 기다리는지 말한다.
+With KASLR on and before the crossing it is `?`. At that point the slide **exists nowhere**,
+so instead of inventing a 0 it says what it is waiting for.
 
-## 10.3 레짐이 안 맞으면 답하지 않고, 이유를 말한다
+## 10.3 If the regime does not match it does not answer, it says why
 
-한쪽 주소 체계를 가정하는 명령을 반대쪽 레짐에서 실행하면 **조용히 틀린 답이 나오는 것**이 가장
-나쁘다. 실제로 그랬다 — MMU가 켜지기 전 head.S에서 `kv2p $pc`는 `$pc`가 물리 주소인데도 가상으로
-가정해 `0x0000800000400000` 같은 그럴듯한 무의미한 값을 돌려줬다. 지금은 거절하고 이유를 말한다.
+The worst outcome is **a quietly wrong answer** when a command that assumes one address scheme runs in the other regime.
+That actually happened — in head.S before the MMU is on, `kv2p $pc` assumed `$pc` was virtual even though it was physical
+and returned a plausible, meaningless value like `0x0000800000400000`. Now it refuses and says why.
 
 ```
 (gdb) kv2p $pc
@@ -797,118 +798,111 @@ KASLR을 켠 채 크로싱 이전이면 `?`다. 그 시점에는 슬라이드가
       Use `kp2v` for this direction, or `sym` which accepts either.
 ```
 
-거절 문구는 어디서나 같은 세 가지를 말한다: **명령이 무엇을 가정했는지 / 지금 실제로는 어떤
-상태인지 / 대신 무엇을 쓰면 되는지**. 가운데 한 줄은 `Session.regime_phrase()`가 공급하므로
-표현이 갈라지지 않는다.
+The refusal text says the same three things everywhere: **what the command assumed / what the actual state is right now /
+what to use instead**. The middle line is supplied by `Session.regime_phrase()`, so the wording does not diverge.
 
-같은 이유로 고친 것들:
+Others fixed for the same reason:
 
-- `kp2v`에 이미 가상인 주소를 주면 거절한다(반대 방향 안내).
-- `kfin`은 링크 레지스터가 0인 진입 시점에 **CPU를 진행시키지 않는다**. 예전에는 주소 0으로
-  달려가 게스트를 날려버렸고, 그 뒤 명령이 전부 "target is running"으로 실패했다.
-- `stackscan`은 "no symbolizable pointers"가 아니라 `$sp`가 아직 0이라는 사실과, arm64 head.S가
-  `__primary_switch`의 `adrp x1, early_init_stack`에서야 sp를 세운다는 것을 알린다.
+- `kp2v` refuses an already-virtual address (with guidance for the other direction).
+- `kfin` **does not advance the CPU** at an entry point where the link register is 0. It used to run off to address 0
+  and blow away the guest, after which every command failed with "target is running".
+- `stackscan` reports, instead of "no symbolizable pointers", the fact that `$sp` is still 0 and that arm64 head.S
+  only sets up sp at `adrp x1, early_init_stack` in `__primary_switch`.
 
-나머지 명령들은 이미 이유를 밝히고 있다 — 전수 조사로 확인했다: `kpt`는 "paging is off",
-`kpgd`/`kpthex`는 "cannot read the page-table base (paging off / stub)", `ksr`는 stub이 못 주는
-레지스터를 `mrs` 단일 스텝으로 얻는 법, `koff`/`mmview`/`kearly mmu`는 현재 레짐을 머리에 달고
-출력한다.
+The remaining commands already state their reason — confirmed by a census: `kpt` says "paging is off",
+`kpgd`/`kpthex` "cannot read the page-table base (paging off / stub)", `ksr` shows how to get a register the stub cannot provide
+with a single `mrs` step, and `koff`/`mmview`/`kearly mmu` print the current regime in their header.
 
-## 10.35 `kearly safemem` — pwndbg 탐침이 QEMU를 죽이는 것 막기
+## 10.35 `kearly safemem` — stop a pwndbg probe from killing QEMU
 
-**증상.** KASLR 커널에서 `vfs_write` 같은 syscall 경로 함수에 멈춘 뒤 pwndbg가 컨텍스트를
-그리면 **QEMU가 SIGSEGV로 죽고** 이어서 gdb가 abort한다. 재현율 100%였다(4/4, 3/3, 3/3).
+**Symptom.** On a KASLR kernel, after stopping in a syscall-path function like `vfs_write`, when pwndbg draws the context,
+**QEMU dies of SIGSEGV** and gdb aborts after it. The reproduction rate was 100% (4/4, 3/3, 3/3).
 
-**원인.** pwndbg는 커널 타깃에 `/proc/<pid>/maps`가 없으니 메모리 맵을 **탐침으로 추정**한다 —
-페이지 정렬 주소에 1바이트 읽기를 렌더당 약 170회. 대부분은 조용히 실패한다. 그런데 그 시점은
-유저 프로세스의 syscall 문맥이라 TTBR0가 그 프로세스 페이지테이블을 가리키고, 탐침 주소가
-RAM 밖으로 번역되면 QEMU가 디바이스 모델로 디스패치하다 죽는다. 코어 스택이 그대로 말해준다:
+**Cause.** pwndbg has no `/proc/<pid>/maps` for a kernel target, so it **estimates the memory map by probing** —
+a 1-byte read at page-aligned addresses, about 170 per render. Most fail quietly. But at that moment the context is a user
+process's syscall context, so TTBR0 points at that process's page tables, and when a probe address translates outside RAM,
+QEMU dispatches into a device model and dies. The core stack says it plainly:
 
 ```
 gdb_read_byte -> cpu_memory_rw_debug -> flatview_read_continue
               -> memory_region_dispatch_read -> SEGV
 ```
 
-**귀속.** 이 툴이 아니다. pwndbg만 올리고 이 플러그인을 **로드하지 않은** 상태에서도 죽었고,
-반대로 순정 gdb(`-nx`)는 같은 조건에서 멀쩡했다. 세 조건(KASLR + syscall 문맥 + 풀 컨텍스트
-렌더)이 겹쳐야 하며, 하나만 빠져도 나지 않는다 — `nokaslr`이면 안 나고, 브레이크만 걸고
-컨텍스트를 안 그리면 안 나고, head.S 구간에서도 안 난다.
+**Attribution.** It is not this tool. It died with only pwndbg loaded and this plugin **not loaded**, and conversely
+stock gdb (`-nx`) was fine under the same conditions. Three conditions (KASLR + syscall context + a full context render)
+must coincide; with any one missing it does not happen — not with `nokaslr`, not if you only break and do not draw the
+context, and not in the head.S region.
 
-**대처.** pwndbg의 모든 읽기가 지나는 단일 통로(`pwndbg/aglib/memory.py`의 `read`)를 감싼다.
-읽기 전에 `monitor gva2gpa`로 그 페이지가 매핑됐는지 묻고, `Unmapped`면 QEMU에 요청하지 않고
-**pwndbg가 이미 처리할 줄 아는 평범한 읽기 실패**로 돌려준다. `gva2gpa`는 어떤 입력에도
-안전하다 — 실제로 크래시를 낸 그 주소에 대해서도 `Unmapped`를 정상 반환한다.
+**Handling.** It wraps the single path every pwndbg read goes through (`read` in `pwndbg/aglib/memory.py`).
+Before a read, it asks `monitor gva2gpa` whether that page is mapped, and if `Unmapped` it does not ask QEMU and returns
+**the ordinary read failure pwndbg already knows how to handle**. `gva2gpa` is safe on any input —
+it returns `Unmapped` normally even for the very address that caused the crash.
 
 ```
-kearly safemem status      installed / 차단한 탐침 수(blocked) / monitor로 되살린 읽기 수(rescued)
-kearly safemem on|off|auto (기본 auto: 커널 타깃 + 번역 활성일 때만)
+kearly safemem status      installed / number of probes blocked / number of reads rescued via monitor (rescued)
+kearly safemem on|off|auto (default auto: only when kernel target + translation active)
 ```
 
-pwndbg를 수정하지 않는다. 가장 낮은 단일 통로(gdb 백엔드의 `GDBProcess.read_memory`)를 감싼다 —
-레지스터 인핸서·telescope·스택 덤프가 모두 이 아래로 내려오므로 그보다 낮게 새는 경로가 없다.
-원본 읽기는 보관하고 위험한 주소만 걸러내며, 판정이 불가능하면 그냥 통과시킨다. 페이지 단위로
-캐시하고 정지마다 비운다.
+It does not modify pwndbg. It wraps the lowest single path (the gdb backend's `GDBProcess.read_memory`) —
+the register enhancer, telescope, and stack dumps all come down below this, so there is no path that leaks lower than it.
+It keeps the original read and filters only dangerous addresses, and passes through when it cannot decide. It caches per page
+and clears at every stop.
 
-근본 결함은 QEMU에 있다. 어떤 주소를 물어보든 디버그 읽기가 SEGV로 죽어선 안 된다. 여기서 한
-것은 **유발하지 않도록 회피**한 것이지 고친 것이 아니다. 회귀는 크래시 가드 테스트로 잡는다.
+The root defect is in QEMU. No matter what address you ask about, a debug read should not die of SEGV. What is done here is
+**avoiding triggering it**, not fixing it. A regression is caught by the crash-guard test.
 
-### 초기-부트에서도 pwndbg 특유의 수려한 TUI 유지 (두 가지 보강)
+### Keep pwndbg's own polished TUI even in early boot (two reinforcements)
 
-**(1) pagescan 경고 스팸 제거.** pwndbg의 `auto-explore-pages`는 커널 타깃(맵을 모름)에서
-정지마다 정크 레지스터값을 telescope할 때 `Avoided exploring ... / Likely a pagescan bug,
-please report`를 수십 줄 쏟아내 레지스터 telescope를 뒤덮는다. 이 플러그인은 커널 타깃에서
-활성화되는 동안 이 값을 `no`로 두고(정지마다 확인함), `kearly off`에서 **사용자의 이전 값으로
-원복**한다. 실측: arm64 v6.12 KASLR의 `__enable_mmu`(MMU off, 물리) 정지에서 레지스터 telescope와
-색상은 켜든 끄든 **완전히 동일**하고, 차이는 오직 정지당 약 11줄의 경고 유무뿐이다. telescope /
-역참조 / 심볼화 같은 실제 표시 기능은 손대지 않는다 — 오직 잡음 발생 휴리스틱 하나만 끈다.
+**(1) Remove the pagescan warning spam.** pwndbg's `auto-explore-pages`, on a kernel target (no map),
+pours out dozens of lines of `Avoided exploring ... / Likely a pagescan bug, please report` while telescoping junk register values
+at each stop, burying the register telescope. This plugin, while active on a kernel target, keeps this value at `no` (checking at each stop)
+and **restores it to the user's previous value** on `kearly off`. Measured: at the `__enable_mmu` (MMU off, physical) stop of arm64
+v6.12 KASLR, the register telescope and colors are **completely identical** whether it is on or off, and the only difference is the
+presence or absence of about 11 warning lines per stop. It does not touch the actual display features like telescope /
+dereference / symbolization — it turns off only the one noise-producing heuristic.
 
-**(2) 읽기 되살리기(rescue) — regime 무관.** CPU들이 서로 다른 번역 regime에 동시에 놓이면
-(이차 코어가 `__enable_mmu` 물리 코드에 있는데 다른 코어는 MMU on으로 커널을 돌리거나, riscv SMP에서
-**정상 가상 정지인데** 형제 hart가 부팅 중이거나) QEMU gdbstub가 그 읽기를 서비스하지 못해 gdb
-`Inferior.read_memory`가 `MemoryError`로 실패한다 — CPU가 바로 그 자리에서 실행 중인데도. 그러면
-pwndbg telescope는 화살표가 사라지고 네이티브 DISASM은 `Invalid address`를 찍는다. 반면 HMP
-`monitor xp`는 어떤 코어의 regime과도 무관한 물리 경로라 **여전히 읽힌다**. safemem 가드는 라이브
-읽기가 실패하면, 실패한 주소를 물리주소로 바꿔 `monitor xp`로 되살린다:
+**(2) Read rescue — regime-independent.** When CPUs are simultaneously in different translation regimes
+(a secondary core is in `__enable_mmu` physical code while another core runs the kernel MMU-on, or a **normal virtual stop** in a riscv SMP
+where a sibling hart is booting), the QEMU gdbstub cannot service that read and gdb's `Inferior.read_memory` fails with `MemoryError` —
+even though the CPU is executing right there. Then the pwndbg telescope loses its arrows and the native DISASM prints `Invalid address`.
+Meanwhile HMP `monitor xp` is a physical path independent of any core's regime, so it **still reads**. When a live read fails,
+the safemem guard converts the failed address to a physical address and rescues it via `monitor xp`:
 
-* 물리(저)주소는 그대로 쓰고,
-* 가상주소는 게스트 페이지테이블(`monitor gva2gpa`)로 번역하되, **그 stop에서 실행 중인 코어(=gdb가
-  선택한 스레드의 hart)의 페이지테이블 기준으로** 번역한다. HMP `gva2gpa`는 기본으로 HMP-현재 코어를
-  쓰는데, riscv는 **부팅 hart가 매 부팅마다 랜덤**이라 기본 코어(cpu 0)가 Bare(MMU off) 이차 hart일
-  때가 있고, 그러면 gva2gpa가 입력 VA를 **그대로 되돌려준다**(identity, 번역 아님). 그래서 먼저
-  `monitor cpu <선택코어>`로 맞추고, identity·여전히-고VA인 응답은 거부하며, 필요하면 코어를 훑어
-  실제 물리주소를 얻는다. 어느 코어에도 아직 매핑이 없는 VA(예: 상위 맵 생성 전)는 거짓 PA를 주지
-  않고 그냥 사양한다.
+* a physical (low) address is used as-is,
+* a virtual address is translated via the guest page tables (`monitor gva2gpa`), but **relative to the page tables of the core executing at that
+  stop (= the hart of the thread gdb selected)**. HMP `gva2gpa` uses the HMP-current core by default, but on riscv the **boot hart is random each
+  boot**, so the default core (cpu 0) is sometimes a Bare (MMU off) secondary hart, and then gva2gpa **returns the input VA unchanged**
+  (identity, not translation). So it first aligns with `monitor cpu <selected core>`, rejects an identity or still-high-VA response, and if
+  necessary sweeps the cores to get the real physical address. For a VA not yet mapped on any core (e.g. before the high map is built), it does
+  not give a false PA and simply declines.
 
-그 물리 대상이 **실제 게스트 RAM**일 때만 읽는다. RAM 여부는 하드코딩한 창이 아니라 **QEMU에 직접
-물어본다** — `monitor gpa2hva`가 RAM이면 `Host virtual address ... (pc.ram) is 0x..`, 디바이스면
-`is not RAM`, 빈 곳이면 `No memory is mapped`로 답하므로 디바이스 모델은 절대 건드리지 않는다(구형
-QEMU로 명령이 없으면 아치별 `phys_window` 프리셋으로 폴백). 실측: arm64 이차 `__enable_mmu` 정지에서
-전체 `context`가 rescue 수백 회로도 **0.1초 안**에 telescope·색상·DISASM이 모두 살아나고, riscv의
-`Invalid address` 3건(형제 hart 타이밍 의존)도 0으로 닫힌다. 되살린 횟수는 `kearly safemem status`의
-`rescued`. 원래 크래시 경로(가상 정지의 **매핑 안 된** 정크 포인터)는 위쪽 zero-fill 가드가 먼저
-차단하므로 rescue까지 오지 않아 `crashguard`는 그대로 통과한다(arm64·x86·riscv 실측 확인). 이 되살리기는
-**아키텍처 무관**이며, 애초에 라이브 읽기가 되는 상황에서는 아무 일도 하지 않는다 — 필요한 곳에서만 발동.
+It reads only when that physical target is **actual guest RAM**. Whether it is RAM it **asks QEMU directly** rather than using a hardcoded
+window — `monitor gpa2hva` answers `Host virtual address ... (pc.ram) is 0x..` for RAM, `is not RAM` for a device, and
+`No memory is mapped` for an empty spot, so it never touches a device model (with an old QEMU that lacks the command, it falls back to the
+per-arch `phys_window` preset). Measured: at the arm64 secondary `__enable_mmu` stop, the whole `context` — even with hundreds of rescues —
+brings telescope, colors, and DISASM all back **within 0.1s**, and riscv's three `Invalid address` (sibling-hart timing dependent) also close to
+zero. The rescue count is `rescued` in `kearly safemem status`. The original crash path (an **unmapped** junk pointer at a virtual stop) is
+caught first by the upper zero-fill guard, so it never reaches rescue, and `crashguard` still passes (verified on arm64·x86·riscv). This rescue is
+**architecture-independent** and does nothing when the live read works to begin with — it fires only where needed.
 
-> 정정(실측으로 바로잡음): 예전에 "MMU off인 이차 코어에 멈추면 높은 가상주소를 읽는 건 원리상
-> 불가능"이라고 적었는데, **이는 틀렸다.** 실측 결과, 그런 동시-regime 정지에서 gdbstub 읽기는
-> 흔히 MMU on인 다른 코어의 문맥으로 라우팅되므로 커널 고VA(`vfs_write` 등)는 순정 gdb로도 잘
-> 읽히고(정작 실패하던 쪽은 그 이차 코어의 **물리 pc**였다), 설령 읽기가 이차 코어로 라우팅돼
-> 고VA가 실패해도 rescue의 `gva2gpa`가 **HMP 기준 코어(대개 MMU on인 CPU0)**로 번역하므로 되살린다.
-> 커널 고VA는 부팅 후 모든 코어의 상위 매핑에 들어있어 항상 번역된다. 진짜로 못 읽는 경우는 **아직
-> 어느 코어에도 그 매핑이 없는** 극초기(상위 맵 생성 전)뿐이며, 그건 매핑이 실제로 없으니 옳게
-> 사양한다. 즉 물리·가상 어느 쪽으로 라우팅되든 rescue가 덮는다.
+> Correction (fixed by measurement): I previously wrote "if you stop on an MMU-off secondary core, reading a high virtual address is impossible
+> in principle", but **that was wrong.** Measurement shows that in such a simultaneous-regime stop, gdbstub reads are commonly routed through the
+> context of another core that is MMU-on, so a kernel high VA (`vfs_write` etc.) reads fine even with stock gdb (what actually failed was the
+> secondary core's **physical pc**), and even if the read is routed to the secondary core and the high VA fails, the rescue's `gva2gpa` translates
+> relative to the **HMP-reference core (usually the MMU-on CPU0)** and rescues it. A kernel high VA is in every core's high mapping after boot, so
+> it always translates. The one case that truly cannot be read is the earliest boot where **no core has that mapping yet** (before the high map is
+> built), and that declines correctly because the mapping really is absent. So whether routed physical or virtual, the rescue covers it.
 >
-> 코어(스레드) 전환도 그대로 성립한다: regime 판정은 **현재 선택된 스레드의 pc/레지스터**로 하므로,
-> `thread N`으로 코어를 바꾸면 KGDB 패널·telescope가 그 코어의 실행 맥락(MMU on/off, 물리/가상)에
-> 맞춰 자동으로 바뀐다. 실측: 한 정지에서 이차(MMU off)는 `PHYS`, 주 코어(MMU on)는 `VIRT`로,
-> 양쪽 다 완전한 telescope 렌더.
+> Core (thread) switching holds too: the regime decision is made from the **currently selected thread's pc/registers**, so switching cores with
+> `thread N` automatically changes the KGDB panel·telescope to that core's execution context (MMU on/off, physical/virtual). Measured: in one stop
+> the secondary (MMU off) is `PHYS` and the primary core (MMU on) is `VIRT`, both with a full telescope render.
 
-### cross-regime 레지스터 twin (물리 정지에서 VA의 물리 twin 병기)
+### Cross-regime register twin (in a physical stop, show the physical twin of a VA alongside)
 
-물리/전환 regime에 멈추면 어떤 레지스터가 아직 **닿을 수 없는 커널 가상주소**를 담고 있을 수 있다.
-대표적 예: phys->virt 전환 순간(arm64 `br x8`)의 `x8 = __primary_switched` — 상위 맵이 아직 이 코어에
-활성화되지 않아 그 VA로는 지금 접근이 안 된다. KGDB 패널은 **pwndbg 네이티브 REGISTERS는 그대로 두고**,
-tool 자체 패널에 그 VA의 **지금 닿을 수 있는 물리 twin**을 병기한다:
+When stopped in a physical/transition regime, some register may hold a **kernel virtual address that is not yet reachable**.
+A representative example: `x8 = __primary_switched` at the phys->virt transition moment (arm64 `br x8`) — the high map is not yet
+active on this core, so that VA is not accessible right now. The KGDB panel **leaves pwndbg's native REGISTERS as-is** and,
+in the tool's own panel, shows the **now-reachable physical twin** of that VA alongside:
 
 ```
  cross-regime regs (VA -> reachable PA twin):
@@ -916,41 +910,40 @@ tool 자체 패널에 그 VA의 **지금 닿을 수 있는 물리 twin**을 병�
    x8   0xffffa9f7289ca730  (__primary_switched)  ->  PA 0x0000000042bca730
 ```
 
-VA->PA 한 방향만 한다 — `_is_va`(상위 비트 전부 1)는 애매하지 않은 판정이라, 큰 값을 담은 제어/ID
-레지스터(`PMCR_EL0`, `ID_MMFR1`, `cpsr` 등)를 포인터로 오인하지 않는다. 물리 window 안에 드는 twin만
-보이므로 KASLR 슬라이드가 미확정인 순간에도 엉뚱한 주소를 찍지 않고, 물리 twin이 없거나 **가상 정지(주소가
-이미 가상-정확)**이면 이 줄은 아예 안 나와 조용하다. 실측(3아치): arm64 `x8->PA` 병기, riscv 동일, x86은
-전환이 `jmp *ptr`이라 레지스터에 VA가 안 담겨 조용(정상). all-in-one walk에서 창 완전·에러 0 유지.
+It does VA->PA one direction only — `_is_va` (all top bits 1) is an unambiguous decision, so it does not mistake a control/ID register
+holding a large value (`PMCR_EL0`, `ID_MMFR1`, `cpsr` etc.) for a pointer. Only a twin that falls inside the physical window is shown,
+so it prints no stray address even at a moment when the KASLR slide is undetermined, and when there is no physical twin or it is a **virtual stop
+(the address is already virtual-correct)** this line does not appear at all and stays quiet. Measured (3 arches): arm64 `x8->PA` shown, riscv
+the same, x86 quiet because its transition is `jmp *ptr` and no VA is held in a register (normal). In the all-in-one walk it keeps the window
+complete with 0 errors.
 
-### 커널 버전 탐지가 `context`를 죽이지 않게 (`install_kernel_guards`)
+### Keep kernel-version detection from killing `context` (`install_kernel_guards`)
 
-**증상.** 붙자마자 `b start_kernel; c`로 **극초기 start_kernel(init/main.c:915)**에 멈춘 뒤 context를
-그리면 `Exception occurred: context: Linux version tuple not found`로 **context 전체가 안 그려진다.**
-그런데 조금 더 진행한 `vfs_write`·`ip_local_out` 등에선 멀쩡하다. 간헐적이라 더 헷갈린다.
+**Symptom.** Right after attaching, stopping at the **earliest start_kernel (init/main.c:915)** with `b start_kernel; c` and then drawing the
+context gives `Exception occurred: context: Linux version tuple not found`, and **the whole context is not drawn.**
+Yet at `vfs_write`·`ip_local_out` a little further along it is fine. Being intermittent makes it more confusing.
 
-**원인.** pwndbg는 context에서 커널 버전을 알려고 `linux_banner`(.rodata 문자열)를 읽어
-`krelease()`로 파싱한다. `krelease()`는 `kversion()`이 **비어있지 않은데 `Linux version X.Y`가 아닌**
-문자열을 주면 **None이 아니라 예외를 던진다**(pwndbg 코드). 상위 가상 맵이 막 켜진 그 순간엔 배너 읽기가
-아직 불안정해 짧은 쓰레기가 나올 수 있고, 그러면 예외가 나 context가 통째로 중단된다. `krelease`는
-`cache_until("start")`라 `continue`마다 재계산되므로, 유저스페이스가 뜬 뒤엔 배너가 깨끗이 읽혀 정상으로
-돌아온다 — 그래서 "start_kernel만, 가끔" 처럼 보인다. **멀티코어와는 무관**(그 시점 CPU0 단독).
+**Cause.** In the context, pwndbg tries to learn the kernel version by reading `linux_banner` (a .rodata string) and parsing it with
+`krelease()`. `krelease()` **throws an exception rather than returning None** (pwndbg code) when `kversion()` gives a **non-empty**
+string that is not `Linux version X.Y`. At the moment the high virtual map has just come up, the banner read is still unstable and may return
+a short piece of garbage, and then the exception aborts the whole context. Since `krelease` is `cache_until("start")`, it is recomputed on every
+`continue`, so once userspace is up the banner reads cleanly and it returns to normal — which is why it looks like "only at start_kernel,
+sometimes". **Unrelated to multicore** (CPU0 alone at that moment).
 
-**대처.** `krelease()`(및 `kversion()`)를 감싸 **실패 시 예외 대신 None**을 돌려준다. 버전을 아직 못 읽는
-것은 "미상(None)" 상황이지 치명적 오류가 아니며, pwndbg 자신의 호출자들도 `krelease() is None`을
-"버전 미상"으로 이미 처리한다. 그래서 배너가 못 읽혀도 **context는 끝까지 그려진다**. 배너가 읽히는
-평상시엔 실제 버전 튜플을 그대로 돌려주므로 잃는 것도 없다. 표시 기능은 손대지 않는다. 결정적 검증:
-start_kernel에서 kversion을 강제로 쓰레기로 만들어 원본 `krelease`는 예외(재현), 감싼 것은 None을 내고
-`context`가 끝까지 렌더됨을 확인.
+**Handling.** It wraps `krelease()` (and `kversion()`) to **return None instead of an exception on failure**. Not yet being able to read the
+version is an "unknown (None)" situation, not a fatal error, and pwndbg's own callers already treat `krelease() is None` as "version unknown".
+So even if the banner cannot be read, **the context is drawn to the end**. In the normal case where the banner reads, it returns the real version
+tuple as-is, so nothing is lost. It does not touch the display features. Definitive check: forcing kversion to garbage at start_kernel, the original
+`krelease` throws (reproduced), and the wrapped one returns None with `context` rendered to the end.
 
-> 정직한 한계: 극초기의 배너 읽기 불안정 자체(gdbstub/초기 매핑 타이밍)는 회피(가드)한 것이지 근본을
-> 고친 게 아니다. 이 경우 pwndbg가 커널 버전을 모르게 되지만(=None), context·초기부트 디버깅에는
-> 영향이 없다.
+> Honest limitation: the instability of the earliest-boot banner read itself (gdbstub/early-mapping timing) is avoided (guarded), not fixed at the
+> root. In this case pwndbg does not learn the kernel version (= None), but there is no impact on the context or on early-boot debugging.
 
-## 10.4 `kearly where` — "지금 내 상황이 뭐냐"를 한 줄 명령으로
+## 10.4 `kearly where` — "what is my situation right now" as a one-line command
 
-멈춘 자리에서 상황을 파악하려면 예전에는 `kearly status`(캘리브레이션), `kearly mmu`(MMU),
-`sym $pc`(어디인지), `kearly kaslr status`(슬라이드) 네 개를 따로 쳐야 했다. 값 자체는 이미
-매 정지마다 pwndbg 패널에 렌더링되고 있었고, 없던 건 **물어볼 방법**이었다.
+To take stock at the spot you stopped, you used to have to type four separate commands: `kearly status` (calibration),
+`kearly mmu` (MMU), `sym $pc` (where you are), `kearly kaslr status` (slide). The values themselves were already
+rendered in the pwndbg panel at every stop; what was missing was **a way to ask**.
 
 ```
 (gdb) kearly where
@@ -963,17 +956,16 @@ PHYS addressing  (MMU off)   [ctrl-reg]
   next     kearly regimes      (list this build's MMU stop points), or kearly overmmu to cross now
 ```
 
-`twin`은 현재 pc의 반대편 주소(물리↔가상)다. `phase`는 리셋 벡터 이전인지, 커널 진입점인지,
-진입 후 아직 물리인지, 가상 체계가 선 뒤인지를 말한다. `next`는 지금 상황에서 다음에 칠 가능성이
-가장 높은 명령이다.
+`twin` is the opposite-side address of the current pc (physical↔virtual). `phase` says whether you are before the reset vector,
+at the kernel entry point, past the entry but still physical, or after the virtual scheme is up. `next` is the command you are most
+likely to type next in the current situation.
 
-**읽기 전용이다.** 레지스터를 쓰지 않고, 프로브를 걸지 않고, CPU를 재개하지 않는다. 그래서 어떤
-레짐에서 쳐도 안전하다.
+**It is read-only.** It writes no register, sets no probe, and resumes no CPU. So it is safe to type in any regime.
 
-## 10.5 `kearly regimes` — 이 빌드의 MMU 정지점
+## 10.5 `kearly regimes` — this build's MMU stop points
 
-"이 커널에서 MMU는 정확히 어디서 켜지나"를 알려면 gdb 밖에서 vmlinux를 디스어셈블하고 오프셋을
-세야 했다. 이제 툴이 실행 이미지를 스캔해 직접 답한다 — 버전별 상수는 하나도 없다.
+To know "where exactly the MMU is turned on in this kernel", you used to have to disassemble vmlinux outside gdb and count offsets.
+Now the tool scans the running image and answers directly — with not a single per-version constant.
 
 ```
 (gdb) kearly regimes
@@ -990,36 +982,35 @@ PHYS addressing  (MMU off)   [ctrl-reg]
             start_kernel, steady state  -- start_kernel
 ```
 
-`mmuon`은 새 아키텍처 훅 `find_mmu_enable`이 **opcode 스캔**으로 찾는다: arm64는
-`msr sctlr_el1, xN`(0xD5181000 | Rt), riscv는 `csrw satp`(0x18001073 | rs1<<15), x86은
-`mov %rXX,%cr3`(0f 22 d?). 레지스터 번호도 커널 버전도 모른 채 찾아진다.
+`mmuon` is found by the new architecture hook `find_mmu_enable` via an **opcode scan**: arm64 is
+`msr sctlr_el1, xN` (0xD5181000 | Rt), riscv is `csrw satp` (0x18001073 | rs1<<15), x86 is
+`mov %rXX,%cr3` (0f 22 d?). It is found without knowing the register number or the kernel version.
 
-`kearly regimes walk` 은 다섯 지점을 전부 무장해서, 이후 그냥 `continue`만 반복하면 MMU 전이를
-순서대로 통과한다. 실측 (arm64 6.12):
+`kearly regimes walk` arms all five points, so afterwards simply repeating `continue` passes the MMU transitions in order.
+Measured (arm64 6.12):
 
 ```
 0x42bb84a8  ->  0x42bb8518  ->  0xffffa33cc9fca730  ->  0xffffa33cc9fc0bd8
   msr sctlr      br x8            __primary_switched      start_kernel+8
 ```
 
-**HW 슬롯은 정지점당 정확히 1개만 쓴다.** head.S 코드는 고VA 맵에서 실행될 일이 없고
-`start_kernel`은 물리에서 실행될 일이 없으므로, 각 지점의 레짐을 알고 있는 이 명령은 쌍둥이 중
-한쪽만 무장한다(`kb`의 새 `sides` 인자). 양쪽을 다 걸면 5개 지점에 8개를 쓰게 되는데, 그중 셋은
-영원히 매치되지 않는 자리였다.
+**It uses exactly 1 HW slot per stop point.** head.S code never executes at the high-VA map and `start_kernel` never executes physically,
+so this command, knowing each point's regime, arms only one of each twin (`kb`'s new `sides` argument). Arming both would use 8 slots for
+5 points, three of which would be positions that never match.
 
-riscv는 네 지점만 나온다. `csrw satp` 하나가 "번역을 켜는 명령"이자 "물리→가상 전이 명령"이라
-두 항목이 같은 주소로 합쳐지기 때문이다 — 없는 정지점을 있는 것처럼 보이게 하지 않는다.
+riscv shows only four points. One `csrw satp` is both "the instruction that turns translation on" and "the physical→virtual transition
+instruction", so the two entries merge into the same address — it does not make a nonexistent stop point look like it exists.
 
-`kearly regimes stop <id>` 는 한 지점까지 바로 달린다.
+`kearly regimes stop <id>` runs straight to one point.
 
-## 10.6 `kx` — 번역을 우회하는 물리 메모리 examine
+## 10.6 `kx` — physical memory examine that bypasses translation
 
-`x`는 항상 **현재 페이지테이블을 통해** 주소를 해석한다. 그래서 "PC는 물리값인데 번역은 이미 켜진"
-찰나에는 자기가 멈춰 선 자리조차 읽지 못한다.
+`x` always interprets an address **through the current page tables**. So in the instant when "the PC is a physical value but translation
+is already on", it cannot read even the spot it stopped at.
 
-riscv가 정확히 그 지점을 만든다. `relocate_enable_mmu`의 `csrw satp, a0` 다음 페치는 곧바로
-트랩되어 `stvec`(가상 주소)로 착지하도록 설계돼 있다. 그 경계에서 멈추면 `$pc`는 물리값
-`0x80201048`인데, 그 값은 새 매핑에서 유효한 VA가 아니다:
+riscv creates exactly that spot. The fetch after `csrw satp, a0` in `relocate_enable_mmu` is designed to trap immediately and land at
+`stvec` (a virtual address). Stopping at that boundary, `$pc` is the physical value `0x80201048`, but that value is not a valid VA in the new
+mapping:
 
 ```
 (gdb) printf "%#lx\n", $pc
@@ -1030,42 +1021,42 @@ riscv가 정확히 그 지점을 만든다. `relocate_enable_mmu`의 `csrw satp,
 0x0000000080201048:	0x17 0x05 0x00 0x00 0x13 0x05 0x45 0x07 0x73 0x10 0x55 0x10 0x97 0xc1 0x57 0x02
 ```
 
-읽힌 16바이트는 vmlinux의 `0xffffffff80001048` 내용과 정확히 일치한다
+The 16 bytes read match exactly the contents of vmlinux's `0xffffffff80001048`
 (`auipc a0,0x0` / `addi a0,a0,116` / `csrw stvec,a0` / `auipc gp,0x257c`).
 
-`kx`는 QEMU HMP의 `xp`(examine physical)를 gdbstub monitor 통로로 태워 번역을 통째로 건너뛴다.
-페이지테이블 워커(`kpt` / `kpthex`)가 MMU가 켜진 뒤에도 테이블 페이지를 읽을 수 있는 것과 같은
-경로이며, 이번에 그 경로를 사용자 명령으로 노출한 것이다.
+`kx` puts QEMU HMP's `xp` (examine physical) through the gdbstub monitor path to skip translation entirely.
+It is the same path that lets the page-table walkers (`kpt` / `kpthex`) read table pages even after the MMU is on;
+this time that path is exposed as a user command.
 
-그 자리에 멈추면 툴이 먼저 알려준다 — 발견성이 없으면 있는 기능도 없는 것과 같기 때문이다:
+Stopped at that spot, the tool tells you first — because a feature with no discoverability might as well not exist:
 
 ```
 [kgdb] note: $pc 0x0000000080201048 is physical and translation is on, so `x` cannot read it.
        Use `kx/16xb $pc` (physical examine) or `cfgdis` here.
 ```
 
-판정은 추측이 아니라 **사용자가 칠 명령을 그대로 시험**해서 한다(`x/1xb $pc`가 실패하는지).
-arm64·x86의 idmap 정지에서는 VA==PA라 `x`가 정상 동작하므로 이 줄은 뜨지 않는다.
+The decision is made not by guessing but by **actually trying the command the user would type** (whether `x/1xb $pc` fails).
+At the idmap stop on arm64·x86, VA==PA so `x` works fine and this line does not appear.
 
-참고로 메모리 자체는 타깃에서 읽힌다 — gdb의 파이썬 `read_memory`는 같은 주소에서 올바른
-바이트를 돌려준다. 거부하는 것은 현재 페이지테이블로 번역을 시도하는 `x` 명령 쪽이다.
+Note the memory itself is read from the target — gdb's Python `read_memory` returns the correct bytes at the same address.
+What refuses is the `x` command that tries to translate through the current page tables.
 
-문법은 `x`를 그대로 따른다 — `kx/16xb $pc`, `kx/8gx 0x40200000`. 기본값은 `/16xb`.
-인자가 커널 VA이면 물리 주소로 변환한 뒤 읽고 그 변환을 함께 출력하므로, 어느 레짐에서든
-`kx $pc`가 옳다. gdb의 `x`는 건드리지 않는다.
+The syntax follows `x` exactly — `kx/16xb $pc`, `kx/8gx 0x40200000`. The default is `/16xb`.
+If the argument is a kernel VA, it converts it to a physical address, reads, and prints that conversion too, so `kx $pc` is correct in any
+regime. It does not touch gdb's `x`.
 
 ---
 
-## 11. 크로싱 캐처 — "아무 지점에 걸어도 걸린다"
+## 11. The crossing catcher — "it catches wherever you set it"
 
-KASLR을 켠 콜드 프로즌 부팅에서 `b start_kernel`을 head.S 진입점에서 걸면, 예전에는 **조용히 빗나갔다**.
-그 시점의 커널은 아직 자기 가상 베이스를 계산하지 않았으므로 gdb가 무장할 수 있는 주소는 링크 VA뿐이고,
-재배치된 커널은 그 주소를 영원히 실행하지 않기 때문이다. 정지도 진단도 없이 게스트가 로그인 프롬프트까지
-부팅해 버린다. 4개 트리 모두에서 독립적으로 재현된 문제였다.
+On a KASLR-on cold frozen boot, setting `b start_kernel` at the head.S entry used to **quietly miss**.
+At that point the kernel has not yet computed its own virtual base, so the only address gdb can arm is the link VA, and the
+relocated kernel never executes that address. Without a stop or a diagnostic, the guest boots all the way to the login prompt.
+It was a problem reproduced independently on all four trees.
 
-지금은 **slide가 미상인 상태에서 고VA를 겨냥한 브레이크/워치포인트를 걸면**, 툴이 그 arch의 물리→고VA
-크로싱에 캐처를 자동으로 무장한다. 실행이 크로싱에 닿는 순간 slide를 읽어 심볼을 재배치하고 캐처는 스스로
-회수된다. 사용자는 아무 명령도 더 치지 않는다.
+Now, **if you set a breakpoint/watchpoint aimed at a high VA while the slide is unknown**, the tool automatically arms a catcher on that arch's
+physical→high-VA crossing. The moment execution reaches the crossing it reads the slide, relocates the symbols, and the catcher retires itself.
+The user types no further command.
 
 ```
 (gdb) b start_kernel
@@ -1079,12 +1070,12 @@ Thread 1 hit Breakpoint 5.2, start_kernel () at init/main.c:915
 915	{
 ```
 
-arm64 · riscv64 · x86_64 모두 **정지 없이(무음)** 통과한다 — 크로싱 착지 주소를 레지스터(arm64 `x8`/`x27`),
-전역(`kernel_map.virt_addr`), 또는 간접점프 슬롯(x86 `jmp *0f(%rip)`의 타깃 qword)에서 **물리 읽기로만**
-얻기 때문에 CPU를 움직이지 않는다.
+arm64 · riscv64 · x86_64 all pass **without stopping (silently)** — because the crossing landing address is obtained by a **physical read only**,
+from a register (arm64 `x8`/`x27`), a global (`kernel_map.virt_addr`), or an indirect-jump slot (the target qword of x86's `jmp *0f(%rip)`),
+so it does not move the CPU.
 
-사용자가 건 브레이크·워치포인트가 크로싱보다 **먼저** 발화해도 무너지지 않는다. 그 경우 캐처는 지속형으로
-남아 사용자의 정지를 존중하고, 나중에 실행이 크로싱에 닿을 때 적용된다:
+It does not collapse even if a user breakpoint/watchpoint fires **before** the crossing. In that case the catcher stays persistent,
+respecting the user's stop, and applies later when execution reaches the crossing:
 
 ```
 Thread 1 hit Hardware watchpoint 2: *(unsigned long long *)0x43a56000
@@ -1094,11 +1085,11 @@ preserve_boot_args () at arch/arm64/kernel/head.S:174
        automatically the moment execution reaches it.
 ```
 
-### x86_64는 한 겹 더
+### x86_64 has one more layer
 
-x86은 물리 로드 주소까지 랜덤화되므로(arm64/riscv은 가상만) 콜드 프로즌 시점엔 메인 커널이 아직 RAM에도
-없다. 툴은 `$pc`가 디컴프레서 적재 주소(`0x100000`) 아래, 즉 리셋 벡터에 있는 것을 보고 콜드 프로즌임을
-확정하고 디컴프레서 체인으로 랜덤 물리 베이스를 먼저 복구한다. **환경변수나 플래그가 필요 없다.**
+x86 randomizes even the physical load address (arm64/riscv only the virtual), so at the cold frozen point the main kernel is not even in RAM
+yet. The tool sees that `$pc` is below the decompressor load address (`0x100000`), i.e. at the reset vector, confirms the cold frozen state,
+and first recovers the random physical base via the decompressor chain. **No environment variable or flag is needed.**
 
 ```
 [kgdb] x86 KASLR: extract_kernel reached; decompressing kernel (finish) ...
@@ -1107,76 +1098,69 @@ x86은 물리 로드 주소까지 랜덤화되므로(arm64/riscv은 가상만) �
 Thread 1 hit Breakpoint 5.2, start_kernel () at init/main.c:915
 ```
 
-### 실측 (4개 트리, KASLR on, R0에서 무장)
+### Measured (4 trees, KASLR on, armed at R0)
 
-ELF 링크값(`nm vmlinux`)과 라이브 착지 주소의 차이로 **툴과 독립적으로** 교차검증했다.
+Cross-validated **independently of the tool** using the difference between the ELF link value (`nm vmlinux`) and the live landing address.
 
-| 트리 | 자동 적용 slide | 라이브 `start_kernel` − ELF 링크값 | 일치 |
+| tree | auto-applied slide | live `start_kernel` − ELF link value | match |
 |---|---|---|---|
 | arm64-v6.12 | `0x3de518400000` | `0x3de518400000` | ✓ |
 | arm64-v4.6 (EOL) | `0x192229c00000` | `0x192229c00000` | ✓ |
 | riscv64-v6.12 | `0x1fe00000` | `0x1fe00000` | ✓ |
 | x86_64-v6.12 | `0x3e00000` | `0x3e00000` | ✓ |
 
-### 전수 조합 검증에서 드러난 것 (2026-07-19)
+### What the exhaustive combination sweep revealed (2026-07-19)
 
-무장 시점(리셋 벡터 / MMU-off 진입 / head.S 중간 / 절반 활성화 / 크로싱 위 / 완전 가상) ×
-프로브 종류(`b` / `kb` / `watch` / `kw` / `b *ADDR` / `b FILE:LINE` / `hbreak` / `kw -r` / `kw -a`) ×
-대상 regime × KASLR on·off 를 4개 트리에서 훑은 결과, **캐처가 처음에는 `b SYM` 형태에서만
-동작**하고 있었다. 원인은 "이 프로브가 고VA를 겨냥하는가"를 다중 위치 브레이크의 `N.M  y  0xADDR`
-행을 파싱해 판정한 것이었다 — 워치포인트는 주소 열 자체가 없고 단일 위치 `b *ADDR`은 그 행이 없어,
-둘 다 판정에서 조용히 탈락했다. 지금은 판별을 하지 않고 **slide가 미상이면 프로브 종류를 불문하고**
-캐처를 무장한다(브레이크 1개를 쓰고 크로싱에서 스스로 회수된다).
+Sweeping arm-time (reset vector / MMU-off entry / mid head.S / half-enabled / on the crossing / fully virtual) ×
+probe kind (`b` / `kb` / `watch` / `kw` / `b *ADDR` / `b FILE:LINE` / `hbreak` / `kw -r` / `kw -a`) ×
+target regime × KASLR on/off across four trees revealed that **the catcher initially worked only for the `b SYM` form**.
+The cause was deciding "does this probe aim at a high VA" by parsing the `N.M  y  0xADDR` line of a multi-location breakpoint —
+a watchpoint has no address column at all, and a single-location `b *ADDR` has no such line, so both quietly dropped out of the decision.
+Now it makes no such distinction and **arms the catcher regardless of probe kind whenever the slide is unknown**
+(using one breakpoint that retires itself at the crossing).
 
-같은 스윕에서 함께 고친 것:
+Also fixed in the same sweep:
 
-- `delete` 로 캐처를 지우면 `_kaslr_pending` 기록이 남아 이후 재무장을 **영구 차단**했다. 캐처
-  브레이크의 생존 여부를 확인해, 사라졌으면 기록을 버리고 다시 건다.
-- 크로싱 PA 위에 이미 서 있는 상태에서 프로브를 걸면 조기 반환해 slide가 영영 적용되지 않았다.
-  그 자리에서 바로 읽어 적용한다.
-- 리셋 벡터(커널 진입 이전, 미캘리브레이션)에서 건 프로브도 이제 캐처를 받는다(먼저 캘리브레이션을
-  시도한다).
-- **x86 간헐 결함**: 디컴프레서 단계에서 만들어진 캘리브레이션·shadow가 남아, 랜덤 베이스를 복구한
-  뒤의 계산을 오염시켰다(offset이 nokaslr 기본값 `0x1000000` 기준으로 나옴). 3~4회 중 1회꼴로
-  재현됐다. 베이스를 복구하면 offset·slide·shadow·pending을 모두 비우고 다시 잡는다.
+- deleting the catcher with `delete` left a `_kaslr_pending` record that **permanently blocked** any later re-arm. It now checks
+  whether the catcher breakpoint survives, and if it is gone, discards the record and re-arms.
+- setting a probe while already standing on the crossing PA returned early, so the slide was never applied. It now reads and applies
+  right there.
+- a probe set at the reset vector (before the kernel entry, uncalibrated) now gets a catcher too (it tries calibration first).
+- **x86 intermittent defect**: calibration/shadow created during the decompressor stage lingered and polluted the calculation after
+  recovering the random base (the offset came out relative to the nokaslr default `0x1000000`). It reproduced about 1 in 3–4 runs.
+  On recovering the base it now clears the offset·slide·shadow·pending and re-fixes them all.
 
-리터럴 주소는 "정확히 이 주소"라는 뜻이라 툴이 그것을 **옮기는** 것은 사용자 지시를 배신한다.
-그래서 리터럴은 그 자리에 그대로 두고, 옆에 regime 인지 형제 위치를 **추가로** 건다(§11.5).
+A literal address means "exactly this address", so the tool **moving** it would betray the user's instruction.
+So the literal is left in place and a regime-aware sibling location is set **alongside** it (§11.5).
 
-### 레짐 교차 검증에서 드러난 것 (2026-07-20)
+### What the regime cross-validation revealed (2026-07-20)
 
-앞의 스윕은 무장 *시점*을 훑었지만 대상은 거의 `start_kernel` — 이미 가상 주소 체계가 다 선 뒤에만
-실행되는 심볼 — 이었다. 이번에는 대상 쪽을 head.S 안으로 옮겨, 각 트리의 vmlinux에서 뽑은 다섯
-레짐(MMU off / idmap / 전이 명령 그 자체 / 첫 가상 명령 / start_kernel)을 **서로 교차**시켰다.
-판정은 툴이 관여하지 않는 오라클로 한다: 정지한 `$pc`에서 게스트 메모리를 읽어 `objdump`가 ELF에서
-뽑은 바이트와 대조한다.
+The previous sweep swept the arm *time*, but the target was almost always `start_kernel` — a symbol that only executes after the
+virtual address scheme is fully up. This time the target side was moved into head.S, **crossing** the five regimes taken from each tree's
+vmlinux (MMU off / idmap / the transition instruction itself / the first virtual instruction / start_kernel) against each other.
+The decision uses an oracle the tool is not involved in: it reads guest memory at the stopped `$pc` and compares against the bytes
+`objdump` extracted from the ELF.
 
-발견하여 고친 것:
+Found and fixed:
 
-- **삭제한 프로브가 되살아났다.** `kb` / `kw` / adopt가 만든 그룹은 `delete` 후에도 장부에 남아,
-  크로싱에서 slide가 확정되는 순간 `_rearm_kb`가 그것을 `linkVA + slide`에 **다시 만들었다**.
-  arm64 v4.6에서 `kb __mmap_switched; continue; delete; kb start_kernel; continue` 가
-  start_kernel이 아니라 지운 `__mmap_switched`에 멈추는 것으로 드러났다. 이제 그룹이 소유한
-  브레이크포인트가 모두 사라지면 그룹도 버린다. 사용자가 만든 `b`에 딸린 형제 브레이크포인트도
-  함께 정리하되, gdb의 삭제 콜백 안에서 브레이크포인트를 건드리면 gdb가 죽으므로 다음 안전 지점까지
-  미룬다.
-- **단일 위치 프로브는 형제를 못 받았다.** `_bp_locations`가 다중 위치 행(`N.M  y  0xADDR`)만
-  파싱해서 `b *0xLINKVA` / `b FILE:LINE` 같은 단일 위치 프로브에는 언제나 빈 목록을 돌려줬고,
-  adopt가 그 앞에서 조기 반환했다. 두 형태를 모두 인식한다.
-- **x86에서는 adopt가 아예 걸리지 않았다.** `phys_window`가 `0x100000..0x10000000`(1MB~256MB)로
-  박혀 있었는데, x86 KASLR은 **물리** 베이스까지 랜덤화한다 — 실측 부팅은 `0x52a00000`,
-  `0x7ba00000`에 올라갔다. arm64·riscv는 QEMU `-kernel`이 물리 베이스를 고정하므로 좁은 창이
-  맞지만 x86은 아니다. 창을 넓히고, adopt는 "이 주소가 커널 이미지 안인가"를 `_text`..`_end`로
-  직접 묻도록 바꿨다.
-- **riscv 트랩 경계에서는 서 있는 자리를 읽을 수 없었다.** `csrw satp` 다음 페치는 폴트하도록
-  설계돼 있고 QEMU는 **트랩이 전달되기 전, 폴팅 페치 시점**에 멈춘다. 그래서 `$pc`가 물리값인데
-  그 값은 새 매핑에서 유효한 VA가 아니고 `x`가 실패한다. 이 상태를 없앨 수는 없으므로 — 실재하는
-  기계 상태다 — 대신 그 자리에서 메모리를 볼 수 있게 `kx`를 만들었다(§10.6).
+- **a deleted probe came back to life.** The group created by `kb` / `kw` / adopt stayed on the books after `delete`, and the moment the
+  slide was fixed at the crossing, `_rearm_kb` **re-created it** at `linkVA + slide`.
+  On arm64 v4.6, `kb __mmap_switched; continue; delete; kb start_kernel; continue` was found to stop not at start_kernel but at the deleted
+  `__mmap_switched`. Now, when all breakpoints a group owns are gone, the group is discarded too. It also tidies up the sibling breakpoints
+  attached to a user's `b`, but since touching a breakpoint inside gdb's delete callback kills gdb, it defers to the next safe point.
+- **a single-location probe got no sibling.** `_bp_locations` parsed only the multi-location row (`N.M  y  0xADDR`), so it always returned an
+  empty list for single-location probes like `b *0xLINKVA` / `b FILE:LINE`, and adopt returned early ahead of that. It now recognizes both forms.
+- **on x86, adopt did not engage at all.** `phys_window` was pinned to `0x100000..0x10000000` (1MB~256MB), but x86 KASLR randomizes even the
+  **physical** base — the measured boots came up at `0x52a00000`, `0x7ba00000`. arm64·riscv fix the physical base via QEMU `-kernel` so the narrow
+  window fits, but x86 does not. The window was widened, and adopt now asks "is this address inside the kernel image" directly against
+  `_text`..`_end`.
+- **at the riscv trap boundary the standing spot could not be read.** The fetch after `csrw satp` is designed to fault, and QEMU stops **at the
+  faulting fetch, before the trap is delivered**. So `$pc` is a physical value that is not a valid VA in the new mapping, and `x` fails. This state
+  cannot be removed — it is a real machine state — so instead `kx` was made to view memory there (§10.6).
 
-### 11.5 리터럴 링크 주소 — 옮기지 않고, 옆에 건다
+### 11.5 Literal link address — not moved, set alongside
 
-head.S를 `objdump`로 읽으며 분석하면 눈에 들어오는 것은 **링크 주소**다. 그것을 그대로 치는 것이
-가장 자연스러운 동작이다:
+Analyzing head.S by reading it with `objdump`, what catches the eye is the **link address**. Typing it directly is the most natural action:
 
 ```
 (gdb) b *0xffff8000829b80a8
@@ -1187,58 +1171,55 @@ Breakpoint 2 at 0xffff8000829b80a8
 
 (gdb) info breakpoints
 2   breakpoint     keep y   0xffff8000829b80a8 <primary_entry+8>
-3   hw breakpoint  keep y   0x0000000042bb80a8 <primary_entry+8>      <- 추가된 형제
+3   hw breakpoint  keep y   0x0000000042bb80a8 <primary_entry+8>      <- the added sibling
 ```
 
-사용자가 친 리터럴(2번)은 그 자리에 그대로 있다. 옆에 물리 트윈(3번)이 붙고, 크로싱에서 slide가
-확정되면 IMG 형제가 `linkVA + slide`로 재무장된다. 실측: 물리 레짐 대상은 3번이, `start_kernel`
-같은 가상 레짐 대상은 재무장된 IMG 형제가 각각 발화한다.
+The literal the user typed (#2) stays in place. A physical twin (#3) is attached alongside, and once the slide is fixed at the crossing
+the IMG sibling is re-armed at `linkVA + slide`. Measured: a physical-regime target fires #3, and a virtual-regime target like `start_kernel`
+fires the re-armed IMG sibling.
 
-슬롯 비용은 리터럴당 최대 2개로 `kb`와 같다. 이미 두 위치를 가진 `b SYM`(shadow 덕에 다중 위치)은
-후보가 이미 덮여 있으므로 **아무것도 추가하지 않는다**.
+The slot cost is at most 2 per literal, the same as `kb`. A `b SYM` that already has two locations (multi-location thanks to the shadow) has
+its candidates already covered, so it **adds nothing**.
 
-### 캐처는 왜 internal 브레이크포인트인가
+### Why the catcher is an internal breakpoint
 
-캐처는 gdb의 **internal 브레이크포인트**로 걸린다. `info breakpoints`에 나타나지 않고, 무엇보다
-**`delete`가 지우지 못한다**. 사용자가 자기 브레이크포인트를 전부 지운 뒤 워치포인트만 걸고 이어가도
-slide는 여전히 적용된다.
+The catcher is set as a gdb **internal breakpoint**. It does not appear in `info breakpoints`, and above all **`delete` cannot remove it**.
+Even if the user deletes all their breakpoints, sets only a watchpoint, and continues, the slide is still applied.
 
-이 구조가 필요한 이유는 gdb 내부 제약 때문이다. gdb의 `watch_command_1`은 워치포인트를 만드는 도중
-브레이크포인트 체인의 끝이 그 워치포인트여야 한다고 단정(assert)한다. 그래서 **워치포인트 생성 이벤트
-안에서 브레이크포인트를 만들면 gdb가 internal-error로 죽고 코어를 덤프한다** — 방식(CLI냐 Python
-API냐)과 무관하게 시점의 문제다. 반대로 일반 브레이크포인트 생성 중에는 안전하다.
+This structure is needed because of a gdb internal constraint. gdb's `watch_command_1` asserts, while creating a watchpoint, that the end of
+the breakpoint chain must be that watchpoint. So **creating a breakpoint inside a watchpoint-creation event kills gdb with an internal-error and
+dumps core** — regardless of the method (CLI or Python API), it is a matter of timing. Conversely, during an ordinary breakpoint creation it is
+safe.
 
-그래서 무장 규칙은 이렇다:
+So the arming rule is this:
 
-- 생성되는 프로브가 **워치포인트이면 무장하지 않는다**(요청만 기록). 그 자리에서 만들면 gdb가 죽는다.
-- 그 외에는 그 자리에서 internal 캐처를 만든다.
-- 캘리브레이션·정지 훅·gdb 프롬프트 같은 안전한 지점에서도 미처리 요청을 처리한다.
+- if the probe being created is a **watchpoint, do not arm** (only record the request). Creating one there kills gdb.
+- otherwise, create the internal catcher there.
+- also handle a pending request at safe points like calibration, the stop hook, and the gdb prompt.
 
-정상 흐름에서는 `kearly bootbreak`의 캘리브레이션 시점에 이미 캐처가 걸리므로, 사용자가 무엇을 먼저
-걸든 이미 준비돼 있다. 워치포인트를 맨 처음 거는 경우가 문제되지 않는 것도 이 때문이다.
+In the normal flow the catcher is already set at `kearly bootbreak`'s calibration, so it is ready whatever the user sets first. That is why
+setting a watchpoint first is not a problem.
 
-### 검증이 순환적이지 않다는 근거
+### Why the validation is not circular
 
-`기대값 = 링크값 + slide` 로 맞춰보는 것은 **항등식이지 측정이 아니다** — 브레이크는 무장한 주소에서
-발화하므로, slide가 틀렸어도 "관측 == 기대"는 성립한다. 툴 바깥의 증인이 두 개 필요하다.
+Checking against `expected = link value + slide` is **an identity, not a measurement** — the breakpoint fires at the address it was armed at,
+so "observed == expected" holds even if the slide is wrong. Two witnesses outside the tool are needed.
 
-1. **정지 지점의 게스트 메모리 바이트가 ELF 원본과 일치**한다. slide가 틀렸다면 그 주소에는 다른
-   코드가 있다. arm64-v6.12 / arm64-v4.6 / riscv64 에서 `start_kernel` 첫 16바이트가 `objdump` 값과
-   정확히 일치함을 확인했다(예: arm64-v4.6 `fd7bbba9 c0220090 00002491 fd030091`).
-2. **커널이 스스로 출력한 주소**. x86은 `Kernel Offset: 0x… from 0xffffffff81000000` 을,
-   arm64-v4.6·riscv64는 부팅 로그의 메모리 레이아웃을 찍는다. arm64-v6.12는 상류에서 그 출력이
-   제거되어 1번으로 대신한다.
+1. **The guest memory bytes at the stop point match the ELF original.** If the slide were wrong, there would be different code at that address.
+   On arm64-v6.12 / arm64-v4.6 / riscv64 the first 16 bytes of `start_kernel` were confirmed to match the `objdump` value exactly
+   (e.g. arm64-v4.6 `fd7bbba9 c0220090 00002491 fd030091`).
+2. **An address the kernel printed itself.** x86 prints `Kernel Offset: 0x… from 0xffffffff81000000`, and
+   arm64-v4.6·riscv64 print the memory layout in the boot log. On arm64-v6.12 that output was removed upstream, so 1 stands in for it.
 
-### 알려진 제약
+### Known limitations
 
-- **riscv은 `--cpu max`가 필요하다.** 기본 `rv64` 모델에는 Zkr SEED CSR이 없고 QEMU가 만드는 DTB에는
-  `/chosen/kaslr-seed`가 없어, 커널이 엔트로피를 못 찾고 slide가 **조용히 0**이 된다. KASLR을 켰다고
-  믿은 채 아무것도 랜덤화되지 않은 상태를 시험하게 되므로, 이 경우를 조심한다.
-- **x86은 압축 해제 이전 시점에 커널 심볼을 걸 수 없다.** `--earliest`(리셋 벡터) 또는
-  `--no-calibrate`로 붙은 상태에서 `b start_kernel` / `watch system_state` 같은 프로브를 걸면,
-  그 순간 메모리에는 bzImage 디컴프레서만 있고 커널은 아직 압축된 데이터다 — 그 심볼의 주소가
-  기계 어디에도 존재하지 않으므로 어떤 디버거로도 걸 수 없다. 툴은 조용히 빗나가는 대신 이유와
-  대처법을 알린다:
+- **riscv needs `--cpu max`.** The default `rv64` model has no Zkr SEED CSR, and the DTB QEMU makes has no
+  `/chosen/kaslr-seed`, so the kernel finds no entropy and the slide **is silently 0**. You end up testing a state where nothing is randomized
+  while believing KASLR is on, so beware of this case.
+- **x86 cannot set kernel symbols before the decompression point.** With `--earliest` (reset vector) or
+  `--no-calibrate` attached, if you set a probe like `b start_kernel` / `watch system_state`,
+  at that moment only the bzImage decompressor is in memory and the kernel is still compressed data — that symbol's address exists
+  nowhere in the machine, so no debugger can set it. Instead of quietly missing, the tool states the reason and the remedy:
 
   ```
   [kgdb] kaslr: the kernel is still compressed at this point, so there is nothing to
@@ -1246,45 +1227,44 @@ API냐)과 무관하게 시점의 문제다. 반대로 일반 브레이크포인
          randomized base), then re-arm.
   ```
 
-  `kearly bootbreak`가 디컴프레서 체인으로 랜덤 물리 베이스를 복구하면 **이미 걸어둔 프로브가
-  스스로 따라간다** — 다시 걸 필요가 없다. 실측(`--earliest`, x86 KASLR): 리셋 벡터에서
-  `b start_kernel`을 걸면 브레이크포인트가 링크 주소에 생기고, `kearly bootbreak`가 베이스
-  `0x48200000`을 복구하는 순간 gdb가 재배치된 심볼로 다시 풀어 `<MULTIPLE>`이 되며, 이어지는
-  `continue`가 재배치된 `0xffffffffaaf4ea60`에 걸린다. 즉 명령 3개(`b` → `bootbreak` →
-  `continue`)로 끝난다. 불가피한 것은 "커널이 RAM에 없는 동안에는 발화할 수 없다"는 사실뿐이다. arm64·riscv에는 이 제약이 없다 — QEMU가 `-kernel`로 커널을 통째로 RAM에
-  올리므로 리셋 벡터에서도 위치를 알 수 있고, 두 아키텍처 모두 이 케이스를 실제로 통과한다.
-  즉 아키텍처의 물리적 차이이지 구현 미비가 아니다.
+  Once `kearly bootbreak` recovers the random physical base via the decompressor chain, **a probe you already set follows on its own** —
+  no need to set it again. Measured (`--earliest`, x86 KASLR): setting `b start_kernel` at the reset vector creates the breakpoint at the
+  link address, and the moment `kearly bootbreak` recovers the base `0x48200000`, gdb re-resolves it into the relocated symbol, it becomes
+  `<MULTIPLE>`, and the following `continue` catches at the relocated `0xffffffffaaf4ea60`. That is, it is done in three commands (`b` → `bootbreak` →
+  `continue`). The only unavoidable thing is the fact that "it cannot fire while the kernel is not in RAM". arm64·riscv do not have this limitation —
+  QEMU loads the whole kernel into RAM with `-kernel`, so the location is known even at the reset vector, and both architectures actually pass this
+  case. So it is a physical difference of the architecture, not an implementation gap.
 
-  자동으로 디컴프레서 복구를 돌려버리는 선택지도 있었지만 택하지 않았다. `--earliest`와
-  `--no-calibrate`는 "CPU를 진행시키지 말라"는 지시이고, 복구는 `extract_kernel`까지 실행해야
-  하므로 그 지시를 어기게 된다.
+  Automatically running the decompressor recovery was an option, but it was not taken. `--earliest` and
+  `--no-calibrate` are an instruction to "not advance the CPU", and the recovery has to run through `extract_kernel`,
+  so it would violate that instruction.
 
-- **arm64 6.12의 `.idmap.text` 구간에는 소스 라인 정보가 없다.** `primary_entry` / `__enable_mmu` /
-  `__primary_switch` — 즉 MMU가 "절반만 켜진" 바로 그 구간이다. 원인은 `arch/arm64/kernel/head.S`의
-  `.section ".idmap.text","a"` 선언에 실행(`x`) 플래그가 없어 어셈블러가 그 섹션에 DWARF 라인 정보를
-  생성하지 않는 것이다(`head.o`의 `.rela.debug_line`에 해당 섹션 항목이 아예 없다). 어떤 빌드 산물에도
-  정보가 없으므로 디버거로는 복원할 수 없다 — `cfgdis`의 심볼+오프셋 디스어셈블과 `stepi`로 따라간다.
-  arm64 v4.6은 같은 코드가 `.text`에 있어 라인 정보가 정상이다(head.S:772/788/811).
+- **arm64 6.12's `.idmap.text` region has no source line info.** `primary_entry` / `__enable_mmu` /
+  `__primary_switch` — that is, exactly the region where the MMU is "half on". The cause is that the
+  `.section ".idmap.text","a"` declaration in `arch/arm64/kernel/head.S` has no execute (`x`) flag, so the assembler generates no DWARF line info
+  for that section (`head.o`'s `.rela.debug_line` has no entry for the section at all). Since no build artifact has the info, a debugger cannot
+  restore it — follow it with `cfgdis`'s symbol+offset disassembly and `stepi`.
+  On arm64 v4.6 the same code is in `.text` so line info is normal (head.S:772/788/811).
 
 ---
 
-## 교차 검증 (직접 부팅·실측)
+## Cross-validation (direct boot, measured)
 
-| 아키텍처 | 페이징 | 단수 | 검증 |
+| architecture | paging | levels | validation |
 |---|---|---|---|
-| arm64 v4.6 | 4KB/48-bit | 4 | kpt(초기 2MB block·런타임 4KB page 모두 kv2p MATCH), kpgd, mmview, kcensus(88), 패널, chaindepth |
-| x86_64 v6.12 (LA57) | 5-level | 5 | kpt/mmview 5단계, 커널 필터 |
+| arm64 v4.6 | 4KB/48-bit | 4 | kpt (initial 2MB block · runtime 4KB page both kv2p MATCH), kpgd, mmview, kcensus(88), panel, chaindepth |
+| x86_64 v6.12 (LA57) | 5-level | 5 | kpt/mmview 5-level, kernel filter |
 | x86_64 v6.12 (`no5lvl`) | 4-level | 4 | kpt PML4→PDPT→PD, kv2p MATCH |
 | riscv64 v6.12 | Sv57 | 5 | kpt L4→L1 BLOCK kv2p MATCH, mmview, kcensus(21 CSR) |
 
-모두 pwndbg를 라이브러리로만 쓴 채(미개조) 크래시 없이 통과.
+All pass without a crash, using pwndbg as a library only (unmodified).
 
 ---
 
-## 설계 원칙 (요약)
+## Design principles (summary)
 
-- **pwndbg 미개조** — 라이브러리로만 사용. 없어도 평문으로 동작.
-- **MMU on 이후 물리 읽기** — `monitor xp`(HMP, qRcmd 터널). gdb `x`/`hexdump`는 그 시점 PT로 번역돼 실패.
-- **세션 불가침** — 모든 gdb 호출은 safe 레이어를 통과, 실패해도 no-op. 텔레스코프·페이지워크·열거자는
-  전부 유한(깊이 상한/레벨 카운터/노드·리프 상한)이라 무한재귀 불가.
-- **추가만, 삭제 없음** — 기존 명령·동작은 보존하고 기능만 얹었다.
+- **pwndbg unmodified** — used as a library only. Works in plain text even without it.
+- **physical reads after MMU on** — `monitor xp` (HMP, qRcmd tunnel). gdb `x`/`hexdump` are translated through the PT of that moment and fail.
+- **session inviolable** — every gdb call goes through the safe layer and is a no-op on failure. Telescopes, page walks, and enumerators are
+  all finite (depth cap / level counter / node·leaf cap), so infinite recursion is impossible.
+- **additive only, no removal** — existing commands and behavior are preserved and only features are added.
