@@ -45,6 +45,11 @@ other tools can find it. `--check` reports the state of an installation and
 changes nothing; `--uninstall` removes what it added and leaves the checkout
 alone.
 
+`setup.sh --library` records only the checkout path and writes no global `source`
+line, so a plain `gdb` stays exactly stock and a caller -- an editor's debug
+adapter, a lab script -- sources `gdbtools.py` itself when it wants the extension.
+Use it when gdbtools should be a library that callers load, not a global default.
+
 To load it by hand instead:
 
 ```

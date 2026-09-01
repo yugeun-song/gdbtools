@@ -15,13 +15,17 @@ MODE="install"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --check)     MODE="check"; shift ;;
-        --uninstall) MODE="uninstall"; shift ;;
+        --check)              MODE="check"; shift ;;
+        --uninstall)          MODE="uninstall"; shift ;;
+        --library|--no-global) MODE="library"; shift ;;
         -h|--help)
             cat <<USAGE
-usage: setup.sh [--check] [--uninstall]
+usage: setup.sh [--check] [--library] [--uninstall]
 
   (no option)  write the loader line into the gdb init file gdb actually reads
+  --library    record the root pointer only; do NOT source it globally, so a
+               plain gdb stays stock and a caller (an editor adapter, a lab
+               script) sources gdbtools/gdbtools.py itself
   --check      report the current state and change nothing
   --uninstall  remove what this script added; the checkout is left alone
 USAGE
@@ -76,7 +80,7 @@ if [[ "$MODE" == "check" ]]; then
     say "loader        $([[ -f "$LOADER" ]] && echo "$LOADER" || echo "MISSING $LOADER")"
     say "gdb init file ${INIT}"
     if has_block; then
-        say "loader line   present"
+        say "loader line   present (global source)"
         if grep -q 'source .*pwndbg' "$INIT" 2>/dev/null; then
             if [[ "$(grep -n 'source .*pwndbg' "$INIT" | head -1 | cut -d: -f1)" \
                   -lt "$(grep -n "$BEGIN" "$INIT" | head -1 | cut -d: -f1)" ]]; then
@@ -85,17 +89,31 @@ if [[ "$MODE" == "check" ]]; then
                 warn "pwndbg is sourced AFTER this block; move the block below it"
             fi
         fi
+    elif [[ -r "${CONF}/root" ]]; then
+        say "loader line   absent (library mode: a caller sources it)"
     else
-        warn "loader line absent from ${INIT} -- run setup.sh"
+        warn "loader line absent from ${INIT} -- run setup.sh (or setup.sh --library)"
     fi
     say "root pointer  $([[ -r "${CONF}/root" ]] && cat "${CONF}/root" || echo '(unset)')"
     if command -v gdb >/dev/null 2>&1; then
-        if gdb -q -batch -ex 'python import gdbtools' >/dev/null 2>&1; then
+        if gdb -q -nx -batch -ex "source $LOADER" -ex 'python import gdbtools' >/dev/null 2>&1; then
             say "gdb import    ok"
         else
             warn "gdb cannot import the package"
         fi
     fi
+    exit 0
+fi
+
+if [[ "$MODE" == "library" ]]; then
+    echo "installing gdbtools (library mode) from ${REPO}"
+    strip_block && say "gdb init file ${INIT}  (no global source; any prior block removed)"
+    mkdir -p "$CONF"
+    printf '%s\n' "$REPO" > "${CONF}/root"
+    say "root pointer  ${CONF}/root"
+    say "gdb stays stock; a caller sources ${LOADER}"
+    echo
+    "${REPO}/setup.sh" --check
     exit 0
 fi
 
