@@ -45,7 +45,7 @@ other tools can find it. `--check` reports the state of an installation and
 changes nothing; `--uninstall` removes what it added and leaves the checkout
 alone.
 
-`setup.sh --library` records only the checkout path and writes no global `source`
+`setup.sh --library` (alias `--no-global`) records only the checkout path and writes no global `source`
 line, so a plain `gdb` stays exactly stock and a caller -- an editor's debug
 adapter, a lab script -- sources `gdbtools.py` itself when it wants the extension.
 Use it when gdbtools should be a library that callers load, not a global default.
@@ -92,7 +92,7 @@ starts. There is no second spelling and no search path.
 | variable | what it states |
 | --- | --- |
 | `GDBTOOLS_AUTO` | arm the kernel session on attach: stop hook, shadow symbols, MMU-transition notices. Without it nothing hooks the session and `kearly on` is manual |
-| `GDBTOOLS_ENTRY_PA` | physical address of the kernel image base. Needed whenever the target cannot report it — always on x86_64, whose decompressor relocates the image so there is no magic to find it by |
+| `GDBTOOLS_ENTRY_PA` | physical address of the kernel image base, for when the target cannot report it. On x86_64 you either pin a base you already know here, or leave it unset so the decompressor recovery below finds the relocated one — the two are exclusive, and a pinned value suppresses the recovery |
 | `GDBTOOLS_SCAN` | `lo:hi` physical range to search for the image magic |
 | `GDBTOOLS_RAM_BASE` | RAM base, as a shorthand for a scan range starting there |
 | `GDBTOOLS_PHYS_WINDOW` | `lo:hi` range the image may plausibly occupy, for the sanity check. Absent, the check is skipped rather than run against some other board's range |
@@ -105,6 +105,12 @@ starts. There is no second spelling and no search path.
 | `GDBTOOLS_X86_DECOMP_PA` | where the bzImage decompressor is loaded |
 | `GDBTOOLS_X86_DECOMP_VMLINUX` | path to `arch/x86/boot/compressed/vmlinux`, which KASLR recovery reads |
 | `GDBTOOLS_NO_COLOR`, `GDBTOOLS_KDIS_ASCII` | plain output, for terminals that need it |
+
+The x86 decompressor base recovery runs only while `GDBTOOLS_ENTRY_PA` is unset; a
+pinned `ENTRY_PA` takes precedence and suppresses it. The recovery fires on
+`GDBTOOLS_X86_KASLR=1`, and also auto-detects the cold-frozen case on its own when
+`GDBTOOLS_X86_DECOMP_VMLINUX` and `GDBTOOLS_X86_DECOMP_PA` are set and `$pc` is still
+below the decompressor's load address.
 
 What the tool still works out for itself is the *target*, not the environment:
 the architecture gdb reports, the load address QEMU names through `monitor info
