@@ -102,15 +102,69 @@ starts. There is no second spelling and no search path.
 | `GDBTOOLS_ANCHOR` | calibration anchor symbol, overriding the preset |
 | `GDBTOOLS_BREAK_KIND` | `sw` or `hw` for the entry breakpoint |
 | `GDBTOOLS_X86_KASLR` | recover the decompressor-randomized physical base on attach |
-| `GDBTOOLS_X86_DECOMP_PA` | where the bzImage decompressor is loaded |
+| `GDBTOOLS_X86_DECOMP_PA` | where the bzImage decompressor is loaded, for a direct boot. A firmware chain does not load it that way and needs no value here |
 | `GDBTOOLS_X86_DECOMP_VMLINUX` | path to `arch/x86/boot/compressed/vmlinux`, which KASLR recovery reads |
 | `GDBTOOLS_NO_COLOR`, `GDBTOOLS_KDIS_ASCII` | plain output, for terminals that need it |
 
-The x86 decompressor base recovery runs only while `GDBTOOLS_ENTRY_PA` is unset; a
-pinned `ENTRY_PA` takes precedence and suppresses it. The recovery fires on
+The x86 base recovery runs only while `GDBTOOLS_ENTRY_PA` is unset; a pinned
+`ENTRY_PA` takes precedence and suppresses it. The recovery fires on
 `GDBTOOLS_X86_KASLR=1`, and also auto-detects the cold-frozen case on its own when
 `GDBTOOLS_X86_DECOMP_VMLINUX` and `GDBTOOLS_X86_DECOMP_PA` are set and `$pc` is still
 below the decompressor's load address.
+
+Which of the two recoveries applies is the launcher's to state: `GDBTOOLS_X86_DECOMP_PA`
+is where a DIRECT boot's decompressor is loaded, and only a direct boot has one. Set, the
+walk follows the decompressor's own stages: its entry, the self-relocation `jmp *%rax`
+that names the moved base, `extract_kernel`, and `finish` to read the decompressed entry.
+It cannot be decided by looking, either: with `-kernel` an option ROM copies the image
+to that address during boot, so at the reset vector it is legitimately empty and the
+breakpoint is what waits for it.
+
+Unset, the image was loaded some other way. Under UEFI the firmware
+loads the bzImage as a PE image and enters `efi_pe_entry`, so none of those stages ever
+executes: `efi_stub_entry` decompresses and hands over itself, through
+`asm("jmp *%0" :: "r"(kernel_addr), "S"(boot_params))` -- an indirect jump whose
+register already holds the kernel's absolute physical entry. That `jmp` is the anchor,
+and both its offset and *which register it goes through* are read out of the compressed
+vmlinux rather than stated, because the register is the compiler's choice and not the
+kernel's: gcc-13 inlines the hand-off as `add %rbx,%rax ; jmp *%rax`, gcc-16 as
+`mov %rbp,%rsi ; jmp *%rbx`. It is not the function's only register-indirect jump
+either -- gcc compiles a switch in the same function to a jump table, which ends in
+one too. What separates them is the other half of the same asm statement: `boot_params`
+is constrained to `%rsi`, so the hand-off is the register-indirect jump with a write to
+`%rsi` just before it, and the jump table is exactly the one without. Both halves are
+read tolerantly, since the jump may carry a `notrack`/`bnd` prefix and the `%rsi` write
+may be rip-relative and end in an objdump comment. Its address is not: nothing names where the firmware's allocator
+put the image, and it moves between runs, so the image is found the way an arm64 or
+riscv one is -- by its own signatures, `MZ` at `+0`, the boot flag `0xAA55` at `+0x1fe`
+and `HdrS` at `+0x202`, on a page boundary because `LoadImage` allocates pages, each
+candidate confirmed against the decompressor's own first bytes.
+
+Every candidate is kept, not the best-looking one. The firmware holds TWO copies at
+once: the file the loader read off the ESP, and the separate image `LoadImage`
+allocated from it. Their headers are byte-identical, the kernel's PE sections are laid
+out so that `VirtualAddress == PointerToRawData`, and only the second is ever executed,
+so nothing in the bytes distinguishes them. The anchor is planted in all of them and
+the guest says which was right by stopping there. Taking the topmost match picked the
+loader's buffer on every measured boot, and a breakpoint there is never reached.
+
+Attached to a guest frozen at reset the image is not in RAM yet, so the guest is
+advanced through QEMU's monitor, which starts and stops the machine without gdb
+noticing. A gdb that did not notice keeps translating addresses through the CPU mode
+it recorded at the last real stop -- 16-bit real mode, at reset -- so `find`,
+`inferior.read_memory` and `x/` all fail afterwards, with and without a register-cache
+flush. Neither step of this recovery needs them. The search reads PHYSICAL memory with
+`monitor pmemsave`, which QEMU serves out of the machine model with no CPU translation
+in the way, and the anchor is a HARDWARE breakpoint, which is a debug register and not
+a byte written into a page the firmware has not mapped.
+
+Measured on QEMU/OVMF with 1GB of guest RAM: one 64MB `pmemsave` window costs 19ms and
+a scan of the whole of RAM 0.53s, so RAM is scanned whole every round rather than a
+band near the top -- where the firmware puts the image is the allocator's business.
+The loader's copy of the file lands around 1300ms of firmware time and `LoadImage`'s
+executable copy about 75ms after it, which is why the poll runs coarsely until the
+first copy appears and then finely until the set stops growing. The guest is frozen
+between steps, so a scan's own cost never races the firmware.
 
 What the tool still works out for itself is the *target*, not the environment:
 the architecture gdb reports, the load address QEMU names through `monitor info
