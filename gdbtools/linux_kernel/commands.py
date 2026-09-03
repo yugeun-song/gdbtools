@@ -137,9 +137,13 @@ Subcommands:
         elif sub == "entry":
             if len(args) > 1 and args[1].lower() not in ("-", "auto"):
                 SESSION.entry_pa = evi(args[1])
+                # A stated entry is an answer: the x86 guards stand down for it the
+                # same way they do for $GDBTOOLS_ENTRY_PA.
+                SESSION._entry_pinned = SESSION.entry_pa is not None
                 print("[%s] entry (image-base) PA = %s" % (NAME, fmt(SESSION.entry_pa)))
             else:
                 SESSION.entry_pa = None
+                SESSION._entry_pinned = False
                 print("[%s] entry PA = auto (will re-scan)" % NAME)
         elif sub == "anchor":
             SESSION.anchor = (args[1] if len(args) > 1 and

@@ -25,6 +25,7 @@ class Session:
         self.offset = None          # PA - VA (mod 2^64)
         self.entry_pa = None        # resolved kernel entry physical address (cached)
         self._entry_recovered = False  # entry_pa came from x86 decompressor recovery
+        self._entry_pinned = False     # entry_pa was stated by hand (`kearly entry <pa>`)
                                        # (already the ELF entry PA, not the image base)
         self.shadow_addr = None     # PA where the shadow's text is loaded
         self.vmlinux = None
@@ -247,6 +248,30 @@ class Session:
         execstr("continue")
         pc = reg("pc")
         return pc is not None and (pc & MASK) == pa
+
+    @safe(default=False)
+    def _hbreak_any(self, pas):
+        """Temporary HARDWARE breakpoints at every address in `pas` at once, continue,
+        and report whether the guest stopped at one of them.  Hardware only, unlike
+        _hbreak_to: these addresses are reached before the firmware has mapped anything
+        gdb could write a byte into, so a software breakpoint cannot be planted.  Used
+        where the anchor is one of several candidates and only the guest can say which."""
+        want = [pa & MASK for pa in pas]
+        nums = []
+        for pa in want:
+            out = exec_confirmless("thbreak *0x%x" % pa) or ""
+            if "reakpoint" not in out:
+                for n in nums:
+                    exec_confirmless("delete %s" % n)
+                return False
+            m = re.search(r"breakpoint (\d+)", out)
+            if m:
+                nums.append(m.group(1))
+        execstr("continue")
+        for n in nums:                      # the one that hit deleted itself
+            exec_confirmless("delete %s" % n)
+        pc = reg("pc")
+        return pc is not None and (pc & MASK) in want
 
     @safe(default="")
     def regime_phrase(self):
@@ -1729,11 +1754,21 @@ class Session:
                 self._kaslr_pending = None
                 self.entry_pa = _b               # overwrite the nominal (auto-cached) PA
                 self._entry_recovered = True     # _b is the ELF entry PA, not image base
-                print("[%s] x86 KASLR: recovered main-kernel phys base %s via the "
-                      "decompressor; breaking there." % (NAME, fmt(_b)))
+                # Name the route that produced the number.  X86_DECOMP_PA is what
+                # recover_kaslr_base itself routes on: stated means a direct boot, whose
+                # decompressor is walked; unset means a firmware chain, where the EFI
+                # stub hands the entry over and the decompressor stages never execute.
+                _route = ("the decompressor" if _env_int("X86_DECOMP_PA") is not None
+                          else "the EFI stub")
+                print("[%s] x86 KASLR: recovered main-kernel phys base %s via %s; "
+                      "breaking there." % (NAME, fmt(_b), _route))
             else:
-                print("[%s] x86 KASLR: decompressor recovery unavailable (compressed "
-                      "vmlinux missing?); trying nominal entry -- pass --entry-pa if it misses."
+                # No route is named here on purpose: the launcher states X86_DECOMP_PA
+                # only when the compressed vmlinux is on disk, so in the branch that
+                # reports that file missing it can say nothing about which walk would
+                # have run.
+                print("[%s] x86 KASLR: base recovery unavailable ($GDBTOOLS_X86_DECOMP_VMLINUX "
+                      "unset or unreadable); trying nominal entry -- pass --entry-pa if it misses."
                       % NAME)
         base = self.resolve_entry()              # image base (_text load address) PA
         # x86_64: $GDBTOOLS_ENTRY_PA / info-roms report the IMAGE BASE (where the
@@ -2747,7 +2782,22 @@ class Session:
             if getattr(a, "key", None) == "x86_64" and self._compressed_vmlinux():
                 _pc = reg("pc")
                 _dpa = _env_int("X86_DECOMP_PA")
-                if _pc is not None and _dpa is not None and (_pc & MASK) < _dpa:
+                # X86_DECOMP_PA is stated only for a DIRECT boot, so it cannot carry
+                # this guard on its own any more: under a firmware chain there is no
+                # decompressor address to compare against, and the pre-kernel pc would
+                # sail past and calibrate the nominal offset anyway.  KASLR being on is
+                # the same evidence -- the base is not knowable until bootbreak has
+                # measured it -- but only while it is still UNKNOWN: a pinned ENTRY_PA
+                # or a base already recovered is an answer, and bootbreak's own gate
+                # (`ENTRY_PA is None`) stands down for exactly those.  `not _is_va` plus
+                # ring 0 keeps a post-MMU attach calibrating as before, including one
+                # that happens to interrupt userspace, whose pc is low but is not the
+                # pre-kernel boot path -- that path is always ring 0.
+                _cpl = evi("$cs")
+                if _pc is not None and not a._is_va(_pc) and (_cpl is None or (_cpl & 3) == 0) and (
+                        (self.x86_kaslr and _env_int("ENTRY_PA") is None
+                         and not self._entry_pinned and not self._entry_recovered)
+                        or (_dpa is not None and (_pc & MASK) < _dpa)):
                     LOG.add("catcher: x86 still compressed -- not calibrating from the reset vector")
                     print("[%s] kaslr: the kernel is still compressed at this point, so there is "
                           "nothing to calibrate against yet.  Run `kearly bootbreak` (it recovers "
