@@ -57,6 +57,383 @@ def _x86_decomp_offsets(cv):
     return (jmp_off, lea_imm, ek)
 
 
+# --- the UEFI hand-off -------------------------------------------------------
+#
+# A firmware chain does not load a bzImage the way the boot protocol's direct path
+# does.  OVMF loads it as a PE image and enters at efi_pe_entry, so startup_32, the
+# self-relocation jmp and extract_kernel -- every stage the direct walk follows --
+# are never executed.  What IS executed is the stub's own hand-off, enter_kernel()
+# in drivers/firmware/efi/libstub/x86-stub.c:
+#
+#       asm("jmp *%0" :: "r"(kernel_addr), "S"(boot_params));
+#
+# an indirect jump through a register the COMPILER picks, with boot_params in %rsi.
+# At that jump the register already holds the kernel's absolute physical entry, and
+# the jump being the last thing the stub does is what makes it usable: the image has
+# to be in RAM before its address can be found at all, and by then the earlier stages
+# are behind us.
+#
+# Which register it is, is not a fact about the kernel.  gcc-13 inlined the hand-off
+# as `add %rbx,%rax ; jmp *%rax`; gcc-16 emits `mov %rbp,%rsi ; jmp *%rbx`.  Matching
+# either sequence matches the compiler, so what is matched instead is the shape the
+# source guarantees -- see _x86_efi_handoff_off.
+#
+# The image's own base is stated nowhere.  The firmware's page allocator picks it and
+# it moves between runs, so it is found the way arm64 and riscv find theirs: by the
+# signatures the boot protocol fixes in the image.  'MZ' at +0, the boot flag 0xAA55
+# at +0x1fe and 'HdrS' at +0x202 (arch/x86/boot/header.S, Documentation/arch/x86/
+# boot.rst), on a page boundary because LoadImage allocates pages.
+_HDRS_OFF = 0x202
+_BOOT_FLAG_OFF = 0x1FE
+_SETUP_SECTS_OFF = 0x1F1
+
+
+@safe(default=None)
+def _nm_value(cv, name):
+    """Value of one symbol in an ELF, via nm.  None when the file or symbol is absent."""
+    import subprocess
+    try:
+        out = subprocess.check_output(["nm", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+    except Exception:
+        return None
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) >= 3 and p[2] == name:
+            return int(p[0], 16)
+    return None
+
+
+@safe(default=None)
+def _nm_sym(cv, name):
+    """(value, size) of one symbol, via `nm -S`.  size is 0 when the ELF records none,
+    which is the caller's cue to fall back to a fixed window.  Knowing the size is what
+    keeps a scan of one function from running on into the next one."""
+    import subprocess
+    try:
+        out = subprocess.check_output(["nm", "-S", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+    except Exception:
+        return None
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) >= 4 and p[3] == name:        # value size type name
+            return (int(p[0], 16), int(p[1], 16))
+        if len(p) >= 3 and p[2] == name:        # value type name -- no size recorded
+            return (int(p[0], 16), 0)
+    return None
+
+
+@safe(default=None)
+def _x86_efi_handoff_off(cv):
+    """(offset, register) of the stub's hand-off jump inside the COMPRESSED vmlinux,
+    read from the build rather than stated here.  None when efi_stub_entry makes no
+    such jump, which is how a kernel that hands over some other way reports itself.
+
+    What identifies it is the shape the source guarantees, not the one a particular
+    compiler emitted.  efi_stub_entry holds MORE than one register-indirect jump --
+    gcc compiles a switch in it to a jump table, `movslq (%rbx,%r8,4),%r8 ; add
+    %rbx,%r8 ; jmp *%r8` -- so "the indirect jump" is not a description of anything.
+    What separates them is the other half of the same asm statement: boot_params is
+    constrained to %rsi, so the hand-off is the register-indirect jump that has a
+    write to %rsi just before it, and a jump table is exactly the one that does not.
+
+    Both halves have to be read tolerantly.  The jump may carry a branch prefix
+    (`notrack` under IBT, `bnd` under MPX), and the %rsi write may be rip-relative
+    and so end in an objdump comment rather than in the register.  Keying on either
+    of those spellings would be keying on the build again.
+
+    The scan is bounded by the symbol's recorded size, so it cannot wander into the
+    next function and match its jumps instead."""
+    import subprocess
+    sym = _nm_sym(cv, "efi_stub_entry")
+    if sym is None:
+        return None
+    start, size = sym
+    end = start + (size if size else 0x8000)
+    try:
+        dis = subprocess.check_output(
+            ["objdump", "-d", "--start-address=0x%x" % start,
+             "--stop-address=0x%x" % end, cv],
+            stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+    except Exception:
+        return None
+    # How far back the %rsi write may sit.  It is the same asm statement, so it is
+    # adjacent in the source; the compiler may still put a scheduled instruction or
+    # two between them, and a jump table's own setup is longer than this window.
+    RSI_WINDOW = 4
+    cands = []
+    recent = []
+    for line in dis.splitlines():
+        m = re.match(r"\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} )+)\s*(\S.*)$", line)
+        if not m:
+            continue
+        off = int(m.group(1), 16)
+        insn = m.group(3).split("#", 1)[0].strip()      # drop objdump's comment
+        jm = re.match(r"(?:notrack\s+|bnd\s+)*jmp\s+\*%(r[a-z0-9]+)\s*$", insn)
+        if jm:
+            near_rsi = any(re.search(r",\s*%rsi$", i) for i in recent)
+            cands.append((off, jm.group(1), near_rsi))
+        recent.append(insn)
+        if len(recent) > RSI_WINDOW:
+            recent.pop(0)
+    if not cands:
+        return None
+    pref = [c for c in cands if c[2]]
+    if len(pref) == 1:
+        return (pref[0][0], pref[0][1])
+    if len(cands) == 1:
+        return (cands[0][0], cands[0][1])
+    print("[%s] UEFI: efi_stub_entry has %d register-indirect jumps and %d of them "
+          "load %%rsi first, so the hand-off cannot be told from a jump table here; "
+          "taking the last, and it may be wrong."
+          % (NAME, len(cands), len(pref)))
+    return (cands[-1][0], cands[-1][1])
+
+
+@safe(default=None)
+def _x86_image_head(cv, n=8):
+    """The decompressor's first `n` bytes (startup_32) straight out of the compressed
+    vmlinux, for confirming that an address really holds the image before running the
+    guest at it.  Read through objdump, which the offset parser above already needs."""
+    import subprocess
+    try:
+        dis = subprocess.check_output(
+            ["objdump", "-d", "--start-address=0x0", "--stop-address=0x%x" % (n + 16), cv],
+            stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+    except Exception:
+        return None
+    out = bytearray()
+    for line in dis.splitlines():
+        m = re.match(r"\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} )+)", line)
+        if not m or int(m.group(1), 16) != len(out):
+            continue
+        out += bytes(int(b, 16) for b in m.group(2).split())
+        if len(out) >= n:
+            break
+    return bytes(out[:n]) if len(out) >= n else None
+
+
+@safe(default=None)
+def _qemu_ram_window():
+    """(lo, hi) of guest RAM as QEMU itself describes it.  Read from the machine's
+    flat view rather than probed: a read outside RAM is the one thing physmem warns
+    must never be issued, so the bound has to come from the model.  Flash and ROM
+    regions are excluded by name -- they are backed like RAM but hold no guest image."""
+    out = execstr("monitor info mtree -f")
+    if not out:
+        return None
+    best = None
+    for m in re.finditer(r"^\s*([0-9a-f]{16})-([0-9a-f]{16}) \(prio [-\d]+, ram\): (\S+)",
+                         out, re.M):
+        name = m.group(3).lower()
+        if "ram" not in name or "flash" in name or "rom" in name:
+            continue
+        a, b = int(m.group(1), 16), int(m.group(2), 16) + 1
+        # The largest single region, not the union: a machine scatters small aliases
+        # of the same backing RAM around the low megabyte, and the gaps between them
+        # are device space that must never be read.
+        if b > a and (best is None or (b - a) > (best[1] - best[0])):
+            best = (a, b)
+    return best
+
+
+@safe(default=False)
+def _qemu_advance(ms):
+    """Let the guest run for `ms` milliseconds without gdb resuming it: QEMU's own
+    monitor starts and stops the machine, so gdb sees no execution state change and
+    neither do its stop hooks nor a DAP client's state machine.  gdb cannot READ the
+    guest afterwards -- its view is of the last real stop -- which is why everything
+    the search touches goes through the monitor instead.  QEMU-only: a target without
+    a monitor gets False."""
+    import time
+    # execstr is @safe(default=""), so a target with no monitor answers with an EMPTY
+    # string rather than raising.  Empty is therefore the only evidence that the
+    # command did not land, and it has to be treated as "no monitor", not as "stopped".
+    status = (execstr("monitor info status") or "").strip()
+    if not status or "unning" in status:
+        return False                                  # no monitor here, or not ours to drive
+    out = execstr("monitor cont")
+    if out and ("Undefined" in out or "unknown" in out.lower()):
+        return False
+    try:
+        time.sleep(max(0.0, ms / 1000.0))
+    finally:
+        # However this ends, the machine goes back to the state gdb still believes it
+        # is in.  Leaving it running would desynchronise everything after.
+        execstr("monitor stop")
+    return True
+
+
+@safe(default=None)
+def _phys_bytes(pa, n):
+    """`n` bytes of PHYSICAL memory, through the QEMU monitor.  Every read in the
+    search below is physical on purpose: it runs while the firmware still owns the
+    page tables, and at the reset vector the CPU is not even in long mode."""
+    words = _mon_xp_words(pa & ~7, (n + (pa & 7) + 7) // 8)
+    if not words:
+        return None
+    buf = bytearray()
+    for w in words:
+        buf += int(w).to_bytes(8, "little")
+    off = pa & 7
+    return bytes(buf[off:off + n]) if len(buf) >= off + n else None
+
+
+def _image_at(page, pa, head, buf=None, off=None):
+    """setup_size when the loaded bzImage starts at `pa`, None when it does not.  Four
+    readings have to agree: 'MZ', the boot flag and 'HdrS' where arch/x86/boot/header.S
+    puts them, and the decompressor's own first bytes at the end of the setup image.
+    The last one is taken from the same dump when it reaches that far, and read from
+    the guest when it does not."""
+    if len(page) < 0x210 or page[0:2] != b"MZ":
+        return None
+    if page[_BOOT_FLAG_OFF:_BOOT_FLAG_OFF + 2] != b"\x55\xaa":
+        return None
+    if page[_HDRS_OFF:_HDRS_OFF + 4] != b"HdrS":
+        return None
+    setup_size = ((page[_SETUP_SECTS_OFF] or 4) + 1) * 512      # boot.rst: 0 means 4
+    if head:
+        there = None
+        if buf is not None and off is not None and off + setup_size + len(head) <= len(buf):
+            there = bytes(buf[off + setup_size:off + setup_size + len(head)])
+        if there is None:
+            there = _phys_bytes(pa + setup_size, len(head))
+        if there != head:
+            return None
+    return setup_size
+
+
+@safe(default=False)
+def _qemu_pmemsave(pa, size, path):
+    """Write `size` bytes of guest PHYSICAL memory at `pa` to a file on the host, using
+    QEMU's own monitor.  This is the only fast way to read physical memory here: gdb
+    reads VIRTUAL addresses, and once the guest leaves the firmware's identity map a
+    low physical address is not mapped anywhere it can reach.  The path is quoted
+    because the monitor parses an unquoted argument as an expression, in which `/` is
+    division.  QEMU writes the file, so this only works while QEMU runs beside us."""
+    out = execstr('monitor pmemsave 0x%x 0x%x "%s"' % (pa & MASK, size, path))
+    if out and out.strip():
+        LOG.add("pmemsave: %s" % out.strip()[:120])
+        return False
+    return True
+
+
+@safe(default=None)
+def _x86_scan_for_image(lo, hi, head):
+    """Every page between `lo` and `hi` that starts a loaded bzImage, as a list of
+    (base, setup_size).
+
+    All of them, not the first one found.  Under UEFI the firmware holds TWO copies at
+    once -- the file the loader read off the ESP, and the separate image LoadImage
+    allocated from it -- and their headers are byte-identical, so no reading of the
+    contents can tell them apart.  Only the second is ever executed.  Taking the
+    topmost match picked the loader's buffer on every measured boot, and a breakpoint
+    there is never reached.
+
+    Searched in the dump rather than in the guest: a window of physical memory goes to
+    a host file in one monitor command and is then scanned at native speed.  Only page
+    starts are examined, because LoadImage allocates pages, and each candidate is
+    confirmed by the four things the boot protocol fixes in a bzImage."""
+    import tempfile
+    lo = max(0, lo) & ~0xFFF
+    hi &= ~0xFFF
+    if hi <= lo:
+        return []
+    fd, path = tempfile.mkstemp(prefix="gdbtools-pmem-", suffix=".bin")
+    os.close(fd)
+    hits = []
+    try:
+        top = hi
+        while top > lo:
+            bot = max(lo, top - _SCAN_WINDOW)
+            if not _qemu_pmemsave(bot, top - bot, path):
+                return hits
+            with open(path, "rb") as fh:
+                buf = fh.read()
+            for off in range(len(buf) - 0x1000, -1, -0x1000):
+                if buf[off:off + 2] != b"MZ":
+                    continue
+                setup_size = _image_at(buf[off:off + 0x1000], bot + off, head, buf, off)
+                if setup_size:
+                    hits.append((bot + off, setup_size))
+            top = bot
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return hits
+
+
+# How much memory one dump covers.  A bound on the work, not a measurement: every
+# megabyte is bytes written by QEMU and read back here.  Measured on this machine, one
+# 64MB window costs 19ms and a whole 1GB of RAM 0.53s, so the whole of RAM is scanned
+# every round rather than a band near the top -- where the firmware puts the image is
+# the allocator's business, and a band that guesses wrong finds nothing at all.
+_SCAN_WINDOW = 64 << 20
+
+# Guest milliseconds, advanced through the monitor with the guest frozen in between, so
+# a scan's own cost never races the firmware.  Coarse until something shows up, then
+# fine until the set of copies stops growing: measured on QEMU/OVMF the loader's copy of
+# the file lands around 1300ms and LoadImage's executable copy about 75ms after it, and
+# breaking on only the first of the two never reaches the kernel.
+_EFI_SETTLE_MS = 500
+_EFI_COARSE_MS = 100
+_EFI_FINE_MS = 25
+_EFI_MAX_MS = 6000
+# Rounds of _EFI_FINE_MS with no new copy before the set is called settled.  It has to
+# outlast the gap between the two copies -- measured at about 75ms -- or the loop stops
+# having seen only the loader's buffer and arms a breakpoint that is never reached.
+# 6 x 25ms = 150ms, twice the measured gap, and still inside _EFI_MAX_MS.
+_EFI_SETTLE_ROUNDS = 6
+
+# x86 has four debug registers, and only a HARDWARE breakpoint can be placed on these
+# addresses: they are reached before the firmware has mapped anything gdb could write
+# a byte into, so there is no software breakpoint to fall back on.
+_EFI_MAX_ANCHORS = 4
+
+
+@safe(default=None)
+def _x86_find_bzimages(sess):
+    """Every loaded copy of the bzImage in guest RAM, as (base, setup_size).
+
+    At reset nothing is loaded, so the guest is let run for a moment and then polled
+    with it frozen: coarsely until the first copy appears, finely until no new copy has
+    appeared for a couple of rounds.  Both copies are returned because nothing in their
+    contents says which one the firmware will execute.  Returns [] rather than a guess."""
+    win = _qemu_ram_window()
+    if win is None:
+        print("[%s] UEFI: QEMU did not describe its RAM, so there is no bounded place "
+              "to look for the loaded image." % NAME)
+        return []
+    ram_lo, ram_hi = win
+    cv = sess._compressed_vmlinux()
+    head = _x86_image_head(cv) if cv else None
+    if not _qemu_advance(_EFI_SETTLE_MS):
+        print("[%s] UEFI: cannot step the guest -- no QEMU monitor behind this target, "
+              "so the loaded image cannot be looked for." % NAME)
+        return []
+    ms = _EFI_SETTLE_MS
+    hits, stable = [], 0
+    while ms < _EFI_MAX_MS:
+        now = _x86_scan_for_image(ram_lo, ram_hi, head) or []
+        stable = stable + 1 if now and len(now) == len(hits) else 0
+        if now:
+            hits = now
+        if hits and stable >= _EFI_SETTLE_ROUNDS:
+            break
+        step = _EFI_FINE_MS if hits else _EFI_COARSE_MS
+        if not _qemu_advance(step):
+            break
+        ms += step
+    if not hits:
+        print("[%s] UEFI: no loaded bzImage in guest RAM after %d ms of firmware time."
+              % (NAME, ms))
+    else:
+        print("[%s] UEFI: bzImage at %s after %d ms of firmware time."
+              % (NAME, ", ".join(fmt(b) for b, _ss in hits), ms))
+    return hits
+
+
 class X86_64(X86_64Common, KernelArch):
     entry_symbol = "startup_64"
     # x86 KASLR randomizes the PHYSICAL base, not just the virtual one: the
@@ -174,6 +551,49 @@ class X86_64(X86_64Common, KernelArch):
                 "target_link": tl, "land": land, "detect_fallback": True,
                 "desc": "startup_64: jmp *0f -> common_startup_64 (virtual slide)"}
 
+    def recover_kaslr_base_efi(self, sess):
+        """The UEFI counterpart of recover_kaslr_base.  Finds every loaded copy of the
+        bzImage by its own signatures, breaks on the stub's hand-off jump in all of them
+        at once, and reads the kernel's absolute physical entry straight out of whichever
+        register that jump goes through.  Returns that PA, or None.
+
+        All the copies, because the firmware keeps the loader's buffer alongside the
+        image it executes and they are identical to read.  Whichever breakpoint the
+        guest stops at is the executed one, which is the only way to tell."""
+        cv = sess._compressed_vmlinux()
+        if cv is None:
+            print("[%s] UEFI: no compressed vmlinux ($GDBTOOLS_X86_DECOMP_VMLINUX)." % NAME)
+            return None
+        ho = _x86_efi_handoff_off(cv)
+        if ho is None:
+            print("[%s] UEFI: efi_stub_entry makes no register-indirect jump, so it has "
+                  "no hand-off to break on; this kernel hands over some other way." % NAME)
+            return None
+        jmp_off, jmp_reg = ho
+        found = _x86_find_bzimages(sess)
+        if not found:
+            return None
+        anchors = sorted((base + setup_size + jmp_off) & MASK for base, setup_size in found)
+        if len(anchors) > _EFI_MAX_ANCHORS:
+            print("[%s] UEFI: %d copies of the image but only %d debug registers; "
+                  "breaking on the lowest %d, and the hand-off will be missed if the "
+                  "executed copy is not among them."
+                  % (NAME, len(anchors), _EFI_MAX_ANCHORS, _EFI_MAX_ANCHORS))
+            anchors = anchors[:_EFI_MAX_ANCHORS]
+        print("[%s] UEFI: stub hand-off (jmp *%%%s) at %s; running there ..."
+              % (NAME, jmp_reg, ", ".join(fmt(a) for a in anchors)))
+        if not sess._hbreak_any(anchors):
+            print("[%s] UEFI: none of the hand-offs was reached." % NAME)
+            return None
+        entry = reg(jmp_reg)
+        if entry is None:
+            print("[%s] UEFI: stopped at the hand-off but %%%s could not be read."
+                  % (NAME, jmp_reg))
+            return None
+        entry &= MASK
+        print("[%s] UEFI: kernel entry PA %s, handed over by the EFI stub." % (NAME, fmt(entry)))
+        return entry
+
     def recover_kaslr_base(self, sess):
         # x86_64 COLD-FROZEN KASLR: unlike arm64/riscv (fixed physical load, only the
         # VIRTUAL address randomizes), x86's bzImage decompressor relocates the kernel
@@ -191,14 +611,19 @@ class X86_64(X86_64Common, KernelArch):
         cv = sess._compressed_vmlinux()
         if cv is None:
             return None
+        # Which walk applies is the launcher's to state, not this package's to guess:
+        # $GDBTOOLS_X86_DECOMP_PA is where a DIRECT boot's decompressor is loaded, and
+        # only a direct boot has one.  It cannot be decided by looking either -- with
+        # `-kernel` the option ROM copies the image there during boot, so at the reset
+        # vector the address is legitimately empty and the breakpoint is what waits
+        # for it.
+        load = _env_int("X86_DECOMP_PA")
+        if load is None:
+            return self.recover_kaslr_base_efi(sess)
         offs = _x86_decomp_offsets(cv)
         if offs is None:
             return None
         jmp_off, lea_imm, ek_off = offs
-        load = _env_int("X86_DECOMP_PA")
-        if load is None:
-            LOG.add("x86 decompressor recovery needs $GDBTOOLS_X86_DECOMP_PA")
-            return None
         if not sess._hbreak_to(load):                       # decompressor entry (fixed)
             return None
         if not sess._hbreak_to((load + jmp_off) & MASK):    # self-relocation jmp *%rax
