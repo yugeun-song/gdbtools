@@ -13,6 +13,7 @@ has to be a kernel.
 | `stackscan` | read the stack word by word and name every value that resolves, for when `backtrace` cannot work |
 | `chain` | follow a pointer chain, bounded and cycle-guarded |
 | `enumvals` | list every value of a C/C++ enum as this build defines them, decimal by default or `/x` for hex |
+| `cmdinfo` | which extension registered each command this session knows — this package, pwndbg, the kernel's `scripts/gdb`, another Python extension, a `define` macro, or gdb itself |
 
 **`gdbtools/linux_kernel/`** is a Linux early-boot debugger. In `head.S`, before
 the MMU is switched to the kernel's high mapping, `$pc` and pointers hold
@@ -58,6 +59,37 @@ To load it by hand instead:
 
 Re-sourcing is idempotent and picks up edited modules, so the hacking loop is
 edit, re-source, run.
+
+## Which extension owns a command
+
+A session with pwndbg, this package and a vmlinux loaded answers to roughly 535
+command words. Tab at an empty prompt does not tell you where any of them came
+from, and it is slow for a reason that is not fixable from here: gdb hands
+readline every candidate at once and readline stops to ask whether to print them
+all. `complete ''` is fast but silently truncates at `max-completions`, 200 by
+default -- measured here it returned 200 names where `help all` had 1500, with
+nothing said about having stopped short.
+
+```
+(gdb) cmdinfo -c
+gdbtools     24  this package
+pwndbg      245  pwndbg, its aliases included
+kernel       35  the kernel's own scripts/gdb
+python        1  other Python extensions, gdb's bundled ones included
+user          3  `define` macros, or a Python command that could not be placed
+gdb         227  gdb itself
+```
+
+`cmdinfo GROUP` lists one group, `cmdinfo NAME` says which group one command is
+in, `-1` prints one name per line for piping, and `-c` gives the counts alone.
+
+Attribution is positional, never inferred from a name. Our own names and
+pwndbg's come from their registries; every other Python command is traced back
+through the garbage collector to the class that registered it and the file that
+class lives in; whatever is left over is gdb's own. A `lx-` prefix rule would be
+wrong on its first counterexample, and the kernel ships one: `scripts/gdb`
+registers `translate-vm`. A class that builds its name at runtime is reported as
+unplaced rather than guessed at.
 
 ## Using the kernel half
 

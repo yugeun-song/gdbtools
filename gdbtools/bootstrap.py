@@ -8,6 +8,7 @@ from .common.chain import Chain
 from .common.sym import Sym
 from .common.stackscan import StackScan
 from .common.enumvals import EnumVals
+from .common.cmdinfo import CmdInfo
 from .linux_kernel import arch as _kernel_arch     # registers the full arch classes
 from .linux_kernel.session import SESSION
 from .linux_kernel.commands import *
@@ -21,7 +22,7 @@ from .linux_kernel.pwndbg_glue import *
 COMMON_COMMANDS = (
     (CfgJson, "cfgjson"), (CfgDis, "cfgdis"),
     (Sym, "sym"), (StackScan, "stackscan"), (Chain, "chain"),
-    (EnumVals, "enumvals"),
+    (EnumVals, "enumvals"), (CmdInfo, "cmdinfo"),
 )
 KERNEL_COMMANDS = (
     (KEarly, "kearly"), (P2V, "kp2v"), (V2P, "kv2p"), (KB, "kb"), (KW, "kw"),
