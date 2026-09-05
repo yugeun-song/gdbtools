@@ -5,6 +5,7 @@ import re
 import json
 import struct
 from ..common.runtime import *
+from .fdt import _DEFAULT_ADDRESS_CELLS, _DEFAULT_SIZE_CELLS
 
 
 # ----------------------------------------------------------------------------
@@ -27,7 +28,13 @@ def parse_dtb(data):
     p = off_struct
     depth = 0
     node_stack = []
-    addr_cells, size_cells = 2, 2          # arm64 default if root omits them
+    # Devicetree Spec v0.4 sec 2.3.5: a client that finds these absent assumes 2
+    # for #address-cells and 1 for #size-cells.  This said 2/2, which is what
+    # arm64 DTBs happen to declare -- so it agreed with every board tested and
+    # would misparse the reg of any /memory node on a board that omits them.
+    # fdt.py in this same package already uses the spec values; the two parsers
+    # disagreeing about one DTB is its own bug.
+    addr_cells, size_cells = _DEFAULT_ADDRESS_CELLS, _DEFAULT_SIZE_CELLS
     mem_regs = []
     bootargs = None
     guard = 0
