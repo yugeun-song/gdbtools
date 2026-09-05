@@ -477,8 +477,15 @@ class X86_64(X86_64Common, KernelArch):
         # virtual slide.  Instead walk from CR3 down to the kernel-text PMD table
         # (level2_kernel_pgt): __startup_64 shifts only [_text.._end], so the index
         # i0 of the first present kernel-text PMD entry gives the slide:
-        #   i0 = (LOAD_PHYSICAL_ADDR + slide) >> 21 = 8 + (slide >> 21)
-        #   slide = (i0 - 8) << 21     (8 = 0x1000000 >> 21)
+        #   i0 = (LOAD_PHYSICAL_ADDR + slide) >> 21
+        #   slide = (i0 - (LOAD_PHYSICAL_ADDR >> 21)) << 21
+        # LOAD_PHYSICAL_ADDR is a build-time constant (CONFIG_PHYSICAL_START
+        # rounded to CONFIG_PHYSICAL_ALIGN) and is not a symbol -- but the linker
+        # encoded it: _text is linked at __START_KERNEL_map + LOAD_PHYSICAL_ADDR,
+        # so the vmlinux this session already loaded carries the value.  It used
+        # to be the literal 8 (0x1000000 >> 21), correct for the default 16 MiB
+        # and silently wrong -- a slide off by a multiple of 2 MiB, reported with
+        # no error -- for a kernel built with any other CONFIG_PHYSICAL_START.
         # A pure chained physical-read walk seeded by CR3 -> non-circular; the
         # kernel-half PGD entries are shared across init_top_pgt / per-mm /
         # PTI-shadow, so it resolves under KPTI whatever CR3 is live.
@@ -500,9 +507,16 @@ class X86_64(X86_64Common, KernelArch):
         words = read_phys_words(tbl, 512)                  # the kernel-text PMD table
         if not words:
             return None
+        # The LINK address, via sess._link_va: once apply_kaslr has relocated the
+        # symbol table, symval("_text") carries the slide this function is trying
+        # to compute, and subtracting it from itself would answer zero every time.
+        _tv = sess._link_va(symval("_text"))
+        if _tv is None:
+            return None                       # no vmlinux: refuse rather than assume
+        base_index = ((_tv - KBASE) & MASK) >> 21
         for i0 in range(512):
             if words[i0] and (words[i0] & 1):
-                return ((i0 - 8) << 21) & MASK
+                return ((i0 - base_index) << 21) & MASK
         return None
 
     def find_mmu_enable(self, sess):
