@@ -103,8 +103,8 @@ force the connection and hang gdb; it loads only the symbols and tools and **dro
 | `stackscan [N]` | find code pointers on the stack and symbolize them (for head.S where backtrace is dead) |
 | `ksr NAME` / `ksregs` | one sysreg / a batch dump of the core sysregs (+decode) |
 | **`kcensus`** | enumerate **every control/system register that head.S and its call chain touch**, with value and decode |
-| **`kpt [VA] [hex]`** | **hardware page-table walk** — L0~L3 / PML4~PT / Sv39-57 (`hex`=also show the raw LE bytes of each level's descriptor) |
-| **`kpgd [PA] [N]`** | dump the non-empty entries of the top-level (or the given) page directory |
+| **`kpt [VA] [at PA] [hex]`** | **hardware page-table walk** — L0~L3 / PML4~PT / Sv39-57 (`hex`=also show the raw LE bytes of each level's descriptor; `at PA`=walk the table you name, in any regime) |
+| **`kpgd [PA] [N]`** | dump the non-empty entries of the top-level (or the given) page directory. With no PA it reports the LIVE tables and refuses when translation is off, since the base register then holds the bootloader's value; the header states the root's provenance (kernel / foreign / unknown) |
 | **`kpthex [PA] [N\|full]`** | show page-table entries as a **byte-level hex view** (per-entry 8-byte breakdown; `full`=4KB xxd dump). Reads physically, so it works even after the MMU is on |
 | **`koff [SYM]`** | **why the runtime address ≠ the vmlinux ELF (nm) value** — using the CPU flags/registers/`$pc` that split MMU on/off as clues, summarize the ELF-value-vs-current-address offset |
 | **`mmview` / `memlayout [all\|noidmap]`** | **vmmap for the kernel** — symbol landmarks + live ptdump |
@@ -406,6 +406,86 @@ with index, raw value, type, and output PA (+symbol). You can also pass the `tab
 to dig into a lower level.
 
 **How to type it** — `kpgd [PA] [N]` (omitted → the top of `$pc`'s regime; N = display limit)
+
+### When there is no live table, it refuses
+
+Without an explicit `PA` this reports the **live** tables, and it first asks the
+architecture whether translation is on at all — arm64 `SCTLR_EL<n>.M` for the EL
+the CPU is actually in, x86 `CR0.PG` together with `EFER.LMA` and `CR4.PAE`,
+riscv `satp.MODE`. Each is read through the same chain the base register is read
+through (gdb register → QEMU HMP monitor → the profile's `mmu` hint), so the
+gate can never be weaker than the data it gates. Nothing answering is `unknown`,
+and `unknown` refuses too.
+
+This matters because the base register does not become empty when translation
+goes off — it keeps whatever the previous stage left in it. Measured on this
+lab's v4.6 arm64 tree, stopped at the kernel's **first instruction** after u-boot:
+
+```
+(gdb) kpgd
+[gdbtools] kpgd needs a live translation regime, and there is none here.
+  translation OFF   SCTLR_EL1=0xc50838 -> M(bit0)=0   (source gdb:$SCTLR_EL1)
+  With translation off there is no current page table: the base register keeps
+  whatever the previous stage left in it, so a dump of it would describe the
+  bootloader's tables, not the kernel's.
+  base register now: TTBR0_EL1 (idmap/low) = 0x7ffe0000  (NOT a live table root)
+  To dump that table anyway, say so explicitly:  kpgd 0x7ffe0000
+  Or reach a regime where the kernel's own tables are live:  kearly overmmu
+```
+
+`0x7ffe0000` is u-boot's own page-table area, still resident and still readable.
+Before this gate existed, `kpgd` dumped it — a perfectly plausible page directory
+describing a mapping the kernel will never use, at a stop where
+`__create_page_tables` has not run and the kernel has built nothing.
+
+`kpt $pc at 0x7ffe0000` walks it deliberately and resolves `_text` through it,
+which is how the stale root was identified as u-boot's.
+
+### Provenance: translation on does not mean the tables are the kernel's
+
+On a firmware chain the kernel's first instructions run on the **bootloader's**
+tables. The walk is valid there, so refusing would be wrong — but calling that
+root "the kernel PGD" states something the operator cannot check. Every live dump
+therefore carries a provenance verdict, and it is reached in three steps, each
+answerable from the live target:
+
+1. **Is it one of this kernel's named static roots?** `swapper_pg_dir`,
+   `idmap_pg_dir`, `tramp_pg_dir`, `reserved_pg_dir`, `init_pg_dir` on arm64;
+   `early_top_pgt` / `init_top_pgt` on x86; `swapper_pg_dir` /
+   `trampoline_pg_dir` / `early_pg_dir` on riscv — resolved from the loaded
+   vmlinux and converted to physical through this session's calibration. A
+   symbol a given kernel version does not have simply contributes no candidate.
+2. **Is it inside the loaded kernel image** (`_text` … `_end`)? Then it is the
+   kernel's by construction, whatever it is called — which is what catches a
+   static root the list above does not name, such as arm64's `init_idmap_pg_dir`
+   on 6.12, without adding another hardcoded name.
+3. **Does it map the kernel's own text?** A user process's pgd is neither a
+   static root nor inside the image, but it carries the kernel half — so a booted
+   guest stopped in a syscall is running on one, and calling that "foreign" would
+   be false while the dump below it shows kernel-half entries.
+
+Only a root that fails all three is `FOREIGN`, and the line then says exactly what
+was checked rather than asserting a boot sequence this code cannot observe. With
+no calibration none of the three can be answered and the verdict is `UNKNOWN` —
+never a guess.
+
+```
+(gdb) kpgd
+top table L1/PUD @PA 0x41358000   regime TTBR1_EL1 (kernel/high)
+    [4KB granule, 3-level (L1..L3), 9-bit index/level]
+    provenance KERNEL -- matches swapper_pg_dir @PA 0x41358000   (non-zero of 512 entries)
+```
+
+### The shape is read, never assumed
+
+The granule, the level count and the entries-per-table all come from the live
+translation-control registers (arm64 `TCR_EL<n>` T0SZ/T1SZ and TG0/TG1, x86
+`CR4.LA57`, riscv `satp.MODE`) — including on the explicit-`TABLE_PA` path, which
+used to fall back to a hardcoded 4-level/39-bit/512-entry layout. That default is
+right on a 4KB-granule 48-bit machine and silently misreads every index on a
+16K/64K granule or an Sv39 table. When the shape genuinely cannot be read, the
+header says `[ASSUMED ...]` or the decode is dropped and only the raw bytes are
+shown (`kpthex ... full` needs no shape at all).
 
 **Measured (arm64 runtime, top-level L0/PGD)**
 
@@ -810,7 +890,7 @@ Others fixed for the same reason:
   only sets up sp at `adrp x1, early_init_stack` in `__primary_switch`.
 
 The remaining commands already state their reason — confirmed by a census: `kpt` says "paging is off",
-`kpgd`/`kpthex` "cannot read the page-table base (paging off / stub)", `ksr` shows how to get a register the stub cannot provide
+`kpgd`/`kpthex` refuse with "needs a live translation regime, and there is none here", naming the register that says so and the stale base value; `ksr` shows how to get a register the stub cannot provide
 with a single `mrs` step, and `koff`/`mmview`/`kearly mmu` print the current regime in their header.
 
 ## 10.35 `kearly safemem` — stop a pwndbg probe from killing QEMU

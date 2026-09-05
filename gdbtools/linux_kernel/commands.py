@@ -541,14 +541,21 @@ on every stop."""
 
 
 class KPt(gdb.Command):
-    """kpt [VA] : walk the HARDWARE page tables for VA (default $pc), showing every
-level -- L0/PGD..L3/PTE (arm64), PML4..PT (x86_64), or Sv39/48/57 (riscv) -- with
-the raw descriptor read from PHYSICAL memory, its type (table/block/page/invalid),
-the next-table or output PA (+symbol), and leaf attributes.  This is the reliable
-way to inspect the tables AFTER the MMU is on: gdb's `x`/pwndbg `hexdump` on a
-physical page-table address fail there, because they translate the address through
-the very tables you are trying to read.  VA may be an expression (e.g. &_stext).
-Add 'hex' to also print each level's raw descriptor as little-endian bytes."""
+    """kpt [VA] [at TABLE_PA] [hex] : walk the HARDWARE page tables for VA (default
+$pc), showing every level -- L0/PGD..L3/PTE (arm64), PML4..PT (x86_64), or
+Sv39/48/57 (riscv) -- with the raw descriptor read from PHYSICAL memory, its type
+(table/block/page/invalid), the next-table or output PA (+symbol), and leaf
+attributes.  This is the reliable way to inspect the tables AFTER the MMU is on:
+gdb's `x`/pwndbg `hexdump` on a physical page-table address fail there, because
+they translate the address through the very tables you are trying to read.
+VA may be an expression (e.g. &_stext).  Add 'hex' to also print each level's raw
+descriptor as little-endian bytes.
+
+Without 'at', the root comes from the live translation register and the command
+REFUSES when translation is off -- there is no current page table then, and the
+register still holds whatever the bootloader left in it.  `at TABLE_PA` walks the
+table you name instead, in any regime: that is you asserting what the table is,
+which is a different claim from the tool reading it out of a register."""
 
     def __init__(self, name="kpt"):
         super(KPt, self).__init__(name, gdb.COMMAND_USER)
@@ -558,11 +565,27 @@ Add 'hex' to also print each level's raw descriptor as little-endian bytes."""
         parts = (arg or "").split()
         hexbytes = any(p.lower() in ("hex", "bytes", "raw") for p in parts)
         parts = [p for p in parts if p.lower() not in ("hex", "bytes", "raw")]
+        # `at TABLE_PA` -- split before evaluating, so the VA expression keeps its
+        # own spaces (`kpt &_stext + 0x1000 at 0x7ffe0000`).
+        root_pa = None
+        low = [p.lower() for p in parts]
+        if "at" in low:
+            i = low.index("at")
+            rest = parts[i + 1:]
+            if not rest:
+                print("usage: kpt [VA] at TABLE_PA [hex]")
+                return
+            root_pa = evi(" ".join(rest))
+            if root_pa is None:
+                print("kpt: 'at %s' did not evaluate to an address" % " ".join(rest))
+                return
+            parts = parts[:i]
         va = evi(" ".join(parts)) if parts else reg("pc")
         if va is None:
-            print("usage: kpt VA [hex]    ($pc unavailable -- pass an address/expression)")
+            print("usage: kpt VA [at TABLE_PA] [hex]    "
+                  "($pc unavailable -- pass an address/expression)")
             return
-        for ln in (SESSION.walk_lines(va, hexbytes=hexbytes) or []):
+        for ln in (SESSION.walk_lines(va, hexbytes=hexbytes, root_pa=root_pa) or []):
             print(ln)
 
 
@@ -571,7 +594,19 @@ class KPgd(gdb.Command):
 Default: the TOP-level table (arm64 L0/PGD, x86 PML4, riscv satp root) for $pc's
 regime.  Each row shows the index, raw descriptor, type, output PA (+symbol) and
 attributes.  Pass an explicit TABLE_PA (e.g. a 'table -> 0x...' PA printed by kpt)
-to dump a specific lower level."""
+to dump a specific lower level.
+
+With no TABLE_PA this reports the LIVE tables, and it refuses when there are none:
+translation off means the base register holds the previous stage's value, not a
+kernel table.  At the kernel's first instruction on a u-boot or UEFI chain that
+register still points at the bootloader's own tables, which are resident and read
+back perfectly -- the dump would look right and describe a mapping the kernel
+never uses.  The header also states the root's PROVENANCE (kernel / foreign /
+unknown), decided by comparing the live root against this vmlinux's own page-table
+symbols, so firmware tables are never presented as the kernel's.
+
+An explicit TABLE_PA is honoured in every regime, including MMU-off -- that is
+exactly when you want to look at what the bootloader built."""
 
     def __init__(self, name="kpgd"):
         super(KPgd, self).__init__(name, gdb.COMMAND_USER)
@@ -579,7 +614,17 @@ to dump a specific lower level."""
     @safe()
     def invoke(self, arg, from_tty):
         parts = (arg or "").split()
-        table_pa = evi(parts[0]) if parts else None
+        # A TABLE_PA that does not evaluate must be refused, not dropped.  It used
+        # to fall through to None, which is how "no argument" is spelled -- so a
+        # typo answered the LIVE-table question instead, complete with a
+        # provenance header, as if that is what had been asked.
+        table_pa = None
+        if parts:
+            table_pa = evi(parts[0])
+            if table_pa is None:
+                print("kpgd: '%s' did not evaluate to an address.  Omit it to dump the "
+                      "live top-level table." % parts[0])
+                return
         maxrows = 80
         if len(parts) > 1:
             try:
@@ -609,7 +654,13 @@ fail).  TABLE_PA may be a 'table -> 0x...' PA printed by kpt."""
         parts = (arg or "").split()
         full = any(p.lower() in ("full", "all", "page") for p in parts)
         parts = [p for p in parts if p.lower() not in ("full", "all", "page")]
-        table_pa = evi(parts[0]) if parts else None
+        table_pa = None
+        if parts:
+            table_pa = evi(parts[0])
+            if table_pa is None:
+                print("kpthex: '%s' did not evaluate to an address.  Omit it to dump the "
+                      "live top-level table." % parts[0])
+                return
         count = None
         if len(parts) > 1:
             try:

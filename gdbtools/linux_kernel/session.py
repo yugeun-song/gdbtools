@@ -288,7 +288,10 @@ class Session:
             return "MMU on, running in the kernel high map"
         if st == "on":
             return "MMU on but execution is still identity-mapped (VA==PA)"
-        return "MMU off, so addresses here are PHYSICAL"
+        if st == "off":
+            return "MMU off, so addresses here are PHYSICAL"
+        return ("MMU state UNKNOWN (no control register answered), so whether these "
+                "addresses are physical cannot be stated")
 
     # --- translation ---
     def p2v(self, pa):
@@ -613,21 +616,163 @@ class Session:
     @safe(default=("unknown", "?"))
     def mmu_state(self):
         """(state, source) where state in {'on','off','unknown'}.
-        pc being a VA is conclusive (translation is on).  Otherwise consult the
-        arch control register (SCTLR_EL1.M / satp.MODE / x86 paging).  pc physical
-        + register unreadable == the pre-MMU head.S case -> reported 'off' but
-        labelled 'inferred' so the basis is honest."""
+
+        The verdict and the fallback chain behind it live in the arch class, so
+        this and the page-table commands cannot reach opposite conclusions about
+        one stop -- which they could when this consulted mmu_translation_on()
+        while pt_base() read the base register through a longer chain.
+
+        'unknown' is a real answer and is no longer folded into 'off'.  A pc that
+        is physical does not mean translation is off: it means the pc is low, and
+        the identity map is exactly the case where that is true with translation
+        ON.  Reporting 'off' there was a guess dressed as a reading."""
         a = self.ensure_arch()
         if a is None:
             return ("unknown", "no-arch")
-        if a.pc_is_virtual():
-            return ("on", "pc=VA")
-        on = a.mmu_translation_on()
-        if on is True:
-            return ("on", "ctrl-reg")        # reg says on, pc still in idmap/low map
-        if on is False:
-            return ("off", "ctrl-reg")
-        return ("off", "inferred(pc=PHYS)")
+        ts = a.translation_state()
+        if not ts:
+            return ("unknown", "probe failed")
+        return (ts.get("state", "unknown"), ts.get("source") or "?")
+
+    @safe(default=None)
+    def translation(self):
+        """The full arch verdict: state, source, regime and the evidence string."""
+        a = self.ensure_arch()
+        return a.translation_state() if a is not None else None
+
+    @safe(default=("unknown", "no arch"))
+    def pt_provenance(self, root_pa):
+        """(provenance, why) for a live top-level table -- 'kernel', 'foreign' or
+        'unknown'.
+
+        Translation being on does not make the tables the kernel's.  On a
+        firmware chain the kernel's first instruction runs on the bootloader's
+        tables: the walk is valid, but calling that root "the kernel PGD" is a
+        lie the operator cannot see through.  Every input here is read from the
+        live target -- the symbol addresses come from the loaded vmlinux and the
+        PA conversion from this session's own calibration -- so nothing is
+        assumed about where a kernel puts its tables.  When the offset is not
+        calibrated the question genuinely has no answer and 'unknown' is it."""
+        a = self.ensure_arch()
+        if a is None or root_pa is None:
+            return ("unknown", "no arch")
+        syms = getattr(a, "pt_root_symbols", ()) or ()
+        if not syms:
+            return ("unknown", "this architecture names no kernel page-table roots")
+        if self.offset is None:
+            return ("unknown", "PA<->VA offset is not calibrated, so the kernel's "
+                               "own table addresses cannot be computed")
+        known = []
+        for nm in syms:
+            va = symval(nm)
+            if va is None:
+                continue                      # absent on this kernel version
+            pa = self.v2p(va)
+            if pa is not None:
+                known.append((nm, pa & ~0xFFF))
+        if not known:
+            return ("unknown", "none of (%s) resolves in this vmlinux" % ", ".join(syms))
+        for nm, pa in known:
+            if pa == (root_pa & ~0xFFF):
+                return ("kernel", "matches %s @PA 0x%x" % (nm, pa))
+
+        # Not one of the kernel's NAMED static roots -- which is not the same as
+        # not the kernel's.  Every user process has its own pgd carrying the
+        # kernel half, so a booted guest stopped in a syscall is on one of those;
+        # calling that "foreign, the kernel has not installed its own tables yet"
+        # is false while the dump underneath shows kernel-half entries.  Ask the
+        # table instead: does it map the kernel's own text?  One that does belongs
+        # to the kernel's address space whether or not it is a static root; a
+        # firmware table does not.
+        # A root that lies INSIDE the loaded kernel image is the kernel's own by
+        # construction, whatever it is called.  This is what catches a static root
+        # that pt_root_symbols does not name -- arm64's init_idmap_pg_dir on 6.12,
+        # and whatever a future kernel adds -- without another hardcoded name.
+        tv = symval("_text") or symval("_stext") or symval("startup_64")
+        ev = symval("_end")
+        if tv is not None and ev is not None:
+            lo, hi = self.v2p(tv), self.v2p(ev)
+            if lo is not None and hi is not None and lo <= (root_pa & ~0xFFF) < hi:
+                return ("kernel", "inside the kernel image%s" % self._sym_suffix(root_pa))
+
+        # Otherwise ask the table itself.  A process pgd is not a static root and
+        # never will be, but it carries the kernel half -- so a booted guest
+        # stopped in a syscall is on one, and calling that foreign is false.
+        if tv is not None:
+            w = a.pagewalk(tv, root_pa=root_pa)
+            if w and w.get("leaf_pa") is not None:
+                return ("kernel", "not one of (%s) and not inside the image, but it maps "
+                                  "the kernel's own text" % ", ".join(n for n, _ in known))
+            if w is not None:
+                # Says what was checked and nothing more.  "The kernel has not
+                # installed its tables yet" was a claim about a sequence this code
+                # has no way to observe.
+                return ("foreign", "not one of (%s), not inside the kernel image, and does "
+                                   "not map the kernel's own text"
+                                   % ", ".join("%s@PA 0x%x" % (n, p) for n, p in known))
+        return ("unknown", "not one of (%s); whether it maps the kernel's own text could "
+                           "not be determined" %
+                           ", ".join("%s@PA 0x%x" % (n, p) for n, p in known))
+
+    @safe(default="")
+    def _shape_caveat(self):
+        """A note for the explicit path, when the shape came from registers that
+        do not currently govern anything.
+
+        With translation off, TCR / CR4 / satp still READ -- they hold whatever
+        the last stage to configure them left there -- and that is often exactly
+        the shape the named table was built with, which is why the dump is still
+        useful.  But it is not a description of a live regime, and presenting it
+        as one is the same class of claim the gate exists to stop."""
+        a = self.ensure_arch()
+        ts = (a.translation_state() if a is not None else None) or {}
+        if ts.get("state") == "on":
+            return ""
+        return ("   [shape read from control registers that do NOT govern now -- "
+                "translation is %s]" % ts.get("state", "unknown"))
+
+    @safe(default=None)
+    def _no_live_tables(self, cmd, hint_extra=""):
+        """Why a live-table command cannot answer, in three sentences: what it
+        assumed, what is true here (with the register that says so), and what to
+        do instead.  The stale root is printed on purpose -- seeing the
+        bootloader's table is often what the operator actually wanted, and the
+        line is meant to be copied."""
+        a = self.ensure_arch()
+        ts = (a.translation_state() if a is not None else None) or {}
+        state = ts.get("state", "unknown")
+        lines = ["[%s] %s needs a live translation regime, and there is none here."
+                 % (NAME, cmd)]
+        if state == "off":
+            lines.append("  translation OFF   %s   (source %s)"
+                         % (ts.get("evidence") or "?", ts.get("source") or "?"))
+            lines.append("  With translation off there is no current page table: the base "
+                         "register keeps")
+            lines.append("  whatever the previous stage left in it, so a dump of it would "
+                         "describe the")
+            lines.append("  bootloader's tables, not the kernel's.")
+        elif state == "unknown":
+            lines.append("  translation UNKNOWN   %s" % (ts.get("evidence") or
+                         "no register answered"))
+            lines.append("  Neither the gdb register set, nor the QEMU monitor, nor a "
+                         "profile 'mmu' hint")
+            lines.append("  could say whether translation is on.  Refusing rather than "
+                         "guessing: a wrong")
+            lines.append("  'on' here prints a plausible table that means nothing.")
+        else:
+            lines.append("  the page-table base register did not answer, though "
+                         "translation reads as on")
+        raw = a.pt_base_raw(reg("pc") or 0) if a is not None else None
+        if raw:
+            lines.append("  base register now: %s = 0x%x  (NOT a live table root)"
+                         % (raw[0], raw[1]))
+            lines.append("  To dump that table anyway, say so explicitly:  %s 0x%x"
+                         % (cmd, raw[1]))
+        lines.append("  Or reach a regime where the kernel's own tables are live:  "
+                     "kearly overmmu")
+        if hint_extra:
+            lines.append("  %s" % hint_extra)
+        return lines
 
     @safe(default=("addressing: ?", "unknown"))
     def state_badge(self):
@@ -1047,19 +1192,38 @@ class Session:
         return ""
 
     @safe(default=None)
-    def walk_lines(self, va, hexbytes=False):
+    def walk_lines(self, va, hexbytes=False, root_pa=None):
         a = self.ensure_arch()
         if a is None:
             return ["[%s] no arch" % NAME]
         if not getattr(a, "pagewalk_supported", False):
             return ["[%s] page-table walk not implemented for %s" % (NAME, a.key)]
-        w = a.pagewalk(va)
+        w = a.pagewalk(va, root_pa=root_pa)
         if w is None:
-            return ["[%s] cannot walk VA 0x%x -- page-table base unreadable, or "
-                    "paging is off (MMU/satp/CR0.PG). Try after MMU-enable." %
-                    (NAME, va & MASK)]
-        lines = ["VA 0x%x   %s   [%s]" % (w["va"], w["regime"], w["config"]),
-                 "  top-table PA 0x%x%s" % (w["base"], self._sym_suffix(w["base"]))]
+            if root_pa is not None:
+                cfg = getattr(a, "_ptcfg", None) or {}
+                if not cfg:
+                    ts = a.translation_state() or {}
+                    return ["[%s] cannot walk through the table at 0x%x: the paging SHAPE "
+                            "is unknown." % (NAME, root_pa),
+                            "  %s, so the registers that would give the granule and level "
+                            "count" % (ts.get("evidence") or "translation is not on"),
+                            "  describe nothing right now.  A walk needs a shape; the raw "
+                            "bytes do not:",
+                            "    kpthex 0x%x full" % root_pa]
+                return ["[%s] cannot walk VA 0x%x through the table at 0x%x -- the "
+                        "physical read failed" % (NAME, va & MASK, root_pa)]
+            return (self._no_live_tables("kpt")
+                        or ["[%s] kpt: translation is not on, and the reason could not "
+                            "be rendered -- see 'kearly log'" % NAME])
+        lines = ["VA 0x%x   %s   [%s]" % (w["va"], w["regime"], w["config"])]
+        if root_pa is None:
+            prov, why = self.pt_provenance(w["base"])
+            lines.append("  top-table PA 0x%x%s   provenance %s -- %s"
+                         % (w["base"], self._sym_suffix(w["base"]), prov.upper(), why))
+        else:
+            lines.append("  top-table PA 0x%x%s   (EXPLICIT root -- not read from a "
+                         "translation register)" % (w["base"], self._sym_suffix(w["base"])))
         for lv in w["levels"]:
             nm, idx, ent, desc = lv["name"], lv["index"], lv["entry_pa"], lv["desc"]
             if desc is None:
@@ -1093,22 +1257,45 @@ class Session:
         a = self.ensure_arch()
         if a is None or not getattr(a, "pagewalk_supported", False):
             return ["[%s] unsupported" % NAME]
-        regime = "table"
+        regime, explicit, note = "explicit TABLE_PA", table_pa is not None, ""
         if table_pa is None:
             probe = va if va is not None else reg("pc")
             rb = a.pt_base(probe if probe is not None else 0)
             if rb is None:
-                return ["[%s] cannot read the page-table base (paging off / stub)" % NAME]
+                return (self._no_live_tables("kpgd")
+                        or ["[%s] kpgd: translation is not on, and the reason could not "
+                            "be rendered -- see 'kearly log'" % NAME])
             regime, table_pa = rb
+            prov, why = self.pt_provenance(table_pa)
+            note = "   provenance %s -- %s" % (prov.upper(), why)
+        else:
+            # An explicit root is the operator asserting what this table is, so it
+            # is honoured in every regime -- including MMU-off, which is exactly
+            # when someone wants to look at the bootloader's tables.  The SHAPE is
+            # still read from the live target rather than assumed: decoding an
+            # Sv39 or 16K-granule table as 4KB/4-level misreads every index and
+            # says nothing about having done so.  Which half of a split control
+            # applies is decided by $pc's regime, since an explicit root names no
+            # VA of its own.
+            a.pt_config_probe_for(reg("pc"))
+            note = "   (EXPLICIT -- not read from a translation register)"
+            note += self._shape_caveat()
         cfg = getattr(a, "_ptcfg", {}) or {}
-        top_shift = cfg.get("top_shift", 39)
-        nlevels = cfg.get("nlevels", 4)
-        words = read_phys_words(table_pa, 512)
+        if not cfg:
+            return ["[%s] the paging shape could not be read from the target "
+                    "(no TCR/CR4/satp), so the entries at 0x%x cannot be decoded."
+                    % (NAME, table_pa),
+                    "  Raw bytes are still available and need no shape:  kpthex 0x%x full"
+                    % table_pa]
+        top_shift, nlevels = cfg["top_shift"], cfg["nlevels"]
+        # The TOP table: the count is what the VA size indexes, not a whole page.
+        _n = a.pt_entries(top=True)
+        words = read_phys_words(table_pa, _n)
         if not words:
             return ["[%s] cannot read table @0x%x (physical read failed)" % (NAME, table_pa)]
         lvl0 = a.pt_levels()[0] if a.pt_levels() else "L0"
-        lines = ["top table %s @PA 0x%x   regime %s   (non-zero of 512 entries)" %
-                 (lvl0, table_pa, regime)]
+        lines = ["top table %s @PA 0x%x   regime %s   [%s]%s   (non-zero of %d entries)" %
+                 (lvl0, table_pa, regime, a.pt_config_desc(), note, _n)]
         shown = 0
         for i, d in enumerate(words):
             if not d:
@@ -1122,7 +1309,7 @@ class Session:
                          (i, d, kind, out or 0, self._sym_suffix(out or 0), attrs or ""))
             shown += 1
         if shown == 0:
-            lines.append("  (all 512 entries are zero / not-present)")
+            lines.append("  (all %d entries are zero / not-present)" % _n)
         return lines
 
     @safe(default=None)
@@ -1130,21 +1317,42 @@ class Session:
         a = self.ensure_arch()
         if a is None or not getattr(a, "pagewalk_supported", False):
             return ["[%s] unsupported" % NAME]
-        regime = "table"
+        regime, note = "explicit TABLE_PA", ""
         if table_pa is None:
             probe = va if va is not None else reg("pc")
             rb = a.pt_base(probe if probe is not None else 0)
             if rb is None:
-                return ["[%s] cannot read the page-table base (paging off / stub)" % NAME]
+                # `full` needs no decode at all -- it is a hexdump -- but it still
+                # needs a table to dump, and with no live root there is none to
+                # pick.  The refusal names the stale register value so the
+                # operator can pass it explicitly.
+                return (self._no_live_tables("kpthex")
+                        or ["[%s] kpthex: translation is not on, and the reason could not "
+                            "be rendered -- see 'kearly log'" % NAME])
             regime, table_pa = rb
+            prov, why = self.pt_provenance(table_pa)
+            note = "   provenance %s -- %s" % (prov.upper(), why)
+        else:
+            a.pt_config_probe_for(reg("pc"))
+            note = "   (EXPLICIT -- not read from a translation register)"
+            note += self._shape_caveat()
         cfg = getattr(a, "_ptcfg", {}) or {}
-        top_shift = cfg.get("top_shift", 39)
-        nlevels = cfg.get("nlevels", 4)
-        words = read_phys_words(table_pa, 512)
+        # The short decode beside each row needs the shape; the raw bytes do not.
+        # With no shape read from the target, print the bytes and say the decode
+        # is missing rather than decode them against an assumed 4-level/39-bit
+        # layout that is wrong on Sv39 and on a 16K granule.
+        top_shift = cfg.get("top_shift")
+        nlevels = cfg.get("nlevels")
+        if top_shift is None or nlevels is None:
+            note += "   [no decode -- paging shape unread]"
+            top_shift, nlevels = None, None
+        # The TOP table: the count is what the VA size indexes, not a whole page.
+        _n = a.pt_entries(top=True)
+        words = read_phys_words(table_pa, _n)
         if not words:
             return ["[%s] cannot read table @0x%x (physical read failed)" % (NAME, table_pa)]
-        lines = ["page-table page @PA 0x%x   regime %s   little-endian, as stored in RAM" %
-                 (table_pa, regime)]
+        lines = ["page-table page @PA 0x%x   regime %s%s   little-endian, as stored in RAM" %
+                 (table_pa, regime, note)]
         if full:
             blob = b"".join(struct.pack("<Q", w & MASK) for w in words)
             for off in range(0, len(blob), 16):
@@ -1165,6 +1373,12 @@ class Session:
                 break
             ent_pa = table_pa + i * 8
             bstr = " ".join("%02x" % c for c in struct.pack("<Q", d & MASK))
+            if top_shift is None:
+                # Bytes are a fact; a decode without a known granule is not.
+                lines.append("  [%3d] 0x%-11x  %s   0x%016x   (shape unread)"
+                             % (i, ent_pa, bstr, d))
+                shown += 1
+                continue
             kind, nxt, leaf, attrs = a.pt_decode(d, 0, top_shift, nlevels)
             if kind == "table":
                 dec = "TABLE -> 0x%x%s" % (nxt or 0, self._sym_suffix(nxt or 0))
@@ -1175,7 +1389,7 @@ class Session:
             lines.append("  [%3d] 0x%-11x  %s   0x%016x   %s" % (i, ent_pa, bstr, d, dec))
             shown += 1
         if shown == 0:
-            lines.append("  (all 512 entries are zero / not-present)")
+            lines.append("  (all %d entries are zero / not-present)" % _n)
         return lines
 
     # --- mmview / memlayout : kernel memory layout (works MMU on OR off) --
@@ -1264,10 +1478,16 @@ class Session:
                     kept = [r for r in regions if r[0] >= floor]
                     hidden = total - len(kept)
                     regions = kept
+                # Translation being on does not make these the kernel's tables.
+                # On a firmware chain the kernel's first instruction runs on the
+                # bootloader's, and labelling that root "kernel+user CR3" (or
+                # "kernel TTBR1") states something the operator cannot check.
+                prov, why = self.pt_provenance(base)
                 lines.append("")
                 lines.append("live mappings: %s  root@PA 0x%x   (%d%s regions)   [%s]"
                              % (label, base, len(regions),
                                 "/%d" % total if hidden else "", a.pt_config_desc()))
+                lines.append("  provenance %s -- %s" % (prov.upper(), why))
                 if hidden:
                     lines.append("  (%d user/low-half regions hidden -- 'mmview all' to include)"
                                  % hidden)
@@ -2260,6 +2480,12 @@ class Session:
                 return "virtual"
             if r is False:
                 return "physical"
+        # No arch loaded, so there is no VA layout to test against.  The 48-bit
+        # canonical form is the common one and is what this answers -- but say so
+        # in the log rather than letting a 52-bit-VA arm64 or a 5-level x86
+        # address be classified by a rule that does not apply to it.
+        LOG.add("_addr_regime(%s): no arch; classified by the 48-bit canonical "
+                "rule, which is an assumption" % fmt(addr))
         return "virtual" if (addr >> 48) == 0xffff else "physical"
 
     @safe(default=None)
@@ -3027,7 +3253,8 @@ class Session:
         head = "[%s%s]" % (NAME, "/" + prefix if prefix else "")
         if m == "physical":
             st, _src = self.mmu_state()
-            tag = "MMU off" if st == "off" else "idmap/low-map"
+            tag = ("MMU off" if st == "off"
+                   else "idmap/low-map" if st == "on" else "MMU state unknown")
             print("%s pc=%s PHYS -> va=%s %s (%s)" %
                   (head, fmt(pc), fmt(self.p2v(pc)) if self.offset else "?",
                    sym or "<no sym>", tag))

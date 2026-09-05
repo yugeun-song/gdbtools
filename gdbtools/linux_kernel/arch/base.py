@@ -157,8 +157,102 @@ class KernelArch:
         # Nothing in the target answered.  Say so; do not invent a plausible one.
         return None
 
-    # --- MMU state (architectural flag, if cheaply available; else None) ---
+    # --- translation state ------------------------------------------------
+    # Whether address translation is ON is an architectural fact with an
+    # architectural answer, and it is the precondition for every page-table
+    # command.  With translation off there is no "current" page table at all:
+    # the base register keeps whatever the previous stage left in it, and on a
+    # firmware chain that is a live pointer to the bootloader's own tables,
+    # still resident in DRAM and still readable.  A dump taken from it looks
+    # entirely plausible and describes nothing the kernel will ever use.
+    #
+    # Each architecture supplies _translation_probe().  The ORDER in which a
+    # value is looked for is identical everywhere, so it lives here:
+    #   1. the gdb register set
+    #   2. QEMU's HMP monitor          (a register the stub hides, `info
+    #                                   registers` still prints)
+    #   3. the profile's `mmu` hint    (a machine whose enable bit is elsewhere)
+    #   4. nothing answered            -> "unknown".  Never a guess.
+    #
+    # The gate must not be weaker than the data it gates.  Reading the base
+    # register through a three-step chain while deciding whether to trust it
+    # from a single gdb register produces exactly the failure this exists to
+    # prevent: the data resolves, the gate returns "unknown", and the caller
+    # proceeds.  Both go through read_ctrl().
+
+    # This kernel's own top-level page tables, by symbol name.  Used only to say
+    # whose tables a live root belongs to; an empty tuple means the question has
+    # no answer on this architecture and provenance stays "unknown".
+    pt_root_symbols = ()
+
+    @safe(default=(None, None))
+    def read_ctrl(self, name):
+        """(value, source) for a control/system register, over the shared chain.
+
+        (None, None) when neither the gdb register set nor the QEMU monitor
+        answered -- which is a real answer and not the same as zero."""
+        v = evi("$" + name)
+        if v is not None:
+            return (v, "gdb:$%s" % name)
+        v = monitor_reg(name)
+        if v is not None:
+            return (v, "hmp:%s" % name)
+        return (None, None)
+
+    def _translation_probe(self):
+        """Per-architecture.  (state, source, regime, evidence) with state in
+        {"on", "off", "unknown"}.  `evidence` names the register and the bit, so
+        a caller can print WHY rather than asserting."""
+        return ("unknown", "none", None,
+                "no translation probe for %s" % getattr(self, "key", "?"))
+
+    @safe(default=None)
+    def translation_state(self):
+        """{"state", "source", "regime", "evidence"} -- never None in practice."""
+        state, source, regime, evidence = self._translation_probe()
+
+        if state == "unknown":
+            # A board whose enable bit is not where the architecture default puts
+            # it says so in its profile.  This is checked for every architecture,
+            # not just the one that happened to implement it first.
+            h = TARGET.mmu_hint()
+            if isinstance(h, dict) and h.get("reg"):
+                v, src = self.read_ctrl(str(h["reg"]))
+                if v is not None:
+                    bit = int(h.get("bit", 0))
+                    on = bool((v >> bit) & 1)
+                    return {"state": "on" if on else "off",
+                            "source": "profile:mmu via %s" % src, "regime": regime,
+                            "evidence": "%s=0x%x -> bit %d = %d"
+                                        % (h["reg"], v, bit, int(on))}
+
+        if state == "unknown":
+            # The one inference the architecture licenses.  A pc in the kernel's
+            # high half cannot be a physical address, so translation must be on.
+            # The converse is NOT licensed: a low pc is equally the identity map
+            # with translation on, so a physical pc never concludes "off".
+            pc = reg("pc")
+            if pc is not None and self._is_va(pc):
+                return {"state": "on", "source": "pc=VA", "regime": regime,
+                        "evidence": "pc 0x%x is in the kernel's high half, which "
+                                    "no physical address reaches" % pc}
+
+        return {"state": state, "source": source, "regime": regime,
+                "evidence": evidence}
+
     def mmu_translation_on(self):
+        """bool | None view of translation_state(), for callers that only need
+        the verdict.  None means unknown and must not be read as False."""
+        ts = self.translation_state()
+        if not ts or ts.get("state") == "unknown":
+            return None
+        return ts["state"] == "on"
+
+    @safe(default=None)
+    def pt_root_pas(self):
+        """The PAs of this kernel's own top-level tables, or None when they
+        cannot be computed.  Needs a calibrated PA<->VA offset, which is why the
+        session supplies it rather than this class guessing one."""
         return None
 
     # --- calibration: return offset (PA - VA) mod 2^64, or None ---
@@ -295,7 +389,16 @@ class KernelArch:
     pt_entry_size = 8
 
     def pt_base(self, va):
-        """(regime_name, top_level_table_PA) for VA, or None if unreadable."""
+        """(regime_name, top_level_table_PA) for VA, or None.
+
+        None means "there is no live top-level table to report", which covers
+        both "the register is unreadable" and "translation is off".  Callers that
+        want to tell those apart ask translation_state()."""
+        return None
+
+    def pt_base_raw(self, va):
+        """The base register's contents WITHOUT the translation gate, for the
+        refusal message alone.  None when this architecture cannot read it."""
         return None
 
     def pt_levels(self):
@@ -315,11 +418,67 @@ class KernelArch:
         """One-line human description of the active paging config."""
         return ""
 
+    def pt_entries(self, top=False):
+        """How many descriptors to read from a table page.
+
+        A table page is one granule and a descriptor is 8 bytes, so a FULL table
+        is granule/8 -- 512 at 4KB, 2048 at 16KB, 8192 at 64KB.  The literal 512
+        that used to be written at each use site reads a quarter of a 16K-granule
+        table and reports the rest as absent.
+
+        The TOP table is different: it is indexed by the bits the VA has left
+        above top_shift, which is fewer than a whole page whenever the address
+        size does not fill the level.  A 48-bit VA on a 16K granule indexes the
+        top level with ONE bit -- the table holds two entries, and reading 2048
+        of them walks off the end into whatever follows and prints it as page
+        descriptors."""
+        c = getattr(self, "_ptcfg", None) or {}
+        full = (1 << c.get("page_shift", 12)) // self.pt_entry_size
+        if not top:
+            return full
+        vb, ts = c.get("va_bits"), c.get("top_shift")
+        if vb is None or ts is None or vb <= ts:
+            return full                     # not known: read a page, as before
+        return min(1 << (vb - ts), full)
+
+    def pt_config_probe_for(self, va):
+        """pt_config_probe(), told which VA the shape is wanted for.
+
+        Only arm64 has two halves that can differ (TTBR0/TTBR1, T0SZ/T1SZ,
+        TG0/TG1); everywhere else the argument is irrelevant and this is the
+        plain probe."""
+        return self.pt_config_probe()
+
+    def pt_config_probe(self):
+        """Fill self._ptcfg from the live translation-control registers WITHOUT
+        needing a valid table root, and return True when it could.
+
+        This exists for `kpgd TABLE_PA`, where the operator names a table the
+        translation registers do not point at.  Reading the granule and level
+        count from the target is still right there -- what is wrong is falling
+        back to a hardcoded 4-level/39-bit shape, which silently misreads a
+        riscv Sv39 table or an arm64 16K-granule one as something else."""
+        return False
+
     @safe(default=None)
-    def pagewalk(self, va):
+    def pagewalk(self, va, root_pa=None):
+        """Walk the live tables for `va`.  `root_pa` overrides the translation
+        register -- an explicit operator request, which stays available in every
+        regime because the caller, not this code, is asserting what that table
+        is."""
         if not self.pagewalk_supported or va is None:
             return None
-        rb = self.pt_base(va)
+        if root_pa is not None:
+            # The VA decides which half of the translation control governs, even
+            # when the ROOT was named by hand: walking a kernel VA with the low
+            # half's granule and level count misreads every index and ends in
+            # "NOT MAPPED" for an address that is mapped.  Architectures with one
+            # unified control ignore the argument.
+            if not self.pt_config_probe_for(va):
+                return None
+            rb = ("explicit TABLE_PA", root_pa)
+        else:
+            rb = self.pt_base(va)
         if rb is None:
             return None
         regime, base = rb
@@ -394,7 +553,7 @@ class KernelArch:
             if state["nodes"] >= cap_nodes or len(leaves) >= cap_leaves:
                 return
             state["nodes"] += 1
-            words = read_phys_words(tbl, 512)
+            words = read_phys_words(tbl, self.pt_entries())
             if not words:
                 return
             shift = shifts[level]

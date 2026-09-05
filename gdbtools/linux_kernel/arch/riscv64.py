@@ -94,11 +94,33 @@ class Riscv64(Riscv64Common, KernelArch):
                 "detect_fallback": True,
                 "desc": "relocate_enable_mmu entry (post setup_vm, MMU-off)"}
 
-    def mmu_translation_on(self):
-        s = evi("$satp")                 # riscv gdbstub usually exposes CSRs
-        if s is None:
-            return None
-        return ((s >> 60) & 0xF) != 0
+    # This kernel's own top-level tables across the setup_vm / relocate window.
+    pt_root_symbols = ("swapper_pg_dir", "trampoline_pg_dir", "early_pg_dir")
+
+    def _translation_probe(self):
+        # satp.MODE (bits 63:60) is both the enable bit and the shape selector:
+        # 0 is Bare, meaning no translation at all.  Unlike arm64 and x86 there is
+        # no separate enable flag to fall out of step with the base register, so
+        # the gate and the root come from the same read.
+        #
+        # Read through the shared chain rather than evi() alone: a stub that hides
+        # satp from the register set but answers `monitor info registers` would
+        # otherwise leave the gate unknown while pt_base() reads the value fine.
+        satp, src = self.read_ctrl("satp")
+        if satp is None:
+            return ("unknown", "none", None,
+                    "satp did not answer (no gdb register, no QEMU monitor)")
+        mode = (satp >> 60) & 0xF
+        if mode == 0:
+            return ("off", src, "Bare",
+                    "satp=0x%x -> MODE=0 (Bare: no address translation)" % satp)
+        info = self._SATP_MODE.get(mode)
+        if info is None:
+            return ("unknown", src, None,
+                    "satp=0x%x -> MODE=%d, which is not a mode this build decodes"
+                    % (satp, mode))
+        return ("on", src, info[0],
+                "satp=0x%x -> MODE=%d (%s)" % (satp, mode, info[0]))
 
     def auto_calibrate(self, sess):
         pc = reg("pc")
@@ -155,21 +177,41 @@ class Riscv64(Riscv64Common, KernelArch):
     pagewalk_supported = True
     _SATP_MODE = {8: ("Sv39", 3, 30), 9: ("Sv48", 4, 39), 10: ("Sv57", 5, 48)}
 
-    def pt_base(self, va):
-        satp = evi("$satp")
+    def pt_config_probe(self):
+        """Shape from satp.MODE, with no table root needed.  On riscv the mode
+        field carries both facts, so this succeeds exactly when translation is
+        on -- there is no separate enable bit that could disagree."""
+        satp, _ = self.read_ctrl("satp")
         if satp is None:
-            satp = monitor_reg("satp")
-        if satp is None:
-            return None
-        mode = (satp >> 60) & 0xF
-        info = self._SATP_MODE.get(mode)
-        if info is None:                                  # Bare / off -> no walk
-            return None
+            self._ptcfg = {}
+            return False
+        info = self._SATP_MODE.get((satp >> 60) & 0xF)
+        if info is None:
+            self._ptcfg = {}
+            return False
         name, nlevels, top_shift = info
+        self._ptcfg = {"name": name, "nlevels": nlevels, "top_shift": top_shift,
+                       "probed": True}
+        return True
+
+    def pt_base_raw(self, va):
+        """satp's PPN as it reads right now.  On riscv MODE==0 already means
+        "no translation", so a raw read here is only ever informational."""
+        satp, _ = self.read_ctrl("satp")
+        if satp is None:
+            return None
         ppn = satp & ((1 << 44) - 1)
-        base = ppn << 12
-        self._ptcfg = {"name": name, "nlevels": nlevels, "top_shift": top_shift}
-        return ("satp %s (PPN 0x%x)" % (name, ppn), base)
+        return None if ppn == 0 else ("satp PPN 0x%x" % ppn, ppn << 12)
+
+    def pt_base(self, va):
+        ts = self.translation_state()
+        if not ts or ts.get("state") != "on":
+            return None
+        satp, _ = self.read_ctrl("satp")
+        if satp is None or not self.pt_config_probe():
+            return None
+        ppn = satp & ((1 << 44) - 1)
+        return ("satp %s (PPN 0x%x)" % (self._ptcfg["name"], ppn), ppn << 12)
 
     def pt_levels(self):
         c = getattr(self, "_ptcfg", None) or {"nlevels": 3}
@@ -198,7 +240,9 @@ class Riscv64(Riscv64Common, KernelArch):
 
     def pt_config_desc(self):
         c = getattr(self, "_ptcfg", None)
-        return ("%s, %d-level, 4KB pages" % (c["name"], c["nlevels"])) if c else "Sv39/48/57"
+        if not c:
+            return "paging shape not probed (satp unread)"
+        return "%s, %d-level, 4KB pages" % (c["name"], c["nlevels"])
 
     # --- mmview support (single satp root; VA sign-extended per satp MODE) ---
     def pt_make_va(self, low, prefix):

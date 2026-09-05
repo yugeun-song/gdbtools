@@ -643,15 +643,47 @@ class X86_64(X86_64Common, KernelArch):
         LOG.add("x86 KASLR: recovered main-kernel phys base 0x%x via decompressor" % base)
         return base
 
-    def mmu_translation_on(self):
-        # 64-bit long mode requires paging, so CR0.PG is effectively always on once
-        # kernel code runs.  Prefer the real bit when the stub exposes $cr0; else fall
-        # back to "pc readable -> paging on".
-        cr0 = evi("$cr0")
-        if cr0 is not None:
-            return bool((cr0 >> 31) & 1)
-        v = self.pc_is_virtual()
-        return None if v is None else True
+    # This kernel's own top-level tables.  early_top_pgt is what head_64.S builds
+    # and loads; init_top_pgt is the one the kernel proper runs on.
+    pt_root_symbols = ("early_top_pgt", "init_top_pgt", "early_level4_pgt",
+                       "init_level4_pgt")
+
+    def _translation_probe(self):
+        # Paging is on when CR0.PG (bit 31) is set.  That it is FOUR- or
+        # five-level 64-bit paging additionally needs EFER.LMA (bit 10) and
+        # CR4.PAE (bit 5); without both, CR3 points at a 32-bit or PAE structure
+        # that pt_decode() would misread.
+        #
+        # CR3 keeps its value across a paging-off transition, so it is evidence of
+        # nothing on its own.  The previous rule here -- "long mode requires
+        # paging, so assume on when pc is readable" -- is true only once kernel
+        # code is running, and this tool is used from the reset vector onward,
+        # where it is false.  There is no inference left, so an unreadable CR0 is
+        # reported as unknown.
+        cr0, src0 = self.read_ctrl("cr0")
+        if cr0 is None:
+            return ("unknown", "none", None,
+                    "cr0 did not answer (no gdb register, no QEMU monitor)")
+        if not ((cr0 >> 31) & 1):
+            return ("off", src0, None, "cr0=0x%x -> PG(bit31)=0" % cr0)
+        efer, _ = self.read_ctrl("efer")
+        cr4, _ = self.read_ctrl("cr4")
+        if efer is None or cr4 is None:
+            self._ia32e = None
+            return ("on", src0, "CR3 (paging structure unconfirmed)",
+                    "cr0=0x%x -> PG=1, but EFER.LMA / CR4.PAE did not answer, so "
+                    "the paging structure's shape is unconfirmed" % cr0)
+        lma, pae = (efer >> 10) & 1, (cr4 >> 5) & 1
+        if not (lma and pae):
+            self._ia32e = False
+            return ("on", src0, "CR3 (32-bit or PAE paging)",
+                    "cr0 PG=1 but EFER.LMA=%d CR4.PAE=%d -- not 64-bit paging"
+                    % (lma, pae))
+        la57 = (cr4 >> 12) & 1
+        self._ia32e = True
+        return ("on", src0, "CR3 IA-32e (%d-level)" % (5 if la57 else 4),
+                "cr0=0x%x PG=1, EFER=0x%x LMA=1, CR4=0x%x PAE=1 LA57=%d"
+                % (cr0, efer, cr4, la57))
 
     def auto_calibrate(self, sess):
         # Kernel-text window: VA = PA - phys_base + KBASE  =>  PA-VA = phys_base-KBASE.
@@ -707,20 +739,66 @@ class X86_64(X86_64Common, KernelArch):
     _4LVL = ["PML4", "PDPT", "PD", "PT"]
     _5LVL = ["PML5", "PML4", "PDPT", "PD", "PT"]
 
-    def pt_base(self, va):
-        cr3 = evi("$cr3")
-        if cr3 is None:
-            cr3 = monitor_reg("cr3")
+    def pt_config_probe(self):
+        """Level count from CR4.LA57, with no table root needed.  A failure clears
+        the recorded shape rather than leaving a previous call's behind."""
+        cr4, _ = self.read_ctrl("cr4")
+        if cr4 is None:
+            self._ptcfg = {}
+            return False
+        la57 = bool((cr4 >> 12) & 1)
+        self._ptcfg = {"la57": la57, "nlevels": 5 if la57 else 4,
+                       "top_shift": 48 if la57 else 39, "probed": True}
+        return True
+
+    def pt_base_raw(self, va):
+        """CR3 as it reads right now, WITHOUT the translation gate.  See the
+        arm64 note: for the refusal message only, never presented as live."""
+        cr3, _ = self.read_ctrl("cr3")
         if cr3 is None:
             return None
-        cr4 = evi("$cr4")
-        la57 = bool(((cr4 >> 12) & 1)) if cr4 is not None else False
-        self._ptcfg = {"la57": la57, "nlevels": 5 if la57 else 4,
-                       "top_shift": 48 if la57 else 39}
+        base = cr3 & self._PA_MASK
+        return None if base == 0 else ("CR3", base)
+
+    def pt_base(self, va):
+        # The gate comes first.  CR3 keeps its value across a paging-off
+        # transition, so a readable CR3 says nothing about whether translation is
+        # active; CR0.PG does, and _translation_probe() also confirms EFER.LMA and
+        # CR4.PAE so the structure is known to be the 64-bit one pt_decode reads.
+        ts = self.translation_state()
+        if not ts or ts.get("state") != "on":
+            return None
+        # Paging on is not enough: pt_decode() reads 64-bit IA-32e descriptors, and
+        # a 32-bit or PAE structure has neither the same entry width nor the same
+        # level shape.
+        #
+        # Decided on a FLAG that _translation_probe sets, not on whether the
+        # human-readable regime string contains "IA-32e".  That substring test was
+        # the bug it was meant to be the fix for: the negative case spelled itself
+        # "CR3 (not IA-32e)", which contains the token, so the gate passed exactly
+        # the case it existed to stop -- and a 32-bit page directory was decoded as
+        # a PML4, printing tables and blocks and attribute flags for bytes that
+        # were kernel code.  A gate keyed on prose breaks the next time the prose
+        # is reworded.
+        if getattr(self, "_ia32e", None) is not True:
+            LOG.add("x86 pt_base: refusing -- paging is on but not confirmed IA-32e "
+                    "(regime %r)" % (ts.get("regime") or ""))
+            return None
+        cr3, _ = self.read_ctrl("cr3")
+        if cr3 is None:
+            return None
+        if not self.pt_config_probe():
+            # Paging is on but CR4 did not answer: the table exists and its level
+            # count does not.  Four levels is the overwhelmingly common shape, so
+            # it is what gets decoded -- but it is recorded as assumed, and
+            # pt_config_desc() says so rather than presenting it as read.
+            self._ptcfg = {"la57": False, "nlevels": 4, "top_shift": 39,
+                           "probed": False}
         base = cr3 & self._PA_MASK
         if base == 0:
             return None
-        return ("CR3 (%d-level)" % (5 if la57 else 4), base)
+        c = self._ptcfg
+        return ("CR3 (%d-level)" % c["nlevels"], base)
 
     def pt_levels(self):
         c = getattr(self, "_ptcfg", None) or {"la57": False}
@@ -749,8 +827,11 @@ class X86_64(X86_64Common, KernelArch):
 
     def pt_config_desc(self):
         c = getattr(self, "_ptcfg", None)
-        return ("%d-level paging (%s)" % (c["nlevels"], "LA57 5-level" if c["la57"]
-                else "4-level")) if c else "4-level paging"
+        if not c:
+            return "paging shape not probed (CR4 unread)"
+        tag = "" if c.get("probed") else "  [ASSUMED -- CR4 unreadable]"
+        return "%d-level paging (%s)%s" % (
+            c["nlevels"], "LA57 5-level" if c["la57"] else "4-level", tag)
 
     # --- mmview support (single CR3 root; VA is sign-extended, not prefixed) ---
     def pt_make_va(self, low, prefix):

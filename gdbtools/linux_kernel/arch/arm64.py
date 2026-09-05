@@ -45,16 +45,41 @@ class Arm64(Arm64Common, KernelArch):
         # matches both (0xFFFF8.. >>52 == 0xFFF, 0xFFF0.. >>52 == 0xFFF); phys is far below.
         return (addr >> 52) == 0xFFF
 
-    def mmu_translation_on(self):
-        v = evi("$SCTLR_EL1")             # usually absent on the QEMU gdbstub
+    # This kernel's own top-level tables.  swapper_pg_dir is TTBR1, idmap_pg_dir
+    # is the identity map TTBR0 uses across the MMU-enable window; the other two
+    # exist only on kernels that have them, and a symbol that is absent simply
+    # does not contribute a candidate.
+    pt_root_symbols = ("swapper_pg_dir", "idmap_pg_dir", "tramp_pg_dir",
+                       "reserved_pg_dir", "init_pg_dir", "init_idmap_pg_dir")
+
+    def _translation_probe(self):
+        # SCTLR_EL<n>.M (bit 0) is the enable bit, and n is the EL the CPU is in
+        # RIGHT NOW.  The registers are banked per EL, so reading EL1's bit while
+        # executing at EL2 answers about a regime that is not running -- and the
+        # arm64 boot protocol makes EL2 entry the RECOMMENDED case (booting.txt:
+        # "The CPU must be in either EL2 (RECOMMENDED ...) or non-secure EL1"),
+        # so that is the main path, not an exotic one.
+        #
+        # Under VHE (HCR_EL2.E2H=1) the architecture redirects SCTLR_EL1 accesses
+        # to SCTLR_EL2, so the two names agree by themselves and no special case
+        # is needed here.
+        #
+        # If CurrentEL cannot be read, WHICH register governs is unknown, and an
+        # answer about the wrong EL is worse than no answer: guessing EL1 here is
+        # exactly how a stale EL2 TTBR0 got dumped as if it were live.
+        el = self._cur_el()
+        if el is None:
+            return ("unknown", "none", None,
+                    "CurrentEL is unreadable, so which SCTLR_EL<n> governs the "
+                    "running regime cannot be determined")
+        name = "SCTLR_EL%d" % el
+        v, src = self.read_ctrl(name)
         if v is None:
-            h = TARGET.mmu_hint()         # profile may name a readable MMU reg
-            if h and h.get("reg"):
-                v = evi("$" + str(h["reg"]))
-                if v is not None:
-                    return bool(v & (1 << int(h.get("bit", 0))))
-            return None
-        return bool(v & 1)
+            return ("unknown", "none", "EL%d stage-1" % el,
+                    "%s did not answer (no gdb register, no QEMU monitor)" % name)
+        on = bool(v & 1)
+        return ("on" if on else "off", src, "EL%d stage-1" % el,
+                "%s=0x%x -> M(bit0)=%d" % (name, v, int(on)))
 
     def auto_calibrate(self, sess):
         pc = reg("pc")
@@ -268,34 +293,107 @@ class Arm64(Arm64Common, KernelArch):
     _ARM_LVL = {0: "L0/PGD", 1: "L1/PUD", 2: "L2/PMD", 3: "L3/PTE"}
 
     def _regime_for(self, va):
-        el = self._cur_el() or 1
+        # TTBR0/TTBR1 are banked per EL, so which pair is live depends on the EL
+        # the CPU is executing at.  None when that cannot be read: defaulting to
+        # EL1 while running at EL2 names a register pair that is not in use, and
+        # a value read from it is not evidence about anything.
+        el = self._cur_el()
+        if el is None:
+            return None
         if self._is_va(va):
             return ("TTBR1_EL%d" % el, "TTBR1_EL%d (kernel/high)" % el, True)
         return ("TTBR0_EL%d" % el, "TTBR0_EL%d (idmap/low)" % el, False)
 
+    def pt_config_probe(self, is_ttbr1=False):
+        """Granule and level count from TCR_EL<n>, with no table root needed.
+
+        A failure CLEARS the recorded shape rather than leaving the previous
+        call's behind: an explicit `kpgd <PA>` issued after a successful live
+        dump would otherwise decode the named table with the shape of a regime it
+        has nothing to do with, and print it as if it had been read."""
+        el = self._cur_el()
+        if el is None:
+            self._ptcfg = {}
+            return False
+        tcr = self.sysreg("TCR_EL%d" % el)
+        if tcr is None:
+            self._ptcfg = {}
+            return False
+        # TCR splits its fields per half: T0SZ/TG0 govern TTBR0, T1SZ/TG1 TTBR1.
+        # The TG encodings differ between the two halves -- that asymmetry is in
+        # the architecture, not a typo.
+        tsz = ((tcr >> 16) & 0x3F) if is_ttbr1 else (tcr & 0x3F)
+        tg = ((tcr >> 30) & 3) if is_ttbr1 else ((tcr >> 14) & 3)
+        page_shift = ({1: 14, 2: 12, 3: 16}.get(tg, 12) if is_ttbr1
+                      else {0: 12, 1: 16, 2: 14}.get(tg, 12))
+        stride = page_shift - 3
+        va_bits = 64 - tsz if 1 <= tsz <= 47 else 48
+        addr_bits = max(va_bits - page_shift, stride)
+        nlevels = (addr_bits + stride - 1) // stride
+        # Is the other half shaped the same?  Cheap: the same register is already
+        # in hand.  Only recorded, never used to decide -- the caller asked about
+        # this half.
+        _otsz = (tcr & 0x3F) if is_ttbr1 else ((tcr >> 16) & 0x3F)
+        _otg = ((tcr >> 14) & 3) if is_ttbr1 else ((tcr >> 30) & 3)
+        _ops = ({0: 12, 1: 16, 2: 14}.get(_otg, 12) if is_ttbr1
+                else {1: 14, 2: 12, 3: 16}.get(_otg, 12))
+        self._ptcfg = {"page_shift": page_shift, "nlevels": nlevels,
+                       "stride": stride,
+                       "top_shift": page_shift + (nlevels - 1) * stride,
+                       "start": 4 - nlevels, "va_bits": va_bits, "probed": True,
+                       "half": "TTBR1" if is_ttbr1 else "TTBR0",
+                       "halves_differ": (_otsz != tsz or _ops != page_shift)}
+        return True
+
+    def pt_base_raw(self, va):
+        """The base register's contents, read WITHOUT the translation gate.
+
+        Only two callers may use this: pt_base(), which gates it, and the
+        refusal message, which shows the operator the stale value so they can
+        dump it explicitly if that is what they wanted.  Nothing may present its
+        result as the live page-table root."""
+        rg = self._regime_for(va)
+        if rg is None:
+            return None
+        regname, label, _ = rg
+        ttbr = self.sysreg(regname)
+        if ttbr is None:
+            return None
+        base = ttbr & ((1 << 48) - 1) & ~0xFFF
+        return None if base == 0 else (label, base)
+
+    def pt_config_probe_for(self, va):
+        """The shape of the half this VA belongs to.  TCR describes TTBR0 and
+        TTBR1 separately, so a kernel VA needs T1SZ/TG1 and a low one T0SZ/TG0."""
+        return self.pt_config_probe(is_ttbr1=bool(va is not None and self._is_va(va)))
+
     def pt_base(self, va):
-        regname, label, is_ttbr1 = self._regime_for(va)
+        # The gate comes first.  With SCTLR_EL<n>.M clear there is no live
+        # translation and TTBR holds whatever the stage before the kernel left
+        # in it.  Measured on this lab's u-boot chain, at the kernel's very first
+        # instruction: SCTLR=0xc50838 (M=0) while TTBR0_EL2=0x7ffe0000 still
+        # points at u-boot's own tables, resident and readable.  Dumping them
+        # produced a page directory that looked entirely correct and described
+        # nothing the kernel would ever use.
+        ts = self.translation_state()
+        if not ts or ts.get("state") != "on":
+            return None
+        rg = self._regime_for(va)
+        if rg is None:
+            return None
+        regname, label, is_ttbr1 = rg
         ttbr = self.sysreg(regname)
         if ttbr is None:
             return None
         base = ttbr & ((1 << 48) - 1) & ~0xFFF            # strip ASID + align
-        if base == 0:                                     # TTBR unset -> paging not up
+        if base == 0:
             return None
-        page_shift, nlevels, stride = 12, 4, 9
-        tcr = self.sysreg("TCR_EL%d" % (self._cur_el() or 1))
-        if tcr is not None:
-            tsz = ((tcr >> 16) & 0x3F) if is_ttbr1 else (tcr & 0x3F)
-            tg = ((tcr >> 30) & 3) if is_ttbr1 else ((tcr >> 14) & 3)
-            page_shift = ({1: 14, 2: 12, 3: 16}.get(tg, 12) if is_ttbr1
-                          else {0: 12, 1: 16, 2: 14}.get(tg, 12))
-            stride = page_shift - 3
-            va_bits = 64 - tsz if 1 <= tsz <= 47 else 48
-            addr_bits = max(va_bits - page_shift, stride)
-            nlevels = (addr_bits + stride - 1) // stride
-        top_shift = page_shift + (nlevels - 1) * stride
-        self._ptcfg = {"page_shift": page_shift, "nlevels": nlevels,
-                       "stride": stride, "top_shift": top_shift,
-                       "start": 4 - nlevels}
+        if not self.pt_config_probe(is_ttbr1):
+            # TCR unreadable while the MMU is on: the table exists but its shape
+            # is unknown.  Say so instead of decoding it as 4KB/4-level, which is
+            # right on this lab's machines and wrong on a 16K or 64K granule one.
+            self._ptcfg = {"page_shift": 12, "nlevels": 4, "stride": 9,
+                           "top_shift": 39, "start": 0, "probed": False}
         return (label, base)
 
     def pt_levels(self):
@@ -336,9 +434,20 @@ class Arm64(Arm64Common, KernelArch):
     def pt_config_desc(self):
         c = getattr(self, "_ptcfg", None)
         if not c:
-            return "4KB granule, 48-bit VA, 4-level (assumed)"
-        return "%dKB granule, %d-level (L%d..L3), %d-bit index/level" % (
-            1 << (c["page_shift"] - 10), c["nlevels"], c["start"], c["stride"])
+            return "paging shape not probed (TCR_EL<n> unread)"
+        # An assumed shape and a read one must never print alike: a 16K-granule
+        # machine decoded as 4KB produces indices that are wrong at every level,
+        # and the output gives no other sign of it.
+        tag = "" if c.get("probed") else "  [ASSUMED -- TCR_EL<n> unreadable]"
+        # TCR describes the two halves separately (T0SZ/TG0 for TTBR0, T1SZ/TG1
+        # for TTBR1).  Linux configures both alike, so they normally agree -- but
+        # an explicit TABLE_PA names a table with no regime attached, and the
+        # shape then had to be taken from one half.  Say when the other disagrees
+        # rather than presenting one half's numbers as the answer.
+        if c.get("half") is not None and c.get("halves_differ"):
+            tag += "  [read from the %s half; the other half differs]" % c["half"]
+        return "%dKB granule, %d-level (L%d..L3), %d-bit index/level%s" % (
+            1 << (c["page_shift"] - 10), c["nlevels"], c["start"], c["stride"], tag)
 
     # --- mmview support -------------------------------------------------
     def _hi_prefix(self):
@@ -351,9 +460,35 @@ class Arm64(Arm64Common, KernelArch):
                 vb = 64 - t1
         return (~((1 << vb) - 1)) & MASK
 
+    def kernel_va_floor(self):
+        """Lowest kernel-space VA for THIS build.
+
+        The base class answers 0xFFFF000000000000, which is the 48-bit split.  A
+        CONFIG_ARM64_VA_BITS=52 kernel starts its high half at
+        0xFFF0000000000000, and flooring that at the 48-bit value hides the
+        entire kernel map -- mmview would report "no kernel-space leaf mappings"
+        on a kernel whose mappings are all present.
+        The size comes from TCR's T1SZ, read live by pt_config_probe(); with
+        nothing read, the inherited 48-bit answer stands and is the common case."""
+        c = getattr(self, "_ptcfg", None) or {}
+        vb = c.get("va_bits")
+        if not c.get("probed") or not vb:
+            return KernelArch.kernel_va_floor(self)
+        # va_bits is recorded by the probe rather than rebuilt from
+        # top_shift + stride: those agree only when the address bits divide
+        # evenly into levels, which 52-bit VA on a 64K granule does not.
+        return (~((1 << vb) - 1)) & MASK
+
     def pt_dump_roots(self):
         el = self._cur_el() or 1
-        hi = symval("_text") or (self._hi_prefix() | 0x80000)
+        # A VA anywhere in the kernel half will do -- pt_base() only uses it to
+        # pick TTBR1 over TTBR0 -- but _text is the honest one.  The fallback used
+        # to be the high prefix OR the legacy TEXT_OFFSET 0x80000, a number that
+        # stopped meaning anything in 5.8 when arm64 dropped TEXT_OFFSET; any
+        # address with the top bits set selects the same regime, so the offset was
+        # doing nothing but implying a layout.  Without symbols, the prefix alone
+        # says exactly what is needed and claims nothing more.
+        hi = symval("_text") or self._hi_prefix()
         return [("kernel  TTBR1_EL%d" % el, hi, self._hi_prefix()),
                 ("idmap   TTBR0_EL%d" % el, 0, 0)]
 
