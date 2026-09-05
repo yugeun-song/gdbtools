@@ -8,7 +8,19 @@ import os
 from ...common.runtime import *
 from ..physmem import *
 from ...common.arch.x86_64 import X86_64Common
-from .base import KernelArch
+from .base import KernelArch, _parse_range
+
+
+def _binutil(name):
+    """`nm` / `objdump`, injectable.
+
+    These are this package's one host-toolchain dependency, and the README states
+    that configuration reaches it only through GDBTOOLS_*.  A machine whose
+    binutils is not on $PATH -- or whose `nm` cannot read the target's ELF -- can
+    now name the program instead of having no way to say it.  Unset means the
+    plain name and the usual $PATH lookup, which is what every machine here has,
+    so nothing changes by default."""
+    return _env("BINUTIL_" + name.upper()) or name
 
 
 
@@ -23,7 +35,7 @@ def _x86_decomp_offsets(cv):
     Returns None if the compressed vmlinux or the expected shape is absent."""
     import subprocess
     try:
-        nm = subprocess.check_output(["nm", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        nm = subprocess.check_output([_binutil("nm"), cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
     ek = None
@@ -36,7 +48,7 @@ def _x86_decomp_offsets(cv):
         return None
     try:
         dis = subprocess.check_output(
-            ["objdump", "-d", "--start-address=0x200", "--stop-address=0x400", cv],
+            [_binutil("objdump"), "-d", "--start-address=0x200", "--stop-address=0x400", cv],
             stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
@@ -93,7 +105,7 @@ def _nm_value(cv, name):
     """Value of one symbol in an ELF, via nm.  None when the file or symbol is absent."""
     import subprocess
     try:
-        out = subprocess.check_output(["nm", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        out = subprocess.check_output([_binutil("nm"), cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
     for line in out.splitlines():
@@ -110,7 +122,7 @@ def _nm_sym(cv, name):
     keeps a scan of one function from running on into the next one."""
     import subprocess
     try:
-        out = subprocess.check_output(["nm", "-S", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        out = subprocess.check_output([_binutil("nm"), "-S", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
     for line in out.splitlines():
@@ -151,7 +163,7 @@ def _x86_efi_handoff_off(cv):
     end = start + (size if size else 0x8000)
     try:
         dis = subprocess.check_output(
-            ["objdump", "-d", "--start-address=0x%x" % start,
+            [_binutil("objdump"), "-d", "--start-address=0x%x" % start,
              "--stop-address=0x%x" % end, cv],
             stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
@@ -197,7 +209,7 @@ def _x86_image_head(cv, n=8):
     import subprocess
     try:
         dis = subprocess.check_output(
-            ["objdump", "-d", "--start-address=0x0", "--stop-address=0x%x" % (n + 16), cv],
+            [_binutil("objdump"), "-d", "--start-address=0x0", "--stop-address=0x%x" % (n + 16), cv],
             stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
@@ -218,6 +230,19 @@ def _qemu_ram_window():
     flat view rather than probed: a read outside RAM is the one thing physmem warns
     must never be issued, so the bound has to come from the model.  Flash and ROM
     regions are excluded by name -- they are backed like RAM but hold no guest image."""
+    # An operator who states a range outranks the model.  GDBTOOLS_SCAN names the
+    # exact window to look in; GDBTOOLS_PHYS_WINDOW states where the image may
+    # plausibly live.  Both were previously ignored here, which made the search
+    # unsteerable on a machine whose mtree does not describe RAM the way this
+    # expects -- the one case where stating a range is the only remaining option.
+    for _k in ("SCAN", "PHYS_WINDOW"):
+        _v = _env(_k)
+        if _v:
+            _r = _parse_range(_v, _k)
+            if _r:
+                LOG.add("UEFI search window from $GDBTOOLS_%s: %s-%s"
+                        % (_k, fmt(_r[0]), fmt(_r[1])))
+                return _r
     out = execstr("monitor info mtree -f")
     if not out:
         return None

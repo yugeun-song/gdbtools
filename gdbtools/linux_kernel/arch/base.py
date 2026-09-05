@@ -82,6 +82,12 @@ class KernelArch:
         return TARGET.phys_window(self)
 
     # --- locate the kernel entry PA (scan the Image magic, else the hint) ---
+    # 128 MiB. Wide enough to cover every load address these boards use (arm64
+    # TEXT_OFFSET, riscv's 2 MB-aligned convention, x86's 16 MB default) and small
+    # enough that a miss costs a fraction of a second. $GDBTOOLS_SCAN_SPAN raises
+    # it; $GDBTOOLS_SCAN replaces the whole range.
+    SCAN_SPAN_DEFAULT = 0x8000000
+
     def _scan_ranges(self):
         """Candidate (start,end) physical ranges to scan for the Image magic.
 
@@ -89,6 +95,15 @@ class KernelArch:
         JSON profile, or RAM regions read out of a DTB.  Empty when nothing was
         supplied, which makes the scan find nothing rather than sweep a range that
         belongs to a different board."""
+        # How far past a stated RAM base to look when only a base is known.  A
+        # scan span is a cost/coverage tunable, not a property of any board, so it
+        # is a named default with an override rather than a literal repeated at two
+        # use sites: a board that loads its kernel further in can say so instead of
+        # having the scan quietly stop short of it and report "not found".
+        span_default = _env_int("SCAN_SPAN")
+        if span_default is None:
+            span_default = self.SCAN_SPAN_DEFAULT
+
         out = []
         sc = _env("SCAN")
         if sc:
@@ -97,11 +112,14 @@ class KernelArch:
                 out.append(r)
         rb = _env_int("RAM_BASE")
         if rb is not None:
-            out.append((rb, (rb + 0x8000000) & MASK))   # ram_base .. +128 MiB
+            out.append((rb, (rb + span_default) & MASK))
         # profile / DTB supplied machine RAM (non-QEMU boards)
         out.extend(TARGET.scan_ranges())
         for base, size in TARGET.ram_regions(self):
-            span = size if (size and size < 0x8000000) else 0x8000000
+            # A DTB states the real size; use it when it is smaller than the
+            # default sweep, and cap at the default when a region is huge, so a
+            # 32 GB /memory node does not turn into a 32 GB read.
+            span = size if (size and size < span_default) else span_default
             out.append((base, (base + span) & MASK))
         return out
 
@@ -535,12 +553,24 @@ class KernelArch:
         riscv) sign-extend and override this."""
         return (prefix | low) & MASK
 
+    # Traversal caps for the memory-map walk.  Not correctness limits: they stop a
+    # corrupt or circular table from being read forever.  A real kernel map is
+    # orders of magnitude under both; $GDBTOOLS_MAP_CAP_LEAVES /
+    # $GDBTOOLS_MAP_CAP_NODES raise them, and mmview says when it truncated rather
+    # than presenting a short list as complete.
+    MAP_CAP_LEAVES = 20000
+    MAP_CAP_NODES = 60000
+
     @safe(default=[])
-    def enumerate_regions(self, base, prefix, cap_leaves=20000, cap_nodes=60000):
+    def enumerate_regions(self, base, prefix, cap_leaves=None, cap_nodes=None):
         """Recursively walk the table at `base`, returning leaf mappings
-        [(va, pa, size, attrs, kind), ...] sorted by VA.  Reads whole 512-entry
-        tables from PHYSICAL memory (one monitor read per node), so it works with
-        the MMU on OR off.  Bounded by cap_* against a pathological/looping tree."""
+        [(va, pa, size, attrs, kind), ...] sorted by VA.  Reads whole tables from
+        PHYSICAL memory (one monitor read per node), so it works with the MMU on
+        OR off.  Bounded by cap_* against a pathological/looping tree."""
+        if cap_leaves is None:
+            cap_leaves = _env_int("MAP_CAP_LEAVES") or self.MAP_CAP_LEAVES
+        if cap_nodes is None:
+            cap_nodes = _env_int("MAP_CAP_NODES") or self.MAP_CAP_NODES
         names = self.pt_levels()
         nlevels = len(names)
         if not nlevels:

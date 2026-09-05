@@ -31,15 +31,34 @@ class Riscv64(Riscv64Common, KernelArch):
         #   kernel_map.virt_addr = runtimeVA(_start)      (arch/riscv/mm/init.c)
         # so slide = virt_addr - linkVA(_start).  Read virt_addr's VALUE at its
         # INVARIANT physical address (kernel_map is .data: PA = linkVA + offset),
-        # via `monitor xp` -- non-circular.  Field offset from DWARF so it survives
-        # struct-layout changes; fallback +8 (asm-offsets KERNEL_MAP_VIRT_ADDR).
+        # via `monitor xp` -- non-circular.  The field offset comes from DWARF,
+        # because it is NOT a constant: this workspace's own builds disagree.
+        #   v6.12-riscv64  asm-offsets.s:  ->KERNEL_MAP_VIRT_ADDR 8
+        #   upstream       asm-offsets.s:  ->KERNEL_MAP_VIRT_ADDR 0
+        # The old `fallback = 8` was therefore right for 6.12 and silently wrong
+        # for mainline -- it would read `size` instead of `virt_addr` and return a
+        # slide that is plausible and false.  With no DWARF the offset can be
+        # injected; with neither, the answer is that it is unknown.
         km = symval("kernel_map")
         link_start = sess.link_entry_va()        # robust image-base link VA (ET_DYN/PIE-safe)
         if km is None or link_start is None or sess.offset is None:
             return None
         foff = evi("(unsigned long long)&((struct kernel_mapping*)0)->virt_addr")
         if foff is None:
-            foff = 8
+            foff = _env_int("RISCV_KERNEL_MAP_VIRT_OFF")
+            if foff is None:
+                LOG.add("riscv kaslr: struct kernel_mapping has no DWARF here and "
+                        "GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF is unset")
+                print("[%s] cannot locate kernel_map.virt_addr: this vmlinux carries no "
+                      "DWARF for struct kernel_mapping, and the field offset is not a "
+                      "constant across versions (8 on 6.12, 0 on mainline).\n"
+                      "      Build with CONFIG_DEBUG_INFO, set "
+                      "GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF to the value in this build's\n"
+                      "      arch/riscv/kernel/asm-offsets.s (KERNEL_MAP_VIRT_ADDR), or "
+                      "give the slide directly with `kearly kaslr <hex>`." % NAME)
+                return None
+            print("[%s] riscv kaslr: using injected kernel_map.virt_addr offset %d"
+                  % (NAME, foff))
         link_km = (km - sess.kaslr_slide) & MASK
         va = read_phys_u64((link_km + sess.offset + foff) & MASK)
         if va is None or not self._is_va(va):

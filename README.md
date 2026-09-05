@@ -105,6 +105,45 @@ starts. There is no second spelling and no search path.
 | `GDBTOOLS_X86_DECOMP_PA` | where the bzImage decompressor is loaded, for a direct boot. A firmware chain does not load it that way and needs no value here |
 | `GDBTOOLS_X86_DECOMP_VMLINUX` | path to `arch/x86/boot/compressed/vmlinux`, which KASLR recovery reads |
 | `GDBTOOLS_NO_COLOR`, `GDBTOOLS_KDIS_ASCII` | plain output, for terminals that need it |
+| `GDBTOOLS_BINUTIL_NM`, `GDBTOOLS_BINUTIL_OBJDUMP` | the `nm` / `objdump` to run for the x86 decompressor parse. Unset means the plain name and the usual `$PATH` lookup; state one where binutils is elsewhere, or where the host's cannot read the target's ELF |
+| `GDBTOOLS_SCAN_SPAN` | how far past a stated `RAM_BASE` (or a DTB `/memory` base) to scan for the image magic. Default 128 MiB, which covers arm64's TEXT_OFFSET, riscv's 2 MB-aligned convention and x86's 16 MB. `GDBTOOLS_SCAN` replaces the range outright |
+| `GDBTOOLS_MAP_CAP_LEAVES`, `GDBTOOLS_MAP_CAP_NODES` | traversal caps for `mmview`'s page-table walk. Not correctness limits -- they stop a corrupt or circular table from being read forever, and `mmview` says when it truncated |
+| `GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF` | byte offset of `virt_addr` inside `struct kernel_mapping`, for a riscv vmlinux built without DWARF. It is **not** a constant -- 8 on 6.12, 0 on mainline -- so with neither DWARF nor this value the KASLR slide is reported as unknown rather than computed from a guess |
+
+### Install it as a library, not globally
+
+`setup.sh --library` records the checkout in
+`${XDG_CONFIG_HOME:-~/.config}/gdbtools/root` and writes nothing into the gdb init
+file, so a plain `gdb ./a.out` stays completely stock. Callers that want the
+commands source `gdbtools.py` themselves -- kbuildlab's `attach` and the nvim
+adapter both find the checkout through that root pointer.
+
+This is the recommended mode, and the reason is `sym`. In stock gdb `sym` is not
+an unused word: it is the unique-prefix abbreviation of `symbol-file`, and
+registering a command by that name silently replaces it for the whole session.
+Sourcing this package globally would therefore change what `sym` does in every
+gdb session on the machine, including ones that have nothing to do with a kernel.
+In library mode the takeover happens only in a session that asked for it, and it
+is announced when it does:
+
+```
+[gdbtools] took over existing gdb command(s): sym
+[gdbtools]   the previous meaning is gone for this session; the full name still
+             works where one exists (e.g. `symbol-file` for `sym`)
+```
+
+The detector behind that line asks gdb `help <name>` rather than
+`complete <name>`. `complete` lists words gdb would offer and never contains
+`sym`, so an exact-match test over it reports the name as free -- which is how
+this collision went unreported. `help` answers "Undefined command" for a free
+name, "Ambiguous command" for a bare prefix (nothing usable is lost, not
+reported), and the command's own help text when a real command is about to be
+replaced.
+
+`GDBTOOLS_PATH` is **not** in the contract table above and is not read here. It is a
+launcher-side name -- kbuildlab and the editor adapter use it to find
+`gdbtools.py` before gdb starts -- so it lives in this namespace by convention
+and is deliberately not part of the package's own contract.
 
 The x86 base recovery runs only while `GDBTOOLS_ENTRY_PA` is unset; a pinned
 `ENTRY_PA` takes precedence and suppresses it. The recovery fires on
