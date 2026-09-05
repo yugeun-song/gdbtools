@@ -227,7 +227,11 @@ class Arm64(Arm64Common, KernelArch):
             if asid:
                 tail += "  ASID 0x%x" % asid
             return hexv + tail
-        return Arch.render_sysreg(self, name, value)
+        # KernelArch, not `Arch`: no such name is imported here, so this line
+        # raised NameError for every register that is not TTBR -- and because the
+        # caller is wrapped in @safe(), the whole arm64 kgdb context panel came
+        # back blank with the failure only in the ring log.
+        return KernelArch.render_sysreg(self, name, value)
 
     def decode_sysreg(self, name, value):
         n = re.sub(r"_el[0123]$", "", name.lower())
