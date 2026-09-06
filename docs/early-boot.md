@@ -56,7 +56,7 @@ Right after attach, a banner lists all the commands:
 
 ```
 [kgdb] early-boot symbolizer loaded (commands: kearly | kp2v | kv2p | sym |
-       stackscan | ksr | ksregs | kcensus | kpt | kpgd | koff | mmview/memlayout | kfin | chain | cfgdis | kdtb)
+       stackscan | ksr | ksregs | kcensus | kpt | kpgd | koff | mmview/memlayout | kmemblock | kfin | chain | cfgdis | kdtb)
 ```
 
 **Safety contract** — (1) it kills nothing (no pkill/fuser; running VMs and sessions are untouchable). (2) if there is no stub it does not
@@ -108,6 +108,7 @@ force the connection and hang gdb; it loads only the symbols and tools and **dro
 | **`kpthex [PA] [N\|full]`** | show page-table entries as a **byte-level hex view** (per-entry 8-byte breakdown; `full`=4KB xxd dump). Reads physically, so it works even after the MMU is on |
 | **`koff [SYM]`** | **why the runtime address ≠ the vmlinux ELF (nm) value** — using the CPU flags/registers/`$pc` that split MMU on/off as clues, summarize the ELF-value-vs-current-address offset |
 | **`mmview` / `memlayout [all\|noidmap]`** | **vmmap for the kernel** — symbol landmarks + live ptdump |
+| **`kmemblock [TYPE] [full]`** | **the memory map the kernel was handed** — `memblock.memory` (what firmware or the DT said exists) and `memblock.reserved` (what has been claimed back out of it), with each region's flags decoded from the DWARF type of the flags field. Valid from the first instruction until `mem_init()`; after that it says whether the arrays are still live rather than printing a freed one |
 | `kfin` | a `finish` replacement for CFI-less head.S |
 | `chain [ADDR] [N]` | N-word telescope (physical/virtual aware, symbolized) |
 | **`cfgdis [ascii\|mono] [WHAT]`** | **branch-arrow disassembly** — like radare2's `pdf`, nested arrows in the left margin for every on-screen jump (source/destination lengths aligned). Auto-detects arch, excludes calls, works in both physical and virtual. A `flow` section is added to the context automatically when attached via run-gdb |

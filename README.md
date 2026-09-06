@@ -13,7 +13,8 @@ has to be a kernel.
 | `stackscan` | read the stack word by word and name every value that resolves, for when `backtrace` cannot work |
 | `chain` | follow a pointer chain, bounded and cycle-guarded |
 | `enumvals` | list every value of a C/C++ enum as this build defines them, decimal by default or `/x` for hex |
-| `cmdinfo` | which extension registered each command this session knows — this package, pwndbg, the kernel's `scripts/gdb`, another Python extension, a `define` macro, or gdb itself |
+| `cmdinfo` | which extension registered each command gdb answers to right now — this package, pwndbg, the kernel's `scripts/gdb`, another Python extension, a `define` macro, or gdb itself |
+| `fz` | pick a past command, a command name, a symbol or a source file through fzf, falling back to a numbered prompt and then to a plain listing |
 
 **`gdbtools/linux_kernel/`** is a Linux early-boot debugger. In `head.S`, before
 the MMU is switched to the kernel's high mapping, `$pc` and pointers hold
@@ -26,8 +27,8 @@ phys-shifted shadow symbol file, which revives stock gdb and pwndbg alike
 without patching either.
 
 It adds `kearly kp2v kv2p kb kw ksr ksregs kfin kcensus kpt kpgd kpthex koff kx
-kdtb mmview`, and stays inert until a vmlinux is loaded, so sourcing it
-globally costs an ordinary session nothing.
+kdtb mmview kmemblock`, and stays inert until a vmlinux is loaded, so sourcing
+it globally costs an ordinary session nothing.
 
 Targets arm64, x86_64 and riscv64.
 
@@ -60,36 +61,87 @@ To load it by hand instead:
 Re-sourcing is idempotent and picks up edited modules, so the hacking loop is
 edit, re-source, run.
 
-## Which extension owns a command
+## Which extension owns a command, and finding one
 
-A session with pwndbg, this package and a vmlinux loaded answers to roughly 535
-command words. Tab at an empty prompt does not tell you where any of them came
-from, and it is slow for a reason that is not fixable from here: gdb hands
-readline every candidate at once and readline stops to ask whether to print them
-all. `complete ''` is fast but silently truncates at `max-completions`, 200 by
-default -- measured here it returned 200 names where `help all` had 1500, with
+A session with pwndbg, this package and a vmlinux loaded answers to about 535
+command words, over 30 of which are prefixes carrying another 2036 subcommands
+between them. Tab at an empty prompt does not say where any of them came from,
+and it is slow for a reason that cannot be fixed from here: gdb hands readline
+every candidate at once and readline stops to ask whether to print them all.
+`complete ''` is fast and silently truncates at `max-completions`, 200 by
+default — measured here it returned 200 names where `help all` had 1500, with
 nothing said about having stopped short.
 
 ```
 (gdb) cmdinfo -c
-gdbtools     24  this package
+gdbtools     26  this package
 pwndbg      245  pwndbg, its aliases included
 kernel       35  the kernel's own scripts/gdb
-python        1  other Python extensions, gdb's bundled ones included
+python        1  other Python extensions, gdb's bundled ones included   (+2 subcommands under 1 prefixes)
 user          3  `define` macros, or a Python command that could not be placed
-gdb         227  gdb itself
+gdb         227  gdb itself   (+2034 subcommands under 29 prefixes)
 ```
 
-`cmdinfo GROUP` lists one group, `cmdinfo NAME` says which group one command is
-in, `-1` prints one name per line for piping, and `-c` gives the counts alone.
+`cmdinfo GROUP` lists one group, `cmdinfo NAME` says who registered one command
+— and for a prefix, lists its subcommands. `--sub` includes every subcommand
+path, `-1` prints one name per line for piping, `-c` gives the counts alone.
+
+Every name reported is one gdb resolves at that moment: present in `help all`
+*and* answered by `help NAME` rather than "Undefined command" or "Ambiguous
+command". Verifying all of them costs about 4 ms, so there is no reason to trust
+the listing instead. Prefixes are shown apart from leaves, because `set` alone
+is not a command you can run and folding its 745 subcommands into the word would
+say it were.
 
 Attribution is positional, never inferred from a name. Our own names and
-pwndbg's come from their registries; every other Python command is traced back
-through the garbage collector to the class that registered it and the file that
-class lives in; whatever is left over is gdb's own. A `lx-` prefix rule would be
-wrong on its first counterexample, and the kernel ships one: `scripts/gdb`
-registers `translate-vm`. A class that builds its name at runtime is reported as
-unplaced rather than guessed at.
+pwndbg's come from their registries; `gdb.Command` exposes no name attribute, so
+every other Python command is traced through the garbage collector to the class
+that registered it and the file that class lives in, with the name read from the
+string literal that class's own source passes to `__init__`; whatever is left is
+gdb's. A `lx-` prefix rule would be wrong on its first counterexample and the
+kernel ships one: `scripts/gdb` registers `translate-vm`.
+
+`fz` is the other half — searching rather than listing:
+
+```
+(gdb) fz                       past commands, from gdb's history file
+(gdb) fz commands              every command gdb answers to, tagged with its owner
+(gdb) fz functions ^start_     QUERY is gdb's own regex, so it narrows the image
+(gdb) fz variables memblock    before fzf ever sees it
+(gdb) fz files
+(gdb) fz breakpoints
+```
+
+fzf when it is installed and a terminal is attached; otherwise a numbered prompt
+on `/dev/tty`; otherwise the list is printed with the reason it could not ask.
+None of the three hangs, and a batch or MI session takes the last one.
+`$GDBTOOLS_FZF` names the binary and `$GDBTOOLS_FZF_OPTS` is appended to its
+arguments, so which fzf and how it behaves stays a property of the machine.
+
+It goes on a key, the way Ctrl-R is a key in a shell:
+
+```
+(gdb) fz bind                  \C-t runs `fz history`
+(gdb) fz bind \C-r history      take the reverse-i-search key, inside gdb only
+(gdb) fz bind \e[15~ commands   F5
+```
+
+or `GDBTOOLS_FZ_KEY='\C-t history'` in the environment to have it bound when
+gdbtools loads. Nothing is bound otherwise: a debugger's keys are the user's.
+The binding is installed with `readline.parse_and_bind()` from gdb's own Python,
+so `~/.inputrc` is not touched, and the macro clears a half-typed line first so
+the key does the same thing wherever the cursor is.
+
+What that can and cannot do was measured against gdb 17.2 with system readline
+8.3, in a real pty, not assumed:
+
+| | |
+| --- | --- |
+| a macro fires at the `(gdb)` prompt | **works** — both `readline.parse_and_bind()` from gdb's Python and an `$if gdb` block in `~/.inputrc` |
+| clearing a half-typed line first | **works** — `\C-a\C-k` ahead of the command |
+| running the pick | **works** — Ctrl-T, filter in fzf, Enter, and `$1 = 333333` came back |
+| offering the pick for editing, as a shell's Ctrl-R does | **no** — `readline.insert_text()` from a pre-input hook displays the text and gdb does not run it; a prefilled `print 1234567` never printed `$1`, and gdb's empty-line repeat ran the previous command instead. gdb drives readline through its callback interface and keeps its own line state |
+| reading this session's history | **no** — gdb's history is not in the readline state Python sees (length 0 in a pty after two commands), and gdb writes its history file at exit. So `fz history` searches previous sessions |
 
 ## Using the kernel half
 
@@ -107,6 +159,36 @@ attach. Boards that QEMU cannot describe take a JSON profile through
 
 `docs/early-boot.md` is the full manual: calibration, MMU regimes, page tables,
 system registers, watchpoints and the crossing catcher.
+
+### The memory map before there is a memory map
+
+`kmemblock` reads memblock — firmware's or the device tree's memory ranges in
+`memblock.memory`, and everything claimed back out of them in
+`memblock.reserved`. Between `_text` and `mem_init()` that is the only
+description of RAM that exists, which is the window this half debugs in.
+
+```
+(gdb) kmemblock
+[gdbtools] memblock  arrays live  bottom_up=False  current_limit=0xffffffffffffffff   [MMU=on SCTLR_EL1.M]
+  memory    cnt=1/1024  total=0x40000000 (1024.0 MiB)  name=memory
+      [  0] 0x0000000040000000..0x000000007fffffff  size 0x40000000 (1024.0 MiB)  0x0 NONE
+  reserved  cnt=9/641   total=0x0281a000 (40.1 MiB)   name=reserved
+      ...
+```
+
+Its shape is read from DWARF rather than assumed, because it moved across the
+versions this workspace holds: 4.6 types `flags` as a plain `unsigned long` and
+has no `name` member, 6.12 types it as `enum memblock_flags` and adds one, and
+mainline adds two more flags. So the members are found by walking the struct's
+fields and the flag names come from the DWARF type of the flags field itself —
+a kernel that adds a flag is described correctly without being taught about, and
+one that carries no enum has its flags printed raw with that said out loud.
+
+After `mem_init()` the arrays survive only where `CONFIG_ARCH_KEEP_MEMBLOCK` is
+set. arm64 and riscv select it; x86_64 does not, since the only symbol that
+selects it there is `INTEL_TDX_HOST`. 6.x sets `memblock_memory` to NULL in
+`memblock_discard()`, so the freed case is reported rather than printed as a
+memory map; 4.6 has no such pointer and the answer is then honestly unknown.
 
 ## Configuration is injected, not discovered
 
@@ -140,6 +222,9 @@ starts. There is no second spelling and no search path.
 | `GDBTOOLS_BINUTIL_NM`, `GDBTOOLS_BINUTIL_OBJDUMP` | the `nm` / `objdump` to run for the x86 decompressor parse. Unset means the plain name and the usual `$PATH` lookup; state one where binutils is elsewhere, or where the host's cannot read the target's ELF |
 | `GDBTOOLS_SCAN_SPAN` | how far past a stated `RAM_BASE` (or a DTB `/memory` base) to scan for the image magic. Default 128 MiB, which covers arm64's TEXT_OFFSET, riscv's 2 MB-aligned convention and x86's 16 MB. `GDBTOOLS_SCAN` replaces the range outright |
 | `GDBTOOLS_MAP_CAP_LEAVES`, `GDBTOOLS_MAP_CAP_NODES` | traversal caps for `mmview`'s page-table walk. Not correctness limits -- they stop a corrupt or circular table from being read forever, and `mmview` says when it truncated |
+| `GDBTOOLS_MEMBLOCK_CAP` | how many regions `kmemblock` prints per type before truncating. Default 512; `kmemblock TYPE full` lifts it for one call |
+| `GDBTOOLS_FZF`, `GDBTOOLS_FZF_OPTS` | the fzf binary `fz` runs, and options appended to its arguments. Unset means the plain name and the usual `$PATH` lookup; `fz` degrades to a numbered prompt and then to a listing when it is not there |
+| `GDBTOOLS_FZ_KEY` | a readline key spec, optionally with a subject (`\C-t`, `\C-r history`, `\e[15~ commands`), bound to `fz` when gdbtools loads. Unset binds nothing |
 | `GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF` | byte offset of `virt_addr` inside `struct kernel_mapping`, for a riscv vmlinux built without DWARF. It is **not** a constant -- 8 on 6.12, 0 on mainline -- so with neither DWARF nor this value the KASLR slide is reported as unknown rather than computed from a guess |
 
 ### Install it as a library, not globally
