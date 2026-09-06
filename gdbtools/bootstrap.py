@@ -14,6 +14,7 @@ from .linux_kernel import arch as _kernel_arch     # registers the full arch cla
 from .linux_kernel.session import SESSION
 from .linux_kernel.commands import *
 from .linux_kernel.fdt import KDtb
+from .linux_kernel.memblock import KMemblock
 from .linux_kernel.pwndbg_glue import *
 
 # Registered unconditionally, under explicit names: which command can answer
@@ -30,6 +31,7 @@ KERNEL_COMMANDS = (
     (KSr, "ksr"), (KSregs, "ksregs"), (KFin, "kfin"), (KCensus, "kcensus"),
     (KPt, "kpt"), (KPgd, "kpgd"), (KPtHex, "kpthex"), (KOff, "koff"), (KX, "kx"),
     (KDtb, "kdtb"), (MmView, "mmview"), (MmView, "memlayout"),
+    (KMemblock, "kmemblock"),
 )
 
 # Names this package has already claimed in this gdb session.  It is kept on the
