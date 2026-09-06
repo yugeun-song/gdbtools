@@ -9,6 +9,7 @@ from .common.sym import Sym
 from .common.stackscan import StackScan
 from .common.enumvals import EnumVals
 from .common.cmdinfo import CmdInfo
+from .common.fz import Fz, bind_from_env
 from .linux_kernel import arch as _kernel_arch     # registers the full arch classes
 from .linux_kernel.session import SESSION
 from .linux_kernel.commands import *
@@ -22,7 +23,7 @@ from .linux_kernel.pwndbg_glue import *
 COMMON_COMMANDS = (
     (CfgJson, "cfgjson"), (CfgDis, "cfgdis"),
     (Sym, "sym"), (StackScan, "stackscan"), (Chain, "chain"),
-    (EnumVals, "enumvals"), (CmdInfo, "cmdinfo"),
+    (EnumVals, "enumvals"), (CmdInfo, "cmdinfo"), (Fz, "fz"),
 )
 KERNEL_COMMANDS = (
     (KEarly, "kearly"), (P2V, "kp2v"), (V2P, "kv2p"), (KB, "kb"), (KW, "kw"),
@@ -127,6 +128,8 @@ def _autostart():
 def main():
     """Entry point for the gdbtools.py shim."""
     _register()
+    # Only when $GDBTOOLS_FZ_KEY says so; a debugger's keys are the user's.
+    bind_from_env()
     _autostart()
     # The banner appears only when a kernel target is actually present, so a
     # global `source` from a gdb init file stays silent in ordinary sessions.
