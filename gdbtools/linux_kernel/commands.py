@@ -487,6 +487,26 @@ the link register.  `kfin ADDR` runs to an explicit return address instead."""
     def __init__(self, name="kfin"):
         super(KFin, self).__init__(name, gdb.COMMAND_USER)
 
+    @safe(default=None)
+    def _outside_image(self, ra):
+        """Why `ra` cannot be a return address into this kernel, or None if it can.
+
+        The bounds are _text.._end resolved in the regime the CPU is in right now, so
+        the test works before and after the MMU comes up.  When either bound is
+        unknown -- no symbols, or a physical regime with no calibrated PA-VA offset --
+        this returns None: there is nothing to check against, and refusing on a guess
+        would be worse than the run it was meant to prevent."""
+        lo, hi = symval("_text"), symval("_end")
+        if lo is None or hi is None:
+            return None
+        if SESSION.which_map() == "physical":
+            lo, hi = SESSION.v2p(lo), SESSION.v2p(hi)
+            if lo is None or hi is None:
+                return None
+        if lo <= (ra & MASK) < hi:
+            return None
+        return "which is outside this kernel image (%s .. %s)" % (fmt(lo), fmt(hi))
+
     @safe()
     def invoke(self, arg, from_tty):
         a = SESSION.ensure_arch()
@@ -508,6 +528,23 @@ the link register.  `kfin ADDR` runs to an explicit return address instead."""
                   "      there is no caller to finish back to.  Use `kfin ADDR` for an\n"
                   "      explicit target, or step to a `bl` first." % (NAME, fmt(ra), SESSION.regime_phrase()))
             return
+        if not arg.strip():
+            foreign = self._outside_image(ra)
+            if foreign:
+                # The zero test above is the DIRECT-boot case.  In a firmware chain the
+                # link register is not zero at the kernel entry: u-boot's `booti` reaches
+                # the image with a `br`, so lr still holds u-boot's own return address --
+                # a live address, inside code the kernel has already left for good.  The
+                # old test passed it straight through, `continue` ran to an address that
+                # is never executed again, and the session lost the stop it attached for.
+                print("[%s] kfin: the link register holds %s, %s.\n"
+                      "      The kernel was ENTERED by the previous boot stage, not called from\n"
+                      "      it, so that address is never reached again -- running to it would\n"
+                      "      let the guest go and lose this stop.\n"
+                      "      Right now: %s.\n"
+                      "      Use `kfin ADDR` to name a return address, or step to a `bl` first."
+                      % (NAME, fmt(ra), foreign, SESSION.regime_phrase()))
+                return
         res = SESSION.symbolize(ra)
         sym = (res[2] if res else None) or ""
         print("[%s] kfin -> return %s %s" % (NAME, fmt(ra), sym))
