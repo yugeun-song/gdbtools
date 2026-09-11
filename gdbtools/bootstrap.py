@@ -30,7 +30,7 @@ KERNEL_COMMANDS = (
     (KEarly, "kearly"), (P2V, "kp2v"), (V2P, "kv2p"), (KB, "kb"), (KW, "kw"),
     (KSr, "ksr"), (KSregs, "ksregs"), (KFin, "kfin"), (KCensus, "kcensus"),
     (KPt, "kpt"), (KPgd, "kpgd"), (KPtHex, "kpthex"), (KOff, "koff"), (KX, "kx"),
-    (KDtb, "kdtb"), (MmView, "mmview"), (MmView, "memlayout"),
+    (KDtb, "kdtb"), (MmView, "mmview"), (MmView, "memlayout"), (KBits, "kbits"),
     (KMemblock, "kmemblock"),
 )
 
@@ -138,5 +138,5 @@ def main():
     # The common commands are registered either way.
     if SESSION.enabled:
         print("[%s] early-boot symbolizer loaded (kearly | kb | kw | kx | kp2v | kv2p | "
-              "ksr | ksregs | kcensus | kpt | kpgd | kpthex | koff | mmview | kfin | kdtb)"
+              "ksr | ksregs | kbits | kcensus | kpt | kpgd | kpthex | koff | mmview | kfin | kdtb)"
               % NAME)

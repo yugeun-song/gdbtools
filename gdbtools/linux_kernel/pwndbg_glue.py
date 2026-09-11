@@ -90,6 +90,27 @@ def context_kgdb(*args, **kwargs):
         return []
 
 
+def context_msysreg(*args, **kwargs):
+    """pwndbg context-section callback: the system registers the early-boot asm
+    touches, each printed as its own value with the bits inside it underneath.
+
+    Separate from 'kgdb' on purpose.  That section answers "where am I" -- the
+    PHYS/VIRT badge and the handful of registers that decide it.  This one answers
+    "what do the control registers say", which is a longer, differently-shaped
+    question, and mixing the two would make both harder to read."""
+    try:
+        lines = state.session().msysreg_context_lines(width=kwargs.get("width"))
+        if not lines:
+            return []
+        if kwargs.get("with_banner", True):
+            b = PWN.banner("kernel sysregs", width=kwargs.get("width"))
+            if b:
+                return [b] + lines
+        return lines
+    except Exception:
+        return []
+
+
 def context_flow(*args, **kwargs):
     """pwndbg context-section callback: the radare2-style BRANCH-ARROW view of
     near-pc disassembly, rendered by our own gdb+python engine.  Registered as
@@ -728,5 +749,5 @@ def uninstall_kernel_guards():
     return bool(restored)
 
 
-__all__ = ['_Pwndbg', 'PWN', '_SafeProbe', 'SAFEPROBE', 'context_kgdb', 'context_flow',
+__all__ = ['_Pwndbg', 'PWN', '_SafeProbe', 'SAFEPROBE', 'context_kgdb', 'context_flow', 'context_msysreg',
            'install_kernel_guards', 'uninstall_kernel_guards', 'KGUARD_HITS']

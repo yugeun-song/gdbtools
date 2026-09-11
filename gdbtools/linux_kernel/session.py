@@ -6,7 +6,7 @@ import os
 import re
 from ..common.runtime import *
 from .physmem import *
-from .pwndbg_glue import (PWN, SAFEPROBE, context_kgdb, context_flow,
+from .pwndbg_glue import (PWN, SAFEPROBE, context_kgdb, context_flow, context_msysreg,
                           install_kernel_guards, uninstall_kernel_guards)
 from .target import TARGET
 from ..common.arch import ARCHES, detect_arch, _arch_name
@@ -36,6 +36,7 @@ class Session:
         self.show_sysregs = True    # per-stop compact MMU + key-sysreg line (on)
         self._section_installed = False  # pwndbg 'kgdb' context section registered?
         self._kdisasm_installed = False  # pwndbg 'arrows' (cfgdis) context section?
+        self._msysreg_installed = False  # pwndbg 'msysreg' context section registered?
         self.kdis_before = 6        # context 'arrows': instrs shown before $pc
         self.kdis_after = 12        #                    and after $pc
         self.preset = None          # active preset name
@@ -47,6 +48,7 @@ class Session:
         self._early_quiet = False   # early-boot quiet/steplock currently applied?
         self._saved_params = {}     # gdb/pwndbg params we changed, for restore
         self.census_mode = "off"    # per-stop census in the panel: off|compact|full
+        self.msysreg_mode = "compact"  # sysreg+bitfield panel: off|compact|full
         self._census_dead = set()   # census regs the stub cannot expose (skip, fast)
         self.chain_hops = 8         # safe_chain telescope depth (kearly chaindepth N)
         self.saferender = "auto"
@@ -1065,6 +1067,177 @@ class Session:
             lines += self.census_lines(full=(self.census_mode == "full"))
         return lines
 
+    # --- sysreg + bit-field panel -------------------------------------------
+    def _msysreg_field_lines(self, a, name, value, width):
+        """The field rows under one register: 'NAME[hi:lo]=value reading', wrapped.
+
+        Rendered as a separate row from the value deliberately.  The register's whole
+        value and one flag inside it are two different facts, and a panel that prints
+        `M=1` without saying which register's bit 0 that is, or what the rest of that
+        register held, is the kind of half-answer this panel exists to avoid."""
+        specs = a.field_specs(name)
+        if not specs:
+            return []
+        cells = []
+        for fname, hi, lo, reading in specs:
+            if hi < lo:
+                continue                       # malformed entry: say nothing, never guess
+            v = a.field_extract(value, hi, lo)
+            span = "[%d]" % lo if hi == lo else "[%d:%d]" % (hi, lo)
+            # The field's KIND picks the base, not its value: flipping base with
+            # the value would make one field look different between two stops.
+            # A single bit is 0 or 1.  An enumerated field is an encoding and is
+            # written in hex wherever it is documented (ESR.EC 0x24, MAIR 0xff).
+            # Everything else is a number -- TxSZ, counter counts -- except that
+            # a field 8 bits or wider is a value, not a count, so hex again.
+            if hi == lo:
+                shown = "%d" % v
+            elif isinstance(reading, dict) or (hi - lo + 1) >= 8:
+                shown = "0x%x" % v
+            else:
+                shown = "%d" % v
+            note = a.field_reading(reading, v)
+            cells.append("%s%s=%s%s" % (fname, span, shown, (" " + note) if note else ""))
+        if not cells:
+            return []
+        # Wrap to the panel width, leaving room for the tree glyph and indent.
+        avail = max(40, (width or 100) - 14)
+        rows, cur = [], ""
+        for c in cells:
+            add = c if not cur else (cur + "  " + c)
+            if len(add) > avail and cur:
+                rows.append(cur); cur = c
+            else:
+                cur = add
+        if cur:
+            rows.append(cur)
+        out = []
+        for i, r in enumerate(rows):
+            glyph = "\u2514\u2500" if i == len(rows) - 1 else "\u251c\u2500"
+            out.append("          %s %s" % (glyph, PWN.color("gray", r) or r))
+        return out
+
+    def msysreg_context_lines(self, width=None):
+        """Lines for the 'msysreg' context section: every system register the early
+        asm touches, each as its own value, with the bits inside it underneath.
+
+        The register list is the arch's `entry_sysregs`, which is derived from the
+        msr/mrs operands in head.S / entry.S / proc.S rather than chosen by hand.
+        A register the target will not answer for is SKIPPED in compact mode and
+        shown as '?' in full mode -- never as 0, which would read as a real value."""
+        a = self.ensure_arch()
+        if a is None or not self.enabled or self.msysreg_mode == "off":
+            return []
+        names = getattr(a, "entry_sysregs", ())
+        if not names:
+            return []
+        full = (self.msysreg_mode == "full")
+        meta = {}
+        for ent in getattr(a, "census", ()):
+            if len(ent) >= 3:
+                meta[ent[0].lower()] = ent[2]
+        groups, order = {}, []
+        for nm in names:
+            v = a.sysreg(nm)
+            if v is None:
+                v = evi("$" + nm)
+            if v is None and not full:
+                continue
+            cat = meta.get(nm.lower(), "other")
+            if cat not in groups:
+                groups[cat] = []
+                order.append(cat)
+            groups[cat].append((nm, v))
+        lines = []
+        for cat in order:
+            lines.append(PWN.color("blue", cat) or cat)
+            for nm, v in groups[cat]:
+                nmc = PWN.color("cyan", "%-16s" % nm) or ("%-16s" % nm)
+                if v is None:
+                    lines.append("  %s ?" % nmc)
+                    continue
+                val = PWN.color("yellow", "0x%016x" % v) or ("0x%016x" % v)
+                rows = self._msysreg_field_lines(a, nm, v, width)
+                if not rows:
+                    # No field table for this one.  The older one-line decoder still
+                    # knows some of them (DAIF/NZCV normalisation among them), and a
+                    # short reading next to the value beats a bare number.
+                    note = None
+                    try:
+                        note = a.decode_sysreg(nm, v)
+                    except Exception:
+                        note = None
+                    if note:
+                        val += "   " + (PWN.color("gray", note) or note)
+                lines.append("  %s %s" % (nmc, val))
+                lines += rows
+        # PSTATE last: it is where DAIF and NZCV actually live, and showing a flag
+        # without its owner is exactly the omission this panel is meant to close.
+        ps = reg("pstate")
+        if ps is None:
+            ps = reg("cpsr")
+        if ps is not None:
+            lines.append(PWN.color("blue", "pstate") or "pstate")
+            nmc = PWN.color("cyan", "%-16s" % "PSTATE") or ("%-16s" % "PSTATE")
+            lines.append("  %s %s" % (nmc, PWN.color("yellow", "0x%016x" % ps)
+                                      or ("0x%016x" % ps)))
+            lines += self._msysreg_field_lines(a, "pstate", ps, width)
+        return lines
+
+    @safe()
+    def _install_msysreg_section(self):
+        """Register the 'msysreg' context section (key 'm') after our 'kgdb' badge.
+
+        Same runtime, no-pwndbg-edit approach as the other two sections.  'm' is free:
+        pwndbg's built-ins take a/r/d/s/b/c/l/e/h/t and this package already holds
+        k (kgdb) and f (flow), and a section is resolved by its name's FIRST LETTER,
+        so the name has to start with a letter nobody else claims."""
+        if not PWN.ok:
+            return
+        secs = getattr(PWN._ctx, "context_sections", None)
+        if not isinstance(secs, dict):
+            return
+        existing = secs.get("m")
+        if existing is not None and getattr(existing, "__name__", "") != "context_msysreg":
+            return                            # 'm' taken by a different tool
+        secs["m"] = context_msysreg
+        cfg = getattr(PWN._ctx, "config_context_sections", None)
+        val = getattr(cfg, "value", None)
+        if cfg is not None and isinstance(val, str):
+            if "msysreg" not in val.split():
+                parts = val.split()
+                if "kgdb" in parts:
+                    parts.insert(parts.index("kgdb") + 1, "msysreg")
+                elif "regs" in parts:
+                    parts.insert(parts.index("regs") + 1, "msysreg")
+                else:
+                    parts.append("msysreg")
+                try:
+                    cfg.value = " ".join(parts)   # direct: avoid the list-reverting validator
+                except Exception:
+                    exec_confirmless("set context-sections %s" % " ".join(parts))
+            nv = getattr(cfg, "value", "")
+            self._msysreg_installed = isinstance(nv, str) and "msysreg" in nv.split()
+        if self._msysreg_installed:
+            LOG.add("pwndbg 'msysreg' context section installed")
+
+    @safe()
+    def _remove_msysreg_section(self):
+        if not self._msysreg_installed:
+            return
+        secs = getattr(PWN._ctx, "context_sections", None)
+        if isinstance(secs, dict) and getattr(secs.get("m"), "__name__", "") == "context_msysreg":
+            secs.pop("m", None)
+        cfg = getattr(PWN._ctx, "config_context_sections", None)
+        val = getattr(cfg, "value", None)
+        if isinstance(val, str) and "msysreg" in val.split():
+            new = " ".join(p for p in val.split() if p != "msysreg")
+            try:
+                cfg.value = new               # direct: avoid pwndbg's list-reverting validator
+            except Exception:
+                exec_confirmless("set context-sections %s" % new)
+        self._msysreg_installed = False
+
     # --- cross-regime register twins (tool's own panel; pwndbg REGISTERS untouched) ---
     # Registers that carry a flags/status word, not an address -- excluded from the twin
     # scan so a value like cpsr=0x800003c5 (the N flag set) is not mistaken for a pointer.
@@ -1575,8 +1748,18 @@ class Session:
         cfg = getattr(PWN._ctx, "config_context_sections", None)
         val = getattr(cfg, "value", None)
         if isinstance(val, str) and "kgdb" in val.split():
-            exec_confirmless("set context-sections %s" %
-                             " ".join(p for p in val.split() if p != "kgdb"))
+            # Direct assignment, for the same reason the install path uses it and the
+            # removal path did not: `set context-sections` fires pwndbg's validator,
+            # which reverts the WHOLE list to its default the moment it contains a
+            # name with no registered section.  "ghidra" is in pwndbg's own default
+            # list and is unregistered unless ghidra is loaded, so the validator
+            # fires on a stock setup -- and removing one of our sections through that
+            # command took the other two with it, along with the user's own ordering.
+            new = " ".join(p for p in val.split() if p != "kgdb")
+            try:
+                cfg.value = new
+            except Exception:
+                exec_confirmless("set context-sections %s" % new)
         self._section_installed = False
 
     # --- koff: evidence board for ELF-symbol vs runtime-address offset -------
@@ -2369,6 +2552,24 @@ class Session:
                 print("  " + ln)
 
     @safe()
+    def set_msysreg(self, mode):
+        mode = (mode or "").lower()
+        aliases = {"on": "compact", "c": "compact", "1": "compact",
+                   "full": "full", "all": "full", "f": "full",
+                   "off": "off", "0": "off", "no": "off"}
+        mode = aliases.get(mode, mode)
+        if mode not in ("off", "compact", "full"):
+            print("usage: kearly msysreg <off|compact|full>  "
+                  "(compact = only registers this target answers for; "
+                  "full = every one, unreadable ones as '?')")
+            return
+        self.msysreg_mode = mode
+        print("[%s] msysreg panel = %s" % (NAME, mode))
+        if mode == "off":
+            self._remove_msysreg_section()
+        elif self.enabled:
+            self._install_msysreg_section()
+
     def set_census(self, mode):
         mode = (mode or "").lower()
         aliases = {"on": "compact", "c": "compact", "1": "compact",
@@ -3277,6 +3478,7 @@ class Session:
         install_kernel_guards()
         self._install_pwndbg_section()       # render badge+sysregs inside pwndbg ctx
         self._install_kdisasm_section()      # arrowed disasm next to SOURCE(CODE)
+        self._install_msysreg_section()      # sysregs + their bit fields, own window
         self._quiet_pagescan()               # silence the useless auto-explore-pages spam
         self._maybe_warn_saferender()
         if not self._bp_hooked:
@@ -3342,6 +3544,7 @@ class Session:
         self._managed_bps.clear()
         self._remove_pwndbg_section()
         self._remove_kdisasm_section()
+        self._remove_msysreg_section()
         self._shadow_unload()
         if SAFEPROBE.mode != "on":
             SAFEPROBE.uninstall()

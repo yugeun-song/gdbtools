@@ -59,6 +59,11 @@ Subcommands:
   kearly arch <key|auto>   force the architecture if auto-detect is wrong
   kearly verbose on|off    per-stop pc annotation line
   kearly sysregs on|off    per-stop compact MMU + key-sysreg line (on by default)
+  kearly msysreg off|compact|full  the 'kernel sysregs' context window: every system
+                           register head.S / entry.S / proc.S touches, each with its
+                           own value and the bit fields inside it on the rows below
+                           (compact = only what this target answers for; full = all,
+                            unreadable ones as '?').  Standalone dump: `kbits`.
   kearly census off|compact|full  per-stop head.S register census in the panel: every
                            system/control register head.S + its call chain touch
                            (off by default; 'full' = annotated, same as `kcensus`)
@@ -166,6 +171,8 @@ Subcommands:
                   "(full dump: ksregs)" % (NAME, SESSION.show_sysregs))
         elif sub in ("census", "regs"):
             SESSION.set_census(args[1] if len(args) > 1 else "compact")
+        elif sub in ("msysreg", "sysreg", "bits", "kbits"):
+            SESSION.set_msysreg(args[1] if len(args) > 1 else "compact")
         elif sub in ("chaindepth", "chain", "depth", "telescope", "hops"):
             if len(args) > 1:
                 SESSION.set_chain_hops(args[1])
@@ -550,6 +557,45 @@ the link register.  `kfin ADDR` runs to an explicit return address instead."""
         print("[%s] kfin -> return %s %s" % (NAME, fmt(ra), sym))
         execstr("tbreak *0x%x" % (ra & MASK))
         execstr("continue")
+class KBits(gdb.Command):
+    """kbits [full] : system registers the early-boot asm touches, each printed as
+its own value with the bit fields inside it on the rows below.
+
+The register list is not a selection: it is every register named by an msr/mrs in
+arch/arm64/kernel/head.S, arch/arm64/kernel/entry.S and arch/arm64/mm/proc.S (the
+riscv/x86 ports state their own).  A register the target will not answer for is
+omitted, and shown as '?' with `kbits full` -- never as 0.
+
+The same content renders live inside pwndbg's context as the 'kernel sysregs'
+window; `kearly msysreg off|compact|full` controls that one."""
+
+    def __init__(self, name="kbits"):
+        super(KBits, self).__init__(name, gdb.COMMAND_USER)
+
+    @safe()
+    def invoke(self, arg, from_tty):
+        a = SESSION.ensure_arch()
+        if a is None:
+            print("[%s] no supported arch on this target" % NAME)
+            return
+        want_full = "full" in (arg or "").lower().split()
+        saved = SESSION.msysreg_mode
+        if want_full:
+            SESSION.msysreg_mode = "full"
+        elif saved == "off":
+            SESSION.msysreg_mode = "compact"   # the command was asked for; answer it
+        try:
+            st, src = SESSION.mmu_state()
+            print("[%s] kernel sysregs -- %s   [MMU=%s %s]" % (NAME, a.key, st, src))
+            lines = SESSION.msysreg_context_lines() or []
+            if not lines:
+                print("  nothing readable here (no arch fields, or the stub exposes none)")
+            for ln in lines:
+                print(ln)
+        finally:
+            SESSION.msysreg_mode = saved
+
+
 class KCensus(gdb.Command):
     """kcensus [full] : dump the head.S early-boot register census -- every
 system/control register that head.S AND the files it transitively calls read or
@@ -819,4 +865,4 @@ regime including the pre-MMU physical phase:
         show_all = any(k in a for k in ("all", "user", "full"))
         for ln in (SESSION.mmview_lines(want_idmap=want_idmap, show_all=show_all) or []):
             print(ln)
-__all__ = ['KEarly', 'P2V', 'V2P', 'KB', 'KW', 'KSr', 'KSregs', 'KFin', 'KCensus', 'KPt', 'KPgd', 'KPtHex', 'KOff', 'KX', 'MmView']
+__all__ = ['KEarly', 'P2V', 'V2P', 'KB', 'KW', 'KSr', 'KSregs', 'KFin', 'KCensus', 'KPt', 'KPgd', 'KPtHex', 'KOff', 'KX', 'MmView', 'KBits']

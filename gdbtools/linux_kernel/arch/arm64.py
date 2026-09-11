@@ -14,6 +14,27 @@ from ...common.arch.arm64 import Arm64Common
 from .base import KernelArch
 
 
+# A TxSZ the architecture does not allow is not a VA size.  ARMv8 permits 16..39,
+# widened at the low end to 12 by LVA, and the kernel only ever programs a value in
+# that range.  Anything else is a field nobody set -- u-boot leaves T1SZ at 0 with
+# TTBR1 walks disabled -- and calling that "VA 64-bit" states a configuration that
+# does not exist.  Say it is unset instead; EPD1 on the same row says why.
+def _txsz_reading(which, v):
+    if not (12 <= v <= 39):
+        return "%s TxSZ unset/reserved" % which
+    return "%s VA %d-bit" % (which, 64 - v)
+
+
+# MAIR attribute bytes, limited to the encodings arm64 Linux actually programs (the
+# MT_* indices in asm/memory.h).  A byte that is not listed reads as nothing rather
+# than as a guess.
+_MAIR_ATTR = {
+    0x00: "Device-nGnRnE", 0x04: "Device-nGnRE", 0x08: "Device-nGRE",
+    0x0C: "Device-GRE", 0x44: "Normal NC", 0xBB: "Normal WT",
+    0xFF: "Normal WB",
+}
+
+
 class Arm64(Arm64Common, KernelArch):
     entry_symbol = "_text"
     entry_break_kind = "sw"              # entry executes in place; sw bp is reliable
@@ -588,6 +609,179 @@ class Arm64(Arm64Common, KernelArch):
                 return self.PSTATE_DERIVED[n](ps)
         return evi("$" + name)
 
+    # --- system registers the early-boot asm actually touches, and their fields ---
+    #
+    # The NAMES are measured, not chosen: every register named by an msr/mrs (or
+    # msr_s/mrs_s) in arch/arm64/kernel/head.S, arch/arm64/kernel/entry.S and
+    # arch/arm64/mm/proc.S.  That is the question this panel answers -- "what did the
+    # code I am stepping through touch" -- so the list is derived from that code
+    # rather than from what looks interesting.  Registers outside those three files
+    # belong in `kcensus`, which covers the whole call chain.
+    entry_sysregs = (
+        "SCTLR_EL1", "SCTLR_EL2", "TTBR0_EL1", "TTBR1_EL1", "TCR_EL1", "MAIR_EL1",
+        "VBAR_EL1", "VBAR_EL2", "CurrentEL", "DAIF", "SPSR_EL1", "SPSR_EL2",
+        "ELR_EL1", "ELR_EL2", "ESR_EL1", "FAR_EL1", "SP_EL0", "CONTEXTIDR_EL1",
+        "CPACR_EL1", "CPTR_EL2", "HCR_EL2", "HSTR_EL2", "MDCR_EL2", "MDSCR_EL1",
+        "OSLAR_EL1", "OSLSR_EL1", "PMCR_EL0", "MIDR_EL1", "MPIDR_EL1",
+        "VMPIDR_EL2", "VPIDR_EL2", "VTTBR_EL2", "CNTHCTL_EL2", "CNTVOFF_EL2",
+        "TPIDR_EL0", "TPIDRRO_EL0", "ID_AA64MMFR0_EL1", "ID_AA64MMFR1_EL1",
+        "ID_AA64PFR0_EL1", "ID_AA64DFR0_EL1", "ICC_SRE_EL2", "ICH_HCR_EL2",
+    )
+
+    # field -> (name, hi, lo, reading).  `reading` turns the extracted value into
+    # words: a dict for an enumerated field, a callable for a computed one, None for
+    # a field whose number speaks for itself.  Only fields this project has checked
+    # against the architecture reference are listed -- a wrong bit number here would
+    # be worse than a missing one, because it reads as fact.
+    _F_ONOFF = {0: "off", 1: "on"}
+    sysreg_fields = {
+        "sctlr_el1": (("M", 0, 0, {0: "MMU off", 1: "MMU on"}),
+                      ("A", 1, 1, {0: "align check off", 1: "align check on"}),
+                      ("C", 2, 2, {0: "D-cache off", 1: "D-cache on"}),
+                      ("SA", 3, 3, {0: "SP align check off", 1: "SP align check on"}),
+                      ("SA0", 4, 4, None),
+                      ("I", 12, 12, {0: "I-cache off", 1: "I-cache on"}),
+                      ("WXN", 19, 19, {0: "W does not imply XN", 1: "W implies XN"}),
+                      ("E0E", 24, 24, {0: "EL0 little-endian", 1: "EL0 big-endian"}),
+                      ("EE", 25, 25, {0: "EL1 little-endian", 1: "EL1 big-endian"})),
+        "sctlr_el2": (("M", 0, 0, {0: "MMU off", 1: "MMU on"}),
+                      ("C", 2, 2, {0: "D-cache off", 1: "D-cache on"}),
+                      ("I", 12, 12, {0: "I-cache off", 1: "I-cache on"}),
+                      ("EE", 25, 25, {0: "little-endian", 1: "big-endian"})),
+        "tcr_el1": (("T0SZ", 5, 0, lambda v: _txsz_reading("TTBR0", v)),
+                    ("EPD0", 7, 7, {0: "TTBR0 walks enabled", 1: "TTBR0 walks disabled"}),
+                    ("IRGN0", 9, 8, None), ("ORGN0", 11, 10, None), ("SH0", 13, 12, None),
+                    ("TG0", 15, 14, {0: "4K", 1: "64K", 2: "16K"}),
+                    ("T1SZ", 21, 16, lambda v: _txsz_reading("TTBR1", v)),
+                    ("A1", 22, 22, {0: "ASID from TTBR0", 1: "ASID from TTBR1"}),
+                    ("EPD1", 23, 23, {0: "TTBR1 walks enabled", 1: "TTBR1 walks disabled"}),
+                    ("IRGN1", 25, 24, None), ("ORGN1", 27, 26, None), ("SH1", 29, 28, None),
+                    ("TG1", 31, 30, {1: "16K", 2: "4K", 3: "64K"}),
+                    ("IPS", 34, 32, {0: "32-bit PA", 1: "36-bit PA", 2: "40-bit PA",
+                                     3: "42-bit PA", 4: "44-bit PA", 5: "48-bit PA",
+                                     6: "52-bit PA"}),
+                    ("AS", 36, 36, {0: "8-bit ASID", 1: "16-bit ASID"}),
+                    ("TBI0", 37, 37, None), ("TBI1", 38, 38, None)),
+        # BADDR is bits[47:1], so extracting it yields HALF the table address -- a
+        # number that looks like an address and is not one.  The table base is
+        # already shown, and walked, by the sysreg renderer; only the fields that
+        # are not the address appear here.
+        "ttbr0_el1": (("CnP", 0, 0, None), ("ASID", 63, 48, None)),
+        "ttbr1_el1": (("CnP", 0, 0, None), ("ASID", 63, 48, None)),
+        "vttbr_el2": (("VMID", 63, 48, None),),
+        "hcr_el2": (("VM", 0, 0, {0: "stage-2 off", 1: "stage-2 on"}),
+                    ("FMO", 3, 3, None), ("IMO", 4, 4, None), ("AMO", 5, 5, None),
+                    ("TGE", 27, 27, {0: "guest entries to EL1", 1: "all entries to EL2"}),
+                    ("RW", 31, 31, {0: "EL1 is AArch32", 1: "EL1 is AArch64"}),
+                    ("E2H", 34, 34, {0: "non-VHE", 1: "VHE"})),
+        "cpacr_el1": (("ZEN", 17, 16, {0: "SVE trapped", 1: "SVE EL1 only",
+                                       3: "SVE EL0+EL1"}),
+                      ("FPEN", 21, 20, {0: "FP trapped", 1: "FP EL1 only",
+                                        3: "FP EL0+EL1"}),
+                      ("SMEN", 25, 24, {0: "SME trapped", 1: "SME EL1 only",
+                                        3: "SME EL0+EL1"})),
+        "cptr_el2": (("TZ", 8, 8, None), ("TFP", 10, 10, None), ("TTA", 20, 20, None),
+                     ("TCPAC", 31, 31, None)),
+        "esr_el1": (("ISS", 24, 0, None), ("IL", 25, 25, {0: "16-bit insn", 1: "32-bit insn"}),
+                    ("EC", 31, 26, {0x00: "unknown", 0x0E: "illegal execution state",
+                                    0x15: "SVC (AArch64)", 0x18: "MSR/MRS trap",
+                                    0x20: "instruction abort, lower EL",
+                                    0x21: "instruction abort, same EL",
+                                    0x22: "PC alignment",
+                                    0x24: "data abort, lower EL",
+                                    0x25: "data abort, same EL",
+                                    0x26: "SP alignment",
+                                    0x2F: "SError",
+                                    0x30: "breakpoint, lower EL", 0x31: "breakpoint, same EL",
+                                    0x32: "software step, lower EL", 0x33: "software step, same EL",
+                                    0x34: "watchpoint, lower EL", 0x35: "watchpoint, same EL",
+                                    0x3C: "BRK (AArch64)"})),
+        "mdscr_el1": (("SS", 0, 0, {0: "software step off", 1: "software step on"}),
+                      ("KDE", 13, 13, None), ("MDE", 15, 15, None), ("TDA", 21, 21, None)),
+        "oslsr_el1": (("OSLK", 1, 1, {0: "OS lock unlocked", 1: "OS lock locked"}),),
+        "pmcr_el0": (("E", 0, 0, _F_ONOFF), ("P", 1, 1, None), ("C", 2, 2, None),
+                     ("D", 3, 3, None), ("X", 4, 4, None), ("DP", 5, 5, None),
+                     ("LC", 6, 6, None), ("N", 15, 11, lambda v: "%d counters" % v)),
+        "midr_el1": (("Revision", 3, 0, None), ("PartNum", 15, 4, None),
+                     ("Architecture", 19, 16, None), ("Variant", 23, 20, None),
+                     ("Implementer", 31, 24, {0x41: "ARM", 0x51: "Qualcomm",
+                                              0x4E: "NVIDIA", 0x43: "Cavium",
+                                              0x00: "reserved/emulated"})),
+        "mpidr_el1": (("Aff0", 7, 0, None), ("Aff1", 15, 8, None), ("Aff2", 23, 16, None),
+                      ("MT", 24, 24, None), ("U", 30, 30, {0: "multiprocessor", 1: "uniprocessor"}),
+                      ("Aff3", 39, 32, None)),
+        "id_aa64mmfr0_el1": (("PARange", 3, 0, {0: "32-bit PA", 1: "36-bit PA",
+                                                2: "40-bit PA", 3: "42-bit PA",
+                                                4: "44-bit PA", 5: "48-bit PA",
+                                                6: "52-bit PA"}),
+                             ("ASIDBits", 7, 4, {0: "8-bit ASID", 2: "16-bit ASID"}),
+                             ("BigEnd", 11, 8, None),
+                             ("TGran16", 23, 20, {0: "16K unsupported", 1: "16K supported"}),
+                             ("TGran64", 27, 24, {0: "64K supported", 15: "64K unsupported"}),
+                             ("TGran4", 31, 28, {0: "4K supported", 15: "4K unsupported"})),
+        "id_aa64pfr0_el1": (("EL0", 3, 0, None), ("EL1", 7, 4, None), ("EL2", 11, 8, None),
+                            ("EL3", 15, 12, None),
+                            ("FP", 19, 16, {0: "FP present", 15: "no FP"}),
+                            ("AdvSIMD", 23, 20, {0: "SIMD present", 15: "no SIMD"}),
+                            ("GIC", 27, 24, {0: "no sysreg GIC CPU IF", 1: "GICv3 sysreg CPU IF"})),
+        "icc_sre_el2": (("SRE", 0, 0, {0: "memory-mapped GIC", 1: "sysreg GIC"}),
+                        ("DFB", 1, 1, None), ("DIB", 2, 2, None),
+                        ("Enable", 3, 3, {0: "EL1 SRE trapped", 1: "EL1 SRE allowed"})),
+        "cnthctl_el2": (("EL1PCTEN", 0, 0, None), ("EL1PCEN", 1, 1, None)),
+        "currentel": (("EL", 3, 2, lambda v: "EL%d" % v),),
+        "mair_el1": tuple(("Attr%d" % i, i * 8 + 7, i * 8, _MAIR_ATTR)
+                          for i in range(8)),
+    }
+
+    # PSTATE is not a register the code msr's as a whole, but every DAIF/NZCV bit the
+    # asm sets lives in it, and reading a bit without its owner is how a panel lies by
+    # omission.  Rendered as one value with its fields under it, like the rest.
+    pstate_fields = (("SP", 0, 0, {0: "SP_EL0", 1: "SP_ELx"}),
+                     ("EL", 3, 2, lambda v: "EL%d" % v),
+                     ("nRW", 4, 4, {0: "AArch64", 1: "AArch32"}),
+                     ("F", 6, 6, {0: "FIQ unmasked", 1: "FIQ masked"}),
+                     ("I", 7, 7, {0: "IRQ unmasked", 1: "IRQ masked"}),
+                     ("A", 8, 8, {0: "SError unmasked", 1: "SError masked"}),
+                     ("D", 9, 9, {0: "debug unmasked", 1: "debug masked"}),
+                     ("IL", 20, 20, None), ("SS", 21, 21, None),
+                     ("PAN", 22, 22, None), ("UAO", 23, 23, None),
+                     ("V", 28, 28, None), ("C", 29, 29, None),
+                     ("Z", 30, 30, None), ("N", 31, 31, None))
+
+    @staticmethod
+    def field_extract(value, hi, lo):
+        return (value >> lo) & ((1 << (hi - lo + 1)) - 1)
+
+    @staticmethod
+    def field_reading(spec, v):
+        """Words for an extracted field value, or "" when the number says it all.
+
+        An enumerated field whose value is NOT in its table returns "" rather than a
+        guess: an encoding this table does not know is a fact about the table, and
+        printing a wrong name for it would be worse than printing none."""
+        if spec is None:
+            return ""
+        try:
+            if isinstance(spec, dict):
+                return spec.get(v, "")
+            if callable(spec):
+                return spec(v)
+        except Exception:
+            return ""
+        return str(spec)
+
+    def field_specs(self, name):
+        """Field table for a register name, or () when none is known.
+
+        PSTATE is kept in its own attribute rather than in the register table: it is
+        not a register the asm names in an msr, but it is where the DAIF and NZCV
+        bits that asm sets actually live, so the panel has to be able to ask for it
+        by name like any other."""
+        n = re.sub(r"\s+", "", name).lower()
+        if n in ("pstate", "cpsr"):
+            return self.pstate_fields
+        return self.sysreg_fields.get(n, ())
+
     # --- early-boot register census (union of 4.6 + 6.12 head.S call chain) ---
     census = (
         # translation
@@ -642,6 +836,7 @@ class Arm64(Arm64Common, KernelArch):
         ("VBAR_EL2", "RW", "exception-vectors", "install EL2 hyp-stub vector base"),
         ("VBAR_EL12", "R", "exception-vectors", "VHE alias: read EL1 VBAR [6.12]"),
         ("ESR_EL2", "R", "exception-vectors", "decode HVC syndrome in hyp-stub sync handler [4.6]"),
+        ("ESR_EL1", "R", "exception-vectors", "syndrome of the EL1 exception entry.S is handling"),
         # feature-id
         ("MIDR_EL1", "R", "feature-id", "main ID -> VPIDR_EL2 mirror; errata checks"),
         ("MPIDR_EL1", "R", "feature-id", "CPU affinity: secondary pen match, VMPIDR mirror"),
