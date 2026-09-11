@@ -21,7 +21,7 @@ def _read_phys_u64(pa):
 
 
 @safe(default=None)
-def safe_chain(addr, phys=False, hops=None):
+def safe_chain(addr, phys=False, hops=None, step=None):
     """A self-bounded pointer telescope that CANNOT overflow gdb's C stack.
     pwndbg's own `chain` is unusable on a page-table-base register: it does not
     know the value is a PGD, so it follows the descriptor words as if they were an
@@ -32,7 +32,16 @@ def safe_chain(addr, phys=False, hops=None):
     hop -- giving the familiar 'a -> b -> c' look with a hard depth bound.  For a
     page-table base pass phys=True: each descriptor's flag bits are stripped so the
     walk follows the real next-table base (PGD -> PUD -> PMD ...).  The default hop
-    count is the session's `chain_hops` (set live with `kearly chaindepth N`)."""
+    count is the session's `chain_hops` (set live with `kearly chaindepth N`).
+
+    `step` decides what the word just read points at next, and returning None from
+    it ENDS the chain.  Stripping flag bits is the right default for an ordinary
+    pointer and the wrong one for a page table: a descriptor states in its own low
+    bits whether it refers to another table at all, and a caller that knows the
+    format -- which this module deliberately does not -- passes a `step` that reads
+    them.  Without one, ANY word telescopes into a plausible-looking table address,
+    which is how a link register left behind by a bootloader renders as a page-table
+    walk."""
     if addr is None:
         return None
     if hops is None:
@@ -40,10 +49,10 @@ def safe_chain(addr, phys=False, hops=None):
     hops = max(1, min(int(hops), 256))          # hard clamp: always finite
     if phys:
         rd = _read_phys_u64
-        nxtf = lambda v: v & ((1 << 48) - 1) & ~0xFFF
+        nxtf = step or (lambda v: v & ((1 << 48) - 1) & ~0xFFF)
     else:
         rd = lambda a: evi("*(unsigned long long *)0x%x" % (a & MASK))
-        nxtf = lambda v: v & MASK
+        nxtf = step or (lambda v: v & MASK)
     out, seen, cur = [], set(), addr & MASK
     for _ in range(max(1, hops)):
         sym = ""
@@ -59,6 +68,8 @@ def safe_chain(addr, phys=False, hops=None):
         if val is None:
             break
         nxt = nxtf(val)
+        if nxt is None:
+            break
         if nxt == 0:
             out.append("0x0")
             break

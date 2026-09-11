@@ -232,6 +232,61 @@ class Arm64(Arm64Common, KernelArch):
         base = re.sub(r"_el[0123]$", "", name.lower())
         return base in ("ttbr0", "ttbr1", "vbar", "elr", "far", "sp")
 
+    # Granule from TCR.TG0 / TCR.TG1, as page-offset bits.  The two fields do NOT
+    # share an encoding -- TG0 00/01/10 is 4K/64K/16K while TG1 01/10/11 is 16K/4K/64K
+    # -- so they get one table each rather than one shared guess.
+    _TG0_SHIFT = {0b00: 12, 0b01: 16, 0b10: 14}
+    _TG1_SHIFT = {0b01: 14, 0b10: 12, 0b11: 16}
+
+    def _mmu_on(self):
+        sctlr = self.sysreg("SCTLR_EL%d" % (self._cur_el() or 1))
+        return None if sctlr is None else bool(sctlr & 1)
+
+    def _pt_levels(self, which):
+        """How many table levels the tables under TTBR0/TTBR1 have, or None.
+
+        Read out of TCR (TnSZ for the address size, TGn for the granule) rather than
+        assumed, because the answer differs per regime: 4K/39-bit is three levels,
+        4K/48-bit is four, 64K/42-bit is two.  It decides where the walk must STOP:
+        at the last level a descriptor with bit[1] set is a PAGE, not a table, and a
+        walk that does not know the level follows it as if it were one."""
+        el = self._cur_el() or 1
+        tcr = self.sysreg("TCR_EL%d" % el)
+        if tcr is None:
+            return None
+        if which == "ttbr1":
+            tsz, gshift = (tcr >> 16) & 0x3F, self._TG1_SHIFT.get((tcr >> 30) & 3)
+        else:
+            tsz, gshift = tcr & 0x3F, self._TG0_SHIFT.get((tcr >> 14) & 3)
+        if gshift is None or not (16 <= tsz <= 39):
+            return None
+        va_bits, per_level = 64 - tsz, gshift - 3
+        levels = -(-(va_bits - gshift) // per_level)      # ceil division
+        return max(1, min(levels, 4))
+
+    def _pt_step(self, levels):
+        """A safe_chain step that reads an arm64 descriptor instead of guessing.
+
+        VMSAv8-64: bit[0] is VALID and bit[1] separates a table descriptor from a
+        block.  Masking the low bits away without reading them -- the generic
+        telescope's default -- turns any word at all into a table address: physical 0
+        on this board holds the firmware's `b reset; nop` (0xd503201f1400000a, bit[0]
+        clear), and an unset TTBR rendered that as a walk to 0x201f14000000.  A block
+        descriptor is a real mapping but not a table, so it ends the chain too."""
+        seen = {"level": 0}
+
+        def step(desc):
+            seen["level"] += 1
+            if not (desc & 1):
+                return None                  # invalid: this entry maps nothing
+            if not (desc & 2):
+                return None                  # block: maps memory, has no next table
+            if levels is not None and seen["level"] >= levels:
+                return None                  # last level: bit[1] means page, not table
+            return desc & ((1 << 48) - 1) & ~0xFFF
+
+        return step
+
     def render_sysreg(self, name, value):
         # TTBR keeps its telescope (it is the heart of arm64 MMU debugging), but
         # the RAW register carries the ASID in bits[63:48], making it a
@@ -243,14 +298,28 @@ class Arm64(Arm64Common, KernelArch):
             base = value & ((1 << 48) - 1) & ~0xFFF
             asid = (value >> 48) & 0xFFFF
             hexv = PWN.color("yellow", "0x%x" % value) or ("0x%x" % value)
+            if base == 0:
+                # There is no table at physical 0 -- this is an unset base register,
+                # which is what TTBR1_EL1 reads as until head.S installs swapper_pg_dir.
+                # Walking it anyway reads whatever physical 0 holds and prints those
+                # words as a page-table chain, which is a claim the register does not
+                # make.  Report the register, not an invented table.
+                return hexv + "  (no table installed)"
             # telescope the page-table base via PHYSICAL reads (TTBR holds a phys
             # PGD address): PGD -> PUD -> PMD ... -- the heart of arm64 MMU
             # debugging -- but with safe_chain's hard depth bound (kearly chaindepth),
-            # never pwndbg's unbounded chain (which walks the whole tree until gdb dies).
-            chain = safe_chain(base, phys=True)
+            # never pwndbg's unbounded chain (which walks the whole tree until gdb dies),
+            # and reading each descriptor's type bits so the walk stops where the
+            # table does.
+            chain = safe_chain(base, phys=True, step=self._pt_step(self._pt_levels(n)))
             tail = "  PTbase %s" % (chain if chain else "0x%x" % base)
             if asid:
                 tail += "  ASID 0x%x" % asid
+            if self._mmu_on() is False:
+                # Translation is off, so this register is not in use: it holds whatever
+                # the previous boot stage left behind (under u-boot, u-boot's own
+                # tables).  The walk below is of THAT table, not of the kernel's.
+                tail += "   (stale: MMU off, left by the previous stage)"
             return hexv + tail
         # KernelArch, not `Arch`: no such name is imported here, so this line
         # raised NameError for every register that is not TTBR -- and because the
