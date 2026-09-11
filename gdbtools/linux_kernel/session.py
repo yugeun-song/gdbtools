@@ -1096,7 +1096,7 @@ class Session:
                 shown = "0x%x" % v
             else:
                 shown = "%d" % v
-            note = a.field_reading(reading, v)
+            note = a.field_reading(reading, v, value)
             cells.append("%s%s=%s%s" % (fname, span, shown, (" " + note) if note else ""))
         if not cells:
             return []
@@ -1173,17 +1173,22 @@ class Session:
                         val += "   " + (PWN.color("gray", note) or note)
                 lines.append("  %s %s" % (nmc, val))
                 lines += rows
-        # PSTATE last: it is where DAIF and NZCV actually live, and showing a flag
-        # without its owner is exactly the omission this panel is meant to close.
-        ps = reg("pstate")
-        if ps is None:
-            ps = reg("cpsr")
-        if ps is not None:
-            lines.append(PWN.color("blue", "pstate") or "pstate")
-            nmc = PWN.color("cyan", "%-16s" % "PSTATE") or ("%-16s" % "PSTATE")
-            lines.append("  %s %s" % (nmc, PWN.color("yellow", "0x%016x" % ps)
-                                      or ("0x%016x" % ps)))
-            lines += self._msysreg_field_lines(a, "pstate", ps, width)
+        # The flags register last.  No msr/mrs names it -- the asm writes DAIF and
+        # NZCV, or the flags themselves -- so it is not in entry_sysregs, and showing
+        # a flag without its owner is exactly the omission this panel exists to
+        # close.  Each port names its own (arm64 PSTATE, x86_64 EFLAGS); a port that
+        # has no such register sets it to None and this block does nothing.
+        fr = getattr(a, "flags_reg", None)
+        if fr:
+            fv = reg(fr)
+            if fv is None and fr == "pstate":
+                fv = reg("cpsr")          # older gdb spells the same register cpsr
+            if fv is not None:
+                lines.append(PWN.color("blue", "flags") or "flags")
+                nmc = PWN.color("cyan", "%-16s" % fr.upper()) or ("%-16s" % fr.upper())
+                lines.append("  %s %s" % (nmc, PWN.color("yellow", "0x%016x" % fv)
+                                          or ("0x%016x" % fv)))
+                lines += self._msysreg_field_lines(a, fr, fv, width)
         return lines
 
     @safe()

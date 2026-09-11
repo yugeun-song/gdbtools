@@ -382,6 +382,54 @@ class KernelArch:
     # already in pwndbg's REGISTERS panel; this is the set that panel omits).
     # A list of (name, acc, category, purpose); each arch fills it in.  `kcensus`
     # dumps it with live values + decode; the context panel shows it compactly.
+    # --- system registers the early-boot asm touches, and their bit fields ----
+    #
+    # Each port fills these in; the panel that renders them is arch-agnostic.
+    #   entry_sysregs  names, in display order, taken from the msr/mrs (arm64),
+    #                  mov-to-CRn / wrmsr (x86_64) or csr* (riscv64) operands in
+    #                  that port's early asm -- derived from the code, not chosen.
+    #   sysreg_fields  lowercase register name -> ((field, hi, lo, reading), ...)
+    #   flags_reg      the register that carries the condition/mask flags and is
+    #                  not itself named by an msr/mrs, or None.
+    entry_sysregs = ()
+    sysreg_fields = {}
+    flags_reg = None
+
+    @staticmethod
+    def field_extract(value, hi, lo):
+        return (value >> lo) & ((1 << (hi - lo + 1)) - 1)
+
+    @staticmethod
+    def field_reading(spec, v, whole=None):
+        """Words for an extracted field value, or "" when the number says it all.
+
+        An enumerated field whose value is NOT in its table returns "" rather than
+        a guess: an encoding the table does not know is a fact about the table, and
+        printing a wrong name for it would be worse than printing none.
+
+        A callable may take (value) or (value, whole_register).  The second form is
+        for a field whose meaning depends on another bit of the same register --
+        riscv scause.CODE means one list of causes when the interrupt bit is set and
+        a different one when it is clear, and reading it with the wrong list would
+        name the wrong exception with full confidence."""
+        if spec is None:
+            return ""
+        try:
+            if isinstance(spec, dict):
+                return spec.get(v, "")
+            if callable(spec):
+                try:
+                    return spec(v, whole)
+                except TypeError:
+                    return spec(v)
+        except Exception:
+            return ""
+        return str(spec)
+
+    def field_specs(self, name):
+        """Field table for a register name, or () when none is known."""
+        return self.sysreg_fields.get(re.sub(r"\s+", "", name).lower(), ())
+
     census = ()
 
     def census_read(self, name):

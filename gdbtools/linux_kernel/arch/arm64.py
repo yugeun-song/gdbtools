@@ -638,19 +638,24 @@ class Arm64(Arm64Common, KernelArch):
     #
     # The NAMES are measured, not chosen: every register named by an msr/mrs (or
     # msr_s/mrs_s) in arch/arm64/kernel/head.S, arch/arm64/kernel/entry.S and
-    # arch/arm64/mm/proc.S.  That is the question this panel answers -- "what did the
-    # code I am stepping through touch" -- so the list is derived from that code
+    # arch/arm64/mm/proc.S, unioned across the three arm64 trees under test (4.6,
+    # 6.12 and mainline), with the kernel's SYS_/REG_ macro prefixes resolved to
+    # the architectural name.  That is the question this panel answers -- "what did
+    # the code I am stepping through touch" -- so the list comes from that code
     # rather than from what looks interesting.  Registers outside those three files
     # belong in `kcensus`, which covers the whole call chain.
     entry_sysregs = (
-        "SCTLR_EL1", "SCTLR_EL2", "TTBR0_EL1", "TTBR1_EL1", "TCR_EL1", "MAIR_EL1",
+        "SCTLR_EL1", "SCTLR_EL2", "SCTLR_EL12", "TTBR0_EL1", "TTBR1_EL1",
+        "TCR_EL1", "TCR2_EL1", "MAIR_EL1", "PIR_EL1", "PIRE0_EL1",
         "VBAR_EL1", "VBAR_EL2", "CurrentEL", "DAIF", "SPSR_EL1", "SPSR_EL2",
         "ELR_EL1", "ELR_EL2", "ESR_EL1", "FAR_EL1", "SP_EL0", "CONTEXTIDR_EL1",
         "CPACR_EL1", "CPTR_EL2", "HCR_EL2", "HSTR_EL2", "MDCR_EL2", "MDSCR_EL1",
-        "OSLAR_EL1", "OSLSR_EL1", "PMCR_EL0", "MIDR_EL1", "MPIDR_EL1",
+        "OSLAR_EL1", "OSLSR_EL1", "OSDLR_EL1", "PMCR_EL0", "MIDR_EL1", "MPIDR_EL1",
         "VMPIDR_EL2", "VPIDR_EL2", "VTTBR_EL2", "CNTHCTL_EL2", "CNTVOFF_EL2",
-        "TPIDR_EL0", "TPIDRRO_EL0", "ID_AA64MMFR0_EL1", "ID_AA64MMFR1_EL1",
-        "ID_AA64PFR0_EL1", "ID_AA64DFR0_EL1", "ICC_SRE_EL2", "ICH_HCR_EL2",
+        "TPIDR_EL0", "TPIDRRO_EL0", "TFSRE0_EL1", "DISR_EL1", "ICC_PMR_EL1",
+        "ID_AA64MMFR0_EL1", "ID_AA64MMFR1_EL1", "ID_AA64MMFR2_EL1",
+        "ID_AA64MMFR3_EL1", "ID_AA64PFR0_EL1", "ID_AA64DFR0_EL1",
+        "ICC_SRE_EL2", "ICH_HCR_EL2",
     )
 
     # field -> (name, hi, lo, reading).  `reading` turns the extracted value into
@@ -745,11 +750,8 @@ class Arm64(Arm64Common, KernelArch):
         "mair_el1": tuple(("Attr%d" % i, i * 8 + 7, i * 8, _MAIR_ATTR)
                           for i in range(8)),
     }
-
-    # PSTATE is not a register the code msr's as a whole, but every DAIF/NZCV bit the
-    # asm sets lives in it, and reading a bit without its owner is how a panel lies by
-    # omission.  Rendered as one value with its fields under it, like the rest.
-    pstate_fields = (("SP", 0, 0, {0: "SP_EL0", 1: "SP_ELx"}),
+    flags_reg = "pstate"
+    _PSTATE_FIELDS = (("SP", 0, 0, {0: "SP_EL0", 1: "SP_ELx"}),
                      ("EL", 3, 2, lambda v: "EL%d" % v),
                      ("nRW", 4, 4, {0: "AArch64", 1: "AArch32"}),
                      ("F", 6, 6, {0: "FIQ unmasked", 1: "FIQ masked"}),
@@ -761,39 +763,16 @@ class Arm64(Arm64Common, KernelArch):
                      ("V", 28, 28, None), ("C", 29, 29, None),
                      ("Z", 30, 30, None), ("N", 31, 31, None))
 
-    @staticmethod
-    def field_extract(value, hi, lo):
-        return (value >> lo) & ((1 << (hi - lo + 1)) - 1)
+    # PSTATE is not named by any msr/mrs -- the asm writes DAIF and NZCV, which are
+    # fields inside it -- so it is declared as the flags register and registered
+    # under both spellings gdb may answer to, which puts it on the same lookup path
+    # as every other register rather than on a special case in the renderer.
+    sysreg_fields = dict(sysreg_fields, pstate=_PSTATE_FIELDS, cpsr=_PSTATE_FIELDS)
 
-    @staticmethod
-    def field_reading(spec, v):
-        """Words for an extracted field value, or "" when the number says it all.
+    # PSTATE is not a register the code msr's as a whole, but every DAIF/NZCV bit the
+    # asm sets lives in it, and reading a bit without its owner is how a panel lies by
+    # omission.  Rendered as one value with its fields under it, like the rest.
 
-        An enumerated field whose value is NOT in its table returns "" rather than a
-        guess: an encoding this table does not know is a fact about the table, and
-        printing a wrong name for it would be worse than printing none."""
-        if spec is None:
-            return ""
-        try:
-            if isinstance(spec, dict):
-                return spec.get(v, "")
-            if callable(spec):
-                return spec(v)
-        except Exception:
-            return ""
-        return str(spec)
-
-    def field_specs(self, name):
-        """Field table for a register name, or () when none is known.
-
-        PSTATE is kept in its own attribute rather than in the register table: it is
-        not a register the asm names in an msr, but it is where the DAIF and NZCV
-        bits that asm sets actually live, so the panel has to be able to ask for it
-        by name like any other."""
-        n = re.sub(r"\s+", "", name).lower()
-        if n in ("pstate", "cpsr"):
-            return self.pstate_fields
-        return self.sysreg_fields.get(n, ())
 
     # --- early-boot register census (union of 4.6 + 6.12 head.S call chain) ---
     census = (

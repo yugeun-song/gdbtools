@@ -913,6 +913,67 @@ class X86_64(X86_64Common, KernelArch):
         r = self._CENSUS_REG.get(name)
         return evi("$" + r) if r else None
 
+    # --- system registers the early-boot asm touches, and their bit fields ----
+    #
+    # Names come from the code: %cr0/%cr3/%cr4 and MSR_EFER / MSR_GS_BASE are what
+    # arch/x86/kernel/head_64.S and arch/x86/entry/entry_64.S name in both trees
+    # under test, and the rest are what reading an exception needs -- CR2 holds the
+    # faulting linear address, the selectors say which descriptor is live, CR8 is
+    # the task priority.  Bit positions are transcribed from
+    # arch/x86/include/uapi/asm/processor-flags.h and asm/msr-index.h, not written
+    # from memory: a wrong bit number printed beside a live CR4 reads as fact.
+    entry_sysregs = (
+        "cr0", "cr2", "cr3", "cr4", "cr8", "efer",
+        "cs", "ss", "ds", "es", "fs", "gs",
+        "fs_base", "gs_base", "k_gs_base",
+    )
+    flags_reg = "eflags"
+
+    # A segment selector, same shape for every one of them.
+    _SEG = (("RPL", 1, 0, None), ("TI", 2, 2, {0: "GDT", 1: "LDT"}),
+            ("index", 15, 3, None))
+
+    sysreg_fields = {
+        "cr0": (("PE", 0, 0, {0: "real mode", 1: "protected mode"}),
+                ("MP", 1, 1, None), ("EM", 2, 2, None), ("TS", 3, 3, None),
+                ("ET", 4, 4, None), ("NE", 5, 5, None),
+                ("WP", 16, 16, {0: "RO pages writable in ring 0", 1: "write-protect on"}),
+                ("AM", 18, 18, None), ("NW", 29, 29, None),
+                ("CD", 30, 30, {0: "caches on", 1: "caches disabled"}),
+                ("PG", 31, 31, {0: "paging off", 1: "paging on"})),
+        # CR3 deliberately has no field table.  Bits[11:0] are PCID when CR4.PCIDE
+        # is set and PWT/PCD when it is not, so naming them without reading CR4
+        # would state one layout while the other is live; and bits[51:12] are the
+        # table base, which is an address and is already printed as the value.
+        "cr4": (("VME", 0, 0, None), ("PVI", 1, 1, None), ("TSD", 2, 2, None),
+                ("DE", 3, 3, None), ("PSE", 4, 4, None),
+                ("PAE", 5, 5, {0: "32-bit paging", 1: "PAE/long-mode paging"}),
+                ("MCE", 6, 6, None), ("PGE", 7, 7, {0: "no global pages", 1: "global pages"}),
+                ("PCE", 8, 8, None), ("OSFXSR", 9, 9, None), ("OSXMMEXCPT", 10, 10, None),
+                ("UMIP", 11, 11, None),
+                ("LA57", 12, 12, {0: "4-level paging", 1: "5-level paging"}),
+                ("VMXE", 13, 13, None), ("SMXE", 14, 14, None), ("FSGSBASE", 16, 16, None),
+                ("PCIDE", 17, 17, {0: "PCID off", 1: "PCID on"}),
+                ("OSXSAVE", 18, 18, None), ("SMEP", 20, 20, None), ("SMAP", 21, 21, None),
+                ("PKE", 22, 22, None), ("CET", 23, 23, None), ("LASS", 27, 27, None),
+                ("FRED", 32, 32, None)),
+        "cr8": (("TPR", 3, 0, None),),
+        "efer": (("SCE", 0, 0, {0: "no syscall/sysret", 1: "syscall/sysret on"}),
+                 ("LME", 8, 8, {0: "long mode disabled", 1: "long mode enabled"}),
+                 ("LMA", 10, 10, {0: "long mode inactive", 1: "long mode active"}),
+                 ("NX", 11, 11, {0: "NX off", 1: "NX on"}),
+                 ("SVME", 12, 12, None), ("LMSLE", 13, 13, None), ("FFXSR", 14, 14, None),
+                 ("TCE", 15, 15, None), ("AUTOIBRS", 21, 21, None)),
+        "eflags": (("CF", 0, 0, None), ("PF", 2, 2, None), ("AF", 4, 4, None),
+                   ("ZF", 6, 6, None), ("SF", 7, 7, None), ("TF", 8, 8, None),
+                   ("IF", 9, 9, {0: "interrupts masked", 1: "interrupts enabled"}),
+                   ("DF", 10, 10, None), ("OF", 11, 11, None), ("IOPL", 13, 12, None),
+                   ("NT", 14, 14, None), ("RF", 16, 16, None), ("VM", 17, 17, None),
+                   ("AC", 18, 18, None), ("VIF", 19, 19, None), ("VIP", 20, 20, None),
+                   ("ID", 21, 21, None)),
+        "cs": _SEG, "ss": _SEG, "ds": _SEG, "es": _SEG, "fs": _SEG, "gs": _SEG,
+    }
+
     census = (
         # control-reg
         ("CR0", "W", "control-reg", "enable PE + PG + WP (protected mode + paging + write-protect)"),

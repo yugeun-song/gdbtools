@@ -13,6 +13,42 @@ from .base import KernelArch
 
 
 
+# Trap causes, transcribed from arch/riscv/include/asm/csr.h (EXC_* when scause's
+# interrupt bit is clear, IRQ_* when it is set).  The two lists share numbers and
+# mean different things, which is why the reading is given the whole register:
+# naming cause 5 "load access fault" during a timer interrupt would be a confident
+# lie.  A code no header names prints as its number alone.
+_RV_EXC = {
+    0: "instruction address misaligned", 1: "instruction access fault",
+    2: "illegal instruction", 3: "breakpoint", 4: "load address misaligned",
+    5: "load access fault", 6: "store address misaligned", 7: "store access fault",
+    8: "ecall from U", 9: "ecall from HS", 10: "ecall from VS",
+    12: "instruction page fault", 13: "load page fault", 15: "store page fault",
+    18: "software check", 20: "instruction guest page fault",
+    21: "load guest page fault", 22: "virtual instruction",
+    23: "store guest page fault",
+}
+_RV_IRQ = {
+    1: "S software", 2: "VS software", 3: "M software",
+    5: "S timer", 6: "VS timer", 7: "M timer",
+    9: "S external", 10: "VS external", 11: "M external",
+    12: "S guest external", 13: "PMU overflow",
+}
+
+
+def _rv_cause(code, whole):
+    """Name a trap cause, picking the list the interrupt bit selects.
+
+    A wholly zero scause/mcause says nothing.  Unlike arm64, whose EC 0 is named
+    "unknown reason" by the architecture, riscv cause 0 is a real code -- instruction
+    address misaligned -- so decoding a register that no trap has written yet would
+    announce that exception at every stop of a clean boot.  Stay silent there; a real
+    misaligned-fetch trap leaves sepc and stval set alongside it."""
+    if whole is None or whole == 0:
+        return ""
+    return (_RV_IRQ if (whole >> 63) & 1 else _RV_EXC).get(code, "")
+
+
 class Riscv64(Riscv64Common, KernelArch):
     entry_symbol = "_start"
     entry_break_kind = "sw"              # entry executes in place; sw bp is reliable
@@ -292,6 +328,68 @@ class Riscv64(Riscv64Common, KernelArch):
         ("trampoline_pg_dir", "trampoline PGD"),
         ("init_task", "init task_struct"),
     )
+
+    # --- system registers the early-boot asm touches, and their bit fields ----
+    #
+    # Names come from the csr* operands in arch/riscv/kernel/head.S and entry.S of
+    # both trees under test, resolved through the CSR_* aliases in asm/csr.h: Linux
+    # builds S-mode by default, so CSR_STATUS is sstatus and CSR_TVEC is stvec, but
+    # CONFIG_RISCV_M_MODE makes the same source name the m* registers, so both
+    # halves are listed and whichever the target answers for is what shows.  Bit
+    # positions and cause codes are transcribed from asm/csr.h.
+    entry_sysregs = (
+        "satp", "sstatus", "stvec", "sepc", "scause", "stval", "sscratch",
+        "sie", "sip", "scounteren", "senvcfg",
+        "mstatus", "mtvec", "mepc", "mcause", "mtval", "mscratch",
+        "mie", "mip", "medeleg", "mideleg",
+        "mhartid", "misa", "priv", "pmpcfg0", "pmpaddr0",
+    )
+    # riscv has no separate flags register: the condition state lives in the
+    # instruction stream, and the mask bits are fields of sstatus/mstatus, which are
+    # already listed above.
+    flags_reg = None
+
+    _RV_XLEN = {1: "32-bit", 2: "64-bit", 3: "128-bit"}
+    _RV_TVEC_MODE = {0: "direct", 1: "vectored"}
+    _RV_EXTRA = (("MODE", 1, 0, _RV_TVEC_MODE),)
+
+    _SSTATUS = (("SIE", 1, 1, {0: "S interrupts masked", 1: "S interrupts enabled"}),
+                ("SPIE", 5, 5, None), ("UBE", 6, 6, None),
+                ("SPP", 8, 8, {0: "trap came from U", 1: "trap came from S"}),
+                ("VS", 10, 9, {0: "off", 1: "initial", 2: "clean", 3: "dirty"}),
+                ("FS", 14, 13, {0: "off", 1: "initial", 2: "clean", 3: "dirty"}),
+                ("XS", 16, 15, {0: "off", 1: "initial", 2: "clean", 3: "dirty"}),
+                ("SUM", 18, 18, {0: "S cannot touch U pages", 1: "S may touch U pages"}),
+                ("UXL", 33, 32, _RV_XLEN), ("SD", 63, 63, None))
+    _MSTATUS = _SSTATUS + (("MIE", 3, 3, {0: "M interrupts masked", 1: "M interrupts enabled"}),
+                           ("MPIE", 7, 7, None),
+                           ("MPP", 12, 11, {0: "U", 1: "S", 3: "M"}))
+
+    sysreg_fields = {
+        # SATP_MODE_SHIFT is 60 on rv64 and SATP_ASID_SHIFT is 44 (asm/csr.h).  PPN
+        # is bits[43:0] and is a page number, not an address, so it is left to the
+        # value rather than printed as a field that looks like one.
+        "satp": (("ASID", 59, 44, None),
+                 ("MODE", 63, 60, {0: "bare (no translation)", 8: "Sv39",
+                                   9: "Sv48", 10: "Sv57"})),
+        "sstatus": _SSTATUS,
+        "mstatus": _MSTATUS,
+        "stvec": _RV_EXTRA,
+        "mtvec": _RV_EXTRA,
+        "scause": (("CODE", 62, 0, lambda v, whole: _rv_cause(v, whole)),
+                   ("INTERRUPT", 63, 63, {0: "exception", 1: "interrupt"})),
+        "mcause": (("CODE", 62, 0, lambda v, whole: _rv_cause(v, whole)),
+                   ("INTERRUPT", 63, 63, {0: "exception", 1: "interrupt"})),
+        "sie": (("SSIE", 1, 1, None), ("STIE", 5, 5, None), ("SEIE", 9, 9, None)),
+        "sip": (("SSIP", 1, 1, None), ("STIP", 5, 5, None), ("SEIP", 9, 9, None)),
+        "mie": (("SSIE", 1, 1, None), ("MSIE", 3, 3, None), ("STIE", 5, 5, None),
+                ("MTIE", 7, 7, None), ("SEIE", 9, 9, None), ("MEIE", 11, 11, None)),
+        "mip": (("SSIP", 1, 1, None), ("MSIP", 3, 3, None), ("STIP", 5, 5, None),
+                ("MTIP", 7, 7, None), ("SEIP", 9, 9, None), ("MEIP", 11, 11, None)),
+        "scounteren": (("CY", 0, 0, None), ("TM", 1, 1, None), ("IR", 2, 2, None)),
+        "misa": (("MXL", 63, 62, _RV_XLEN),),
+        "priv": (("PRIV", 1, 0, {0: "U-mode", 1: "S-mode", 3: "M-mode"}),),
+    }
 
     census = (
         ("satp", "W", "translation", "enable/switch Sv39/48/57 paging (root PPN + MODE)"),
