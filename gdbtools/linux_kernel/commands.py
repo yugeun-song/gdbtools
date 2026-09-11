@@ -555,6 +555,16 @@ the link register.  `kfin ADDR` runs to an explicit return address instead."""
         res = SESSION.symbolize(ra)
         sym = (res[2] if res else None) or ""
         print("[%s] kfin -> return %s %s" % (NAME, fmt(ra), sym))
+        # Whether that address is ever REACHED cannot be decided here.  The check
+        # above rules out the address being foreign to this kernel, which is the
+        # case that is certainly wrong; it cannot rule out a link register left by
+        # an earlier `bl` in a function this one was BRANCHED to rather than called
+        # from -- at start_kernel, for instance, lr still points into
+        # __mmap_switched, which is inside the image and never runs again.  Deciding
+        # that needs the unwind info whose absence is the reason this command
+        # exists, so say what happens next instead of pretending to know.
+        print("      running there now -- if it is never reached, interrupt with Ctrl-C;\n"
+              "      the guest keeps going until then.")
         execstr("tbreak *0x%x" % (ra & MASK))
         execstr("continue")
 class KBits(gdb.Command):
