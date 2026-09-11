@@ -25,6 +25,31 @@ def _txsz_reading(which, v):
     return "%s VA %d-bit" % (which, 64 - v)
 
 
+# Exception classes, transcribed from arch/arm64/include/asm/esr.h -- the v6.12 set,
+# which is a superset of v4.6's.  Taken from the header rather than written from
+# memory, because this table is printed as a fact beside a live ESR and a wrong name
+# here would be indistinguishable from a real syndrome.  A code no kernel header
+# names is left out, and then prints as its number with no words after it.
+_ESR_EC = {
+    0x00: "unknown", 0x01: "WFI/WFE", 0x03: "CP15 mcr/mrc", 0x04: "CP15 mcrr/mrrc",
+    0x05: "CP14 mcr/mrc", 0x06: "CP14 ldc/stc", 0x07: "FP/ASIMD access",
+    0x08: "CP10 id", 0x09: "pointer auth failure", 0x0C: "CP14 mcrr/mrrc",
+    0x0D: "branch target exception", 0x0E: "illegal execution state",
+    0x11: "SVC (AArch32)", 0x12: "HVC (AArch32)", 0x13: "SMC (AArch32)",
+    0x15: "SVC (AArch64)", 0x16: "HVC (AArch64)", 0x17: "SMC (AArch64)",
+    0x18: "MSR/MRS/sys insn trap", 0x19: "SVE access", 0x1A: "ERET/ERETAA/ERETAB",
+    0x1C: "FPAC", 0x1D: "SME access", 0x1F: "implementation defined",
+    0x20: "instruction abort, lower EL", 0x21: "instruction abort, same EL",
+    0x22: "PC alignment", 0x24: "data abort, lower EL", 0x25: "data abort, same EL",
+    0x26: "SP alignment", 0x27: "MOPS", 0x28: "FP exception (AArch32)",
+    0x2C: "FP exception (AArch64)", 0x2F: "SError",
+    0x30: "breakpoint, lower EL", 0x31: "breakpoint, same EL",
+    0x32: "software step, lower EL", 0x33: "software step, same EL",
+    0x34: "watchpoint, lower EL", 0x35: "watchpoint, same EL",
+    0x38: "BKPT (AArch32)", 0x3A: "vector catch (AArch32)", 0x3C: "BRK (AArch64)",
+}
+
+
 # MAIR attribute bytes, limited to the encodings arm64 Linux actually programs (the
 # MT_* indices in asm/memory.h).  A byte that is not listed reads as nothing rather
 # than as a guess.
@@ -683,19 +708,7 @@ class Arm64(Arm64Common, KernelArch):
         "cptr_el2": (("TZ", 8, 8, None), ("TFP", 10, 10, None), ("TTA", 20, 20, None),
                      ("TCPAC", 31, 31, None)),
         "esr_el1": (("ISS", 24, 0, None), ("IL", 25, 25, {0: "16-bit insn", 1: "32-bit insn"}),
-                    ("EC", 31, 26, {0x00: "unknown", 0x0E: "illegal execution state",
-                                    0x15: "SVC (AArch64)", 0x18: "MSR/MRS trap",
-                                    0x20: "instruction abort, lower EL",
-                                    0x21: "instruction abort, same EL",
-                                    0x22: "PC alignment",
-                                    0x24: "data abort, lower EL",
-                                    0x25: "data abort, same EL",
-                                    0x26: "SP alignment",
-                                    0x2F: "SError",
-                                    0x30: "breakpoint, lower EL", 0x31: "breakpoint, same EL",
-                                    0x32: "software step, lower EL", 0x33: "software step, same EL",
-                                    0x34: "watchpoint, lower EL", 0x35: "watchpoint, same EL",
-                                    0x3C: "BRK (AArch64)"})),
+                    ("EC", 31, 26, _ESR_EC)),
         "mdscr_el1": (("SS", 0, 0, {0: "software step off", 1: "software step on"}),
                       ("KDE", 13, 13, None), ("MDE", 15, 15, None), ("TDA", 21, 21, None)),
         "oslsr_el1": (("OSLK", 1, 1, {0: "OS lock unlocked", 1: "OS lock locked"}),),
