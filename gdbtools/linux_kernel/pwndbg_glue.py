@@ -495,8 +495,21 @@ class _SafeProbe:
         out = execstr("monitor gva2gpa 0x%x" % page)
         if not out:
             return None                      # no monitor -> cannot judge, allow
-        ok = "gpa:" in out
-        if not ok and "Unmapped" not in out:
+        m = re.search(r"gpa:\s*(0x[0-9a-fA-F]+)", out)
+        if m is not None:
+            # Translating is not the same as being safe to read, and that difference is
+            # the whole point of this guard.  At a late-boot stop most of the kernel
+            # pages pt-dump reports translate to DEVICE registers rather than RAM -- on
+            # QEMU's arm64 `virt`, measured at mm_init: 272 of 283 kernel pages, among
+            # them the GIC at 0x8000000, the PL011 at 0x9000000 and PCIe at
+            # 0x8000000000.  pwndbg's `is_kernel()` peeks one byte of every one of them
+            # while looking for the kernel base, and a debug read of a device model is
+            # what takes QEMU -- and with it gdb -- down.  Asking only "does it
+            # translate" let all 272 through.  Ask whether it translates to RAM.
+            ok = bool(self._is_ram(int(m.group(1), 16)))
+        elif "Unmapped" in out:
+            ok = False
+        else:
             return None                      # unrecognised answer -> allow
         self._cache[page] = ok
         return ok
@@ -553,63 +566,167 @@ class _SafeProbe:
 SAFEPROBE = _SafeProbe()
 
 
-@safe(default=False)
-def install_kernel_guards():
-    """Keep a fragile pwndbg kernel-version probe from killing the whole `context`.
+# Each entry is (module, attribute, what the call returns when it cannot finish).
+# Every one of these is a pwndbg entry point that reads KERNEL memory to produce
+# DECORATION -- a release string, a name for a vmmap range -- and does not catch a
+# failed read.  Before the MMU is on, and briefly after while the high map is still
+# being built, those reads fail, and pwndbg aborts the ENTIRE `context`: the panels
+# that would have rendered fine -- registers, disassembly, our own badge -- never
+# appear.  Decoration that cannot be read is missing decoration, not a dead panel.
+_KGUARDS = (
+    # krelease() RAISES whenever kversion() returns a NON-empty string that does not
+    # match "Linux version X.Y", and it is cache_until("start"), so it is recomputed
+    # after every continue.  At the very first start_kernel stop the linux_banner read
+    # is not yet reliable (the high map has only just come up) and can come back as a
+    # short garbage string; the context then dies whole with "context: Linux version
+    # tuple not found", and works again a few continues later -- which is exactly why
+    # it looks intermittent.  pwndbg's own callers already treat a None release as
+    # "unknown version", so that is what a failed read becomes here.
+    ("pwndbg.aglib.kernel", "krelease", None),
+    ("pwndbg.aglib.kernel", "kversion", None),
+    # `address_markers` is arch/arm64/mm/dump.c's table of VA-layout labels, which
+    # pwndbg walks with a bare memory.u64() on a KERNEL VA to name vmmap ranges.  At
+    # head.S _text the MMU is off, so that read raises pwndbg.dbg_mod.Error and it
+    # propagates all the way out of the register panel:
+    #   context -> context_regs -> get_regs -> vmmap.find -> get_memory_map
+    #     -> GDBProcess.vmmap -> kernel_vmmap -> _apply_address_markers
+    #       -> markers() -> memory.u64(address_markers)      <- raises here
+    # Guarding the CALLER rather than markers() also covers handle_kernel_pages(),
+    # which reads kernel memory on the next line, and it costs only the LABELS: the
+    # ranges themselves are already in `pages` before any of this runs.
+    ("pwndbg.aglib.kernel.vmmap", "_apply_address_markers", None),
+    # The same argument one level up, for whatever else building the map may read.
+    # A memory map that cannot be built is an empty map, and an empty map renders.
+    ("pwndbg.aglib.kernel.vmmap", "kernel_vmmap", ()),
+    # `vmmap` annotates its ranges with the CURRENT task's mapped files and user
+    # stack.  Before userspace exists there is no such task -- at start_kernel
+    # current->mm is null -- so the VMA walk reaches int(None) and raises TypeError,
+    # which aborts `vmmap` before it prints a single range.  Only the annotation
+    # needs a task; guarding it lets the ranges, the page offsets and the
+    # kernel-stack labels through, which is what the command is for.
+    ("pwndbg.aglib.kernel.vmmap", "_handle_user_stack_and_filepaths", None),
+    # Same shape, next line of the same function: labelling each range with the
+    # kernel stack that lives in it walks the task list, which at start_kernel is
+    # not built yet.  annotate() already treats an empty answer as "no stacks".
+    ("pwndbg.aglib.kernel.vmmap", "_get_kernel_stacks", ()),
+)
 
-    pwndbg's `krelease()` RAISES `Exception("Linux version tuple not found")` whenever
-    `kversion()` returns a NON-empty string that does not match `Linux version X.Y` --
-    and it is `cache_until("start")`, so it is recomputed after every `continue`.  At the
-    very first `start_kernel` stop the `linux_banner` read is not yet reliable (the high
-    map has only just come up), so it can come back as a short garbage string; `krelease`
-    then throws and pwndbg aborts the ENTIRE context render ("context: Linux version tuple
-    not found").  A few `continue`s later (userspace up) the banner reads cleanly and it
-    works again -- which is exactly why it looks intermittent.
+# How often each guard actually substituted a value, so a session can be asked
+# rather than guessed at.  A guard that never fires is one that can be dropped once
+# pwndbg guards the read itself; one that fires on every stop is worth looking at.
+KGUARD_HITS = {}
 
-    A version we cannot read yet is a "None" situation, not a fatal one: pwndbg's own
-    callers already treat `krelease() is None` as "unknown version".  So wrap it to return
-    None on failure.  Additive, idempotent, and it touches no display feature -- it only
-    stops one early-boot read glitch from taking the panel down.  Degrades to a no-op if
-    pwndbg or the symbol is absent."""
+
+# Guards that REFUSE rather than substitute: a condition under which the call must
+# not run at all, checked before the original is reached.  Keyed the same way as
+# _KGUARDS, with a predicate that returns True when the call should be skipped and
+# the value to return in its place.
+def _translation_off():
+    """True only when translation is definitely OFF right now.
+
+    Deliberately conservative: pwndbg's own paging_enabled() is the source, and any
+    failure to answer means "do not refuse".  A guard that refuses on a failed probe
+    would break the steady-state case it is not meant to touch."""
     try:
         import pwndbg.aglib.kernel as _k
+        return _k.paging_enabled() is False
     except Exception:
         return False
-    installed = False
-    for name in ("krelease", "kversion"):
-        orig = getattr(_k, name, None)
+
+
+_KREFUSALS = (
+    # With translation off there is no current page table: TTBR still holds whatever
+    # the previous boot stage left in it.  pwndbg knows this in ONE of its two map
+    # builders -- kernel_vmmap_via_page_tables() checks paging_enabled() and returns
+    # nothing -- but the scan path does not, so at head.S _text it walks u-boot's
+    # tables and `vmmap` prints them as the kernel's memory map: five ranges spanning
+    # 0x0-0x200000000000 and up, none of which the kernel has mapped.  vmmap not
+    # working before the MMU is on is the correct answer; inventing a map is not.
+    ("pwndbg.aglib.kernel.vmmap", "kernel_vmmap_pages", _translation_off, ()),
+    # The annotation pass is the other half of the same story.  Its first act is to
+    # walk the task list to label ranges, through kernel addresses that do not
+    # translate before the MMU is on -- which pwndbg reports as a bare
+    # "ERROR (get_ktasks): Cannot access memory at ...".  Everything it adds is a
+    # LABEL on ranges that are already correct, so with translation off it is skipped
+    # whole, and once translation is on a failure inside it costs labels, never the
+    # map (the wrapper absorbs that too).
+    ("pwndbg.aglib.kernel.vmmap", "annotate", _translation_off, None),
+)
+
+
+@safe(default=False)
+def install_kernel_guards():
+    """Wrap the pwndbg reads listed in _KGUARDS so a failed one cannot kill `context`.
+
+    Additive, idempotent, and it removes no display feature: each wrapper calls the
+    original first and substitutes only when the original raised.  Degrades to a
+    no-op for any entry whose module or symbol is absent, so a pwndbg that has moved
+    or fixed one of these simply gets one guard fewer."""
+    import importlib
+    installed = []
+    for modname, name, fallback in _KGUARDS:
+        try:
+            mod = importlib.import_module(modname)
+        except Exception:
+            continue
+        orig = getattr(mod, name, None)
         if orig is None or getattr(orig, "_kgdb_guarded", False):
             continue
-        def _wrapped(*a, _o=orig, **kw):
+        def _wrapped(*a, _o=orig, _f=fallback, _n=name, **kw):
             try:
                 return _o(*a, **kw)
             except Exception:
-                return None
+                KGUARD_HITS[_n] = KGUARD_HITS.get(_n, 0) + 1
+                return _f
         _wrapped._kgdb_guarded = True
         _wrapped._kgdb_orig = orig
-        setattr(_k, name, _wrapped)
-        installed = True
+        setattr(mod, name, _wrapped)
+        installed.append(name)
+    for modname, name, predicate, refusal in _KREFUSALS:
+        try:
+            mod = importlib.import_module(modname)
+        except Exception:
+            continue
+        orig = getattr(mod, name, None)
+        if orig is None or getattr(orig, "_kgdb_guarded", False):
+            continue
+        def _refusing(*a, _o=orig, _p=predicate, _r=refusal, _n=name, **kw):
+            if _p():
+                KGUARD_HITS[_n] = KGUARD_HITS.get(_n, 0) + 1
+                return _r
+            try:
+                return _o(*a, **kw)
+            except Exception:
+                KGUARD_HITS[_n] = KGUARD_HITS.get(_n, 0) + 1
+                return _r
+        _refusing._kgdb_guarded = True
+        _refusing._kgdb_orig = orig
+        setattr(mod, name, _refusing)
+        installed.append(name)
     if installed:
-        LOG.add("kguard: krelease/kversion wrapped (no 'version tuple not found' context death)")
-    return installed
+        LOG.add("kguard: wrapped %s (a failed decorative read no longer kills context)"
+                % ", ".join(installed))
+    return bool(installed)
 
 
 def uninstall_kernel_guards():
-    try:
-        import pwndbg.aglib.kernel as _k
-    except Exception:
-        return False
-    restored = False
-    for name in ("krelease", "kversion"):
-        orig = getattr(getattr(_k, name, None), "_kgdb_orig", None)
+    import importlib
+    restored = []
+    for modname, name in ([(m, n) for m, n, _f in _KGUARDS]
+                          + [(m, n) for m, n, _p, _r in _KREFUSALS]):
+        try:
+            mod = importlib.import_module(modname)
+        except Exception:
+            continue
+        orig = getattr(getattr(mod, name, None), "_kgdb_orig", None)
         if orig is None:
             continue
-        setattr(_k, name, orig)
-        restored = True
+        setattr(mod, name, orig)
+        restored.append(name)
     if restored:
-        LOG.add("kguard: krelease/kversion restored")
-    return restored
+        LOG.add("kguard: restored %s" % ", ".join(restored))
+    return bool(restored)
 
 
 __all__ = ['_Pwndbg', 'PWN', '_SafeProbe', 'SAFEPROBE', 'context_kgdb', 'context_flow',
-           'install_kernel_guards', 'uninstall_kernel_guards']
+           'install_kernel_guards', 'uninstall_kernel_guards', 'KGUARD_HITS']
