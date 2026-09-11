@@ -1100,8 +1100,10 @@ class Session:
             cells.append("%s%s=%s%s" % (fname, span, shown, (" " + note) if note else ""))
         if not cells:
             return []
-        # Wrap to the panel width, leaving room for the tree glyph and indent.
-        avail = max(40, (width or 100) - 14)
+        # Wrap to the panel width, leaving room for the 13-column indent and tree
+        # glyph this row is printed with, so a narrow panel stays inside its width
+        # instead of wrapping a second time in the terminal.
+        avail = max(24, (width or 100) - 14)
         rows, cur = [], ""
         for c in cells:
             add = c if not cur else (cur + "  " + c)
@@ -1193,6 +1195,13 @@ class Session:
         k (kgdb) and f (flow), and a section is resolved by its name's FIRST LETTER,
         so the name has to start with a letter nobody else claims."""
         if not PWN.ok:
+            return
+        # An arch that states no register list has nothing to put in this window.
+        # Registering it anyway would leave a name in the user's context-sections
+        # that never prints, which reads as a broken section rather than as an
+        # arch that does not implement one yet.
+        a = self.ensure_arch()
+        if a is None or not getattr(a, "entry_sysregs", ()):
             return
         secs = getattr(PWN._ctx, "context_sections", None)
         if not isinstance(secs, dict):

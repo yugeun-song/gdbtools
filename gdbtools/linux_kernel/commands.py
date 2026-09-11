@@ -589,7 +589,17 @@ window; `kearly msysreg off|compact|full` controls that one."""
             print("[%s] kernel sysregs -- %s   [MMU=%s %s]" % (NAME, a.key, st, src))
             lines = SESSION.msysreg_context_lines() or []
             if not lines:
-                print("  nothing readable here (no arch fields, or the stub exposes none)")
+                # Say WHICH of the three reasons it is.  "nothing here" covering a
+                # disabled session, an arch with no table, and a stub that answers
+                # for nothing is three different situations behind one sentence, and
+                # only one of them is something the user can act on.
+                if not SESSION.enabled:
+                    print("  gdbtools is off for this session -- `kearly on` to enable it")
+                elif not getattr(a, "entry_sysregs", ()):
+                    print("  no register list for %s yet (arm64 has one; this arch does not)"
+                          % a.key)
+                else:
+                    print("  this target answers for none of them at this stop")
             for ln in lines:
                 print(ln)
         finally:
