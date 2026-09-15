@@ -26,9 +26,11 @@ The rest are HAND CONTROLS -- every automatic decision is overridable mid-sessio
 
 Subcommands:
   kearly safemem [on|off|auto|status]   guard pwndbg's memory-map probing: ask QEMU
-                           whether a page is mapped before reading it, so an unmapped
-                           probe fails normally instead of crashing the VM (default auto:
-                           on only for a kernel target once translation is live)
+                           whether a page is RAM before reading it, so a probe that would
+                           reach a device model fails normally instead of crashing the VM.
+                           Default auto: armed on a kernel target wherever the QEMU monitor
+                           answers, in EVERY regime -- a debug read of the GIC kills qemu
+                           with the MMU off exactly as it does with it on
   kearly where             ONE-LINER ORIENTATION: regime badge, pc + symbol + its phys/virt
                            twin, offset, KASLR slide, boot phase, and the command that most
                            likely moves you forward.  Read-only -- never resumes the CPU.
@@ -202,9 +204,14 @@ Subcommands:
                 print("[%s] safemem = %s (%s)"
                       % (NAME, m, "wrapped" if SAFEPROBE.installed else "pwndbg absent"))
             else:
-                print("[%s] safemem = %s  installed=%s  blocked=%d unmapped probe(s)  "
-                      "rescued=%d phys read(s) via monitor"
-                      % (NAME, SAFEPROBE.mode, SAFEPROBE.installed,
+                # `armed` is the question a reader actually has, and it is not the same
+                # as `installed`: the wrapper can be in place while the guard declines
+                # to judge, which is the state a target with no QEMU monitor is in --
+                # and is what a silent SEGV looks like from the outside.
+                print("[%s] safemem = %s  installed=%s  armed=%s (monitor %s)  "
+                      "blocked=%d unmapped probe(s)  rescued=%d phys read(s) via monitor"
+                      % (NAME, SAFEPROBE.mode, SAFEPROBE.installed, SAFEPROBE._active(),
+                         "answers" if SAFEPROBE._monitor_alive() else "absent",
                          SAFEPROBE.blocked, SAFEPROBE.rescued))
         elif sub in ("where", "situation"):
             for ln in (SESSION.where_lines() or []):

@@ -910,9 +910,27 @@ gdb_read_byte -> cpu_memory_rw_debug -> flatview_read_continue
 ```
 
 **Attribution.** It is not this tool. It died with only pwndbg loaded and this plugin **not loaded**, and conversely
-stock gdb (`-nx`) was fine under the same conditions. Three conditions (KASLR + syscall context + a full context render)
-must coincide; with any one missing it does not happen — not with `nokaslr`, not if you only break and do not draw the
-context, and not in the head.S region.
+stock gdb (`-nx`) was fine under the same conditions.
+
+**It is not confined to a syscall context either.** The trigger is the address, not the regime, and the guest needs more
+than one core: `hw/intc/arm_gic.c`'s `gic_get_current_cpu()` reads `current_cpu->cpu_index` under `num_cpu > 1`, and
+`current_cpu` is NULL on the gdbstub's thread — so any debug read that lands on the GIC kills qemu 11.1.1 outright.
+Measured on arm64 `virt`, at the **very first pre-MMU stop with both cores MMU-off**, a single `x/1xw 0x8010000` (the GICv2
+CPU interface) was enough. So the guard is armed wherever the QEMU monitor answers, not only where translation is on —
+see the paragraph below.
+
+**Where it actually bit.** `kbuildlab attach` a v4.6 arm64 guest, `b __enable_mmu`, `continue`, `continue`. The second stop
+is the **secondary core**, still MMU-off in head.S, while the primary already runs the kernel MMU-on. `secondary_startup`
+leaves `x8 = kimage_vaddr`, and v4.6 defines `KIMAGE_VADDR == MODULES_END == VMALLOC_START`
+(`asm/memory.h:53`, `asm/pgtable.h:37`) — one number that is both the kernel image base *and* the first address of the
+ioremap area, which is where the GIC distributor is mapped. A page-table walk at that stop says so:
+`VA 0xffffff8008000000 → PA 0x8000000`, `Device-nGnRE`. pwndbg telescopes `x8`, the read is served in the MMU-**on** core's
+regime, it lands on the GIC, and the guest and the debugger die together — pwndbg first reporting
+`Unknown register: 'x9' …` for every register after it, then gdb's `thread.c:88: internal-error: inferior_thread:
+Assertion 'current_thread_ != nullptr' failed` as the connection drops mid-read. 6.12 separated the two constants and so
+does not reproduce it, which is precisely why the guard's gate must not be a guess about which addresses a register can
+hold. Under the old gate this stop had the guard **installed and switched off**, because the core gdb was parked on was
+not translating.
 
 **Handling.** It wraps the single path every pwndbg read goes through (`read` in `pwndbg/aglib/memory.py`).
 Before a read, it asks `monitor gva2gpa` whether that page is mapped, and if `Unmapped` it does not ask QEMU and returns
@@ -920,14 +938,28 @@ Before a read, it asks `monitor gva2gpa` whether that page is mapped, and if `Un
 it returns `Unmapped` normally even for the very address that caused the crash.
 
 ```
-kearly safemem status      installed / number of probes blocked / number of reads rescued via monitor (rescued)
-kearly safemem on|off|auto (default auto: only when kernel target + translation active)
+kearly safemem status      installed / armed / whether the monitor answers / probes blocked / reads rescued
+kearly safemem on|off|auto (default auto: armed on a kernel target wherever the QEMU monitor answers)
 ```
+
+`installed` and `armed` are different questions and the status line reports both, because the gap between them is what a
+silent SEGV looks like from the outside: the wrapper can be in place while the guard declines to judge. **auto** arms it on
+a kernel target wherever HMP answers — settled once per session with a single `monitor gpa2hva 0`, since whether a target
+*has* a monitor does not change while it is attached. On a target with none (kgdb over a serial line, a JTAG probe) the
+guard can only ever answer "unknown" and allow, so it says so once instead of paying a round trip per page for ever.
 
 It does not modify pwndbg. It wraps the lowest single path (the gdb backend's `GDBProcess.read_memory`) —
 the register enhancer, telescope, and stack dumps all come down below this, so there is no path that leaks lower than it.
 It keeps the original read and filters only dangerous addresses, and passes through when it cannot decide. It caches per page
-and clears at every stop.
+and clears at every stop. Measured at the pre-MMU `_text` stop of arm64 v4.6, arming it made the render **faster**, not
+slower — 0.017–0.020 s against 0.081–0.096 s with it off — because a blocked probe is answered here instead of costing a
+round trip to the stub.
+
+A **blocked** read is not the same as an unreadable one, and it is not zero-filled until the rescue below has been tried:
+at a mixed-regime stop a kernel VA does not translate on the core gdb is parked on (arm64's HMP answers a flat `Unmapped`
+there) while the primary maps it perfectly well. Zero-filling printed
+`X27 0xffffff8008082c00 (__secondary_switched) —▸ 0` for a pointer whose target was sitting in RAM; it now reads
+`—▸ 0x912000a5d0000005`, the instructions actually there.
 
 The root defect is in QEMU. No matter what address you ask about, a debug read should not die of SEGV. What is done here is
 **avoiding triggering it**, not fixing it. A regression is caught by the crash-guard test.

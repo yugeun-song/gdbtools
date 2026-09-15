@@ -159,6 +159,11 @@ def context_flow(*args, **kwargs):
 # and is safe on any input -- verified returning "Unmapped" for the very address
 # that crashed the read path.  Unmapped -> raise the ordinary "cannot access"
 # error pwndbg already handles, without ever issuing the read.
+#
+# The danger belongs to the ADDRESS, not to the regime the stopped core is in, so the
+# guard is armed wherever HMP can answer -- see _active().  A telescoped register at a
+# PRE-MMU stop reaches a device model exactly as easily as a stray probe at a syscall
+# stop does, and on a v4.6 arm64 guest it reliably does.
 # ----------------------------------------------------------------------------
 class _SafeProbe:
     def __init__(self):
@@ -173,6 +178,7 @@ class _SafeProbe:
         self._ram_cache = {}        # page -> is-guest-RAM (gpa2hva), for the rescue bound
         self._v2p_cache = {}        # va-page -> gpa-page (gva2gpa), for the VA rescue
         self._pinned = None         # core HMP is pointed at, as far as WE set it
+        self._mon = None            # does this target answer HMP at all (session-wide)
         self._level = ""
 
     # One 4 KiB page: the largest block the rescue re-serves through `monitor xp`.
@@ -233,6 +239,19 @@ class _SafeProbe:
                     block = False
                 if block:
                     _g.blocked += 1
+                    # Blocked is not the same as unreadable.  At a mixed-regime stop --
+                    # a secondary core parked in head.S while the primary runs the
+                    # kernel -- a kernel VA does not translate on the core gdb is parked
+                    # on (arm64's HMP answers a flat "Unmapped" there), yet the primary
+                    # maps it and the physical path reads it.  Zero-filling printed
+                    # `X27 0xffffff8008082c00 (__secondary_switched) -> 0` for a pointer
+                    # whose target is sitting right there, so try the same cross-core
+                    # rescue the read-failed path uses before falling back to zeros.
+                    # _rescue reads guest RAM and nothing else, so it cannot reach the
+                    # device model this guard exists to keep away from.
+                    r = _g._rescue(address, size)
+                    if r is not None:
+                        return r
                     return bytearray(max(int(size), 0))
                 try:
                     return _o(inferior, address, size, partial)
@@ -301,6 +320,7 @@ class _SafeProbe:
                     pass
             LOG.add("safeprobe: restored %s" % lvl)
         self.installed = False
+        self._mon = None            # the next target may not be a QEMU guest at all
 
     def _read_memory(self, inferior, address, size, partial=False):
         """Wrapper bound as GDBProcess.read_memory -- `inferior` is the bound self."""
@@ -535,6 +555,28 @@ class _SafeProbe:
         self._cache[page] = ok
         return ok
 
+    @safe(default=False)
+    def _monitor_alive(self):
+        """Does this target answer QEMU's human monitor?  Asked once per session.
+
+        Every verdict this guard reaches is read out of HMP (`gva2gpa`, `gpa2hva`), so
+        on a target that has none -- kgdb over a serial line, a JTAG probe -- it can
+        only ever answer "unknown" and allow.  Settling that once costs one round trip;
+        leaving it unsettled costs one per page, for ever, on the slowest link in the
+        room.  Cached for the session and not per stop, because whether a target HAS a
+        monitor does not change while it is attached.  A negative answer is NOT cached
+        until something is actually attached, or a guard armed before `target remote`
+        would stay inert for the rest of the session."""
+        if self._mon is not None:
+            return self._mon
+        if gdb.selected_thread() is None:
+            return False                     # nothing attached yet -- ask again later
+        out = execstr("monitor gpa2hva 0") or ""
+        self._mon = bool(re.search(r"Host virtual address|is not RAM|No memory is mapped", out))
+        LOG.add("safeprobe: QEMU monitor %s"
+                % ("answers" if self._mon else "absent -- guard inert"))
+        return self._mon
+
     def _active(self):
         if self.mode == "off":
             return False
@@ -542,9 +584,32 @@ class _SafeProbe:
             return True
         s = state.session()
         a = getattr(s, "arch", None) if s else None
-        # Only where the danger exists: a kernel target with translation live.
-        return bool(a is not None and getattr(s, "enabled", False)
-                    and a.pc_is_virtual() is True)
+        if a is None or not getattr(s, "enabled", False):
+            return False
+        # NOT "is this core translating".  The SEGV is a property of the ADDRESS, not of
+        # the regime the stopped core happens to be in: a debug read that reaches a
+        # device model takes QEMU down whether translation is on or off.  Measured on
+        # arm64 `virt` at the FIRST pre-MMU stop, both cores MMU-off, a single
+        # `x/1xw 0x8010000` -- the GICv2 CPU interface -- killed QEMU with SIGSEGV and
+        # gdb aborted after it (QEMU's gic_get_current_cpu() reads current_cpu->cpu_index,
+        # and current_cpu is NULL in the gdbstub's main-loop context whenever num_cpu > 1).
+        #
+        # The old gate asked `pc_is_virtual() is True`, which switched the guard OFF for
+        # every physical-regime stop -- including the one it matters most for.  Stop a
+        # v4.6 arm64 guest at `__enable_mmu` and continue: the second stop is the
+        # SECONDARY core, still MMU-off in head.S, while the primary already runs the
+        # kernel MMU-on.  secondary_startup leaves x8 = kimage_vaddr, and v4.6 defines
+        # KIMAGE_VADDR == MODULES_END == VMALLOC_START (asm/memory.h:53, asm/pgtable.h:37),
+        # so that one number is also the first address of the ioremap area -- where the
+        # GIC distributor is mapped.  pwndbg telescopes x8, the read is served in the
+        # MMU-ON core's regime, it lands on the GIC, and the guest and the debugger die
+        # together.  The guard was installed, and looking the other way.  6.12 separated
+        # the two constants and so does not reproduce it, which is exactly why the gate
+        # must not be a guess about which addresses a register can hold.
+        #
+        # So gate on the instrument instead of on the regime: wherever HMP answers, the
+        # guard can decide, and wherever it can decide it should.
+        return self._monitor_alive() is True
 
     def _unmapped_error(self, addr):
         """Raise the SAME exception type pwndbg's own read raises on failure.
