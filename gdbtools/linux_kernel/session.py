@@ -1068,6 +1068,10 @@ class Session:
         return lines
 
     # --- sysreg + bit-field panel -------------------------------------------
+    # The indent of a register entry.  Its field rows hang directly under it at the
+    # same column, so both are printed with this one value.
+    _MSYSREG_LEAD = "  "
+
     def _msysreg_field_lines(self, a, name, value, width):
         """The field rows under one register: 'NAME[hi:lo]=value reading', wrapped.
 
@@ -1100,10 +1104,11 @@ class Session:
             cells.append("%s%s=%s%s" % (fname, span, shown, (" " + note) if note else ""))
         if not cells:
             return []
-        # Wrap to the panel width, leaving room for the 13-column indent and tree
-        # glyph this row is printed with, so a narrow panel stays inside its width
-        # instead of wrapping a second time in the terminal.
-        avail = max(24, (width or 100) - 14)
+        # Wrap to the panel width, leaving room for the lead and tree glyph this row
+        # is printed with, so a narrow panel stays inside its width instead of
+        # wrapping a second time in the terminal.
+        prefix = self._MSYSREG_LEAD + "\u251c\u2500 "
+        avail = max(24, (width or 100) - len(prefix) - 1)
         rows, cur = [], ""
         for c in cells:
             add = c if not cur else (cur + "  " + c)
@@ -1116,7 +1121,7 @@ class Session:
         out = []
         for i, r in enumerate(rows):
             glyph = "\u2514\u2500" if i == len(rows) - 1 else "\u251c\u2500"
-            out.append("          %s %s" % (glyph, PWN.color("gray", r) or r))
+            out.append("%s%s %s" % (self._MSYSREG_LEAD, glyph, PWN.color("gray", r) or r))
         return out
 
     def msysreg_context_lines(self, width=None):
@@ -1156,7 +1161,7 @@ class Session:
             for nm, v in groups[cat]:
                 nmc = PWN.color("cyan", "%-16s" % nm) or ("%-16s" % nm)
                 if v is None:
-                    lines.append("  %s ?" % nmc)
+                    lines.append("%s%s ?" % (self._MSYSREG_LEAD, nmc))
                     continue
                 val = PWN.color("yellow", "0x%016x" % v) or ("0x%016x" % v)
                 rows = self._msysreg_field_lines(a, nm, v, width)
@@ -1171,7 +1176,7 @@ class Session:
                         note = None
                     if note:
                         val += "   " + (PWN.color("gray", note) or note)
-                lines.append("  %s %s" % (nmc, val))
+                lines.append("%s%s %s" % (self._MSYSREG_LEAD, nmc, val))
                 lines += rows
         # The flags register last.  No msr/mrs names it -- the asm writes DAIF and
         # NZCV, or the flags themselves -- so it is not in entry_sysregs, and showing
@@ -1186,8 +1191,8 @@ class Session:
             if fv is not None:
                 lines.append(PWN.color("blue", "flags") or "flags")
                 nmc = PWN.color("cyan", "%-16s" % fr.upper()) or ("%-16s" % fr.upper())
-                lines.append("  %s %s" % (nmc, PWN.color("yellow", "0x%016x" % fv)
-                                          or ("0x%016x" % fv)))
+                lines.append("%s%s %s" % (self._MSYSREG_LEAD, nmc,
+                                          PWN.color("yellow", "0x%016x" % fv) or ("0x%016x" % fv)))
                 lines += self._msysreg_field_lines(a, fr, fv, width)
         return lines
 
