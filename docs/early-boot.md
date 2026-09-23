@@ -2,7 +2,7 @@
 
 `gdbtools.py` is a custom plugin that runs on top of a host gdb (+pwndbg)
 attached to a QEMU gdbstub. The `source` target is this one file as-is, and the
-implementation lives in the sibling `kgdb/` package (dependency graph:
+implementation lives in the sibling `gdbtools/` package (dependency graph:
 `runtime` → `physmem` → `pwndbg_glue`/`dtb`/`target` → `arch_*` → `session` → `commands`/`cfgdis`
 → `bootstrap`; `state` breaks the helper↔session cycle). In the `head.S` region before the MMU is on, `$pc` and pointers are **physical addresses**, so
 the gdb symbol table linked at virtual addresses resolves nothing (`info symbol`, pwndbg `telescope`/`context` are dead).
@@ -55,28 +55,26 @@ session you can also use `kearly profile FILE` / `kearly dtb FILE`.
 Right after attach, a banner lists all the commands:
 
 ```
-[kgdb] early-boot symbolizer loaded (commands: kearly | kp2v | kv2p | sym |
-       stackscan | ksr | ksregs | kcensus | kpt | kpgd | koff | mmview/memlayout | kmemblock | kfin | chain | cfgdis | kdtb)
+[gdbtools] early-boot symbolizer loaded (kearly | kb | kw | kx | kp2v | kv2p | ksr | ksregs | kbits | kcensus | kpt | kpgd | kpthex | koff | mmview | kfin | kdtb)
 ```
 
 **Safety contract** — (1) it kills nothing (no pkill/fuser; running VMs and sessions are untouchable). (2) if there is no stub it does not
 force the connection and hang gdb; it loads only the symbols and tools and **drops to a live interactive prompt**
 (you can type `target remote :DEFAULT_PORT` by hand later). (3) it does not touch global gdb/pwndbg settings.
 
-**Main options**
+**Configuration**
 
-| option | effect |
+There are no command-line options: gdbtools runs inside gdb and reads `GDBTOOLS_*`
+environment variables set before gdb starts (the README has the full table). The
+ones that matter here, with their in-session equivalents:
+
+| setting | effect |
 |---|---|
-| `target remote :PORT` | connect to the gdbstub |
-| `-p, --port N` | force the gdbstub port |
-| `--gdb BIN` | force the gdb binary |
-| `--no-connect` | load symbols and tools only, do not connect |
-| `--no-calibrate` | connect only, skip `kearly bootbreak` |
-| `--earliest` (`--raw`) | stop before head.S (reset vector/firmware) — advance later with `kearly bootbreak` |
-| `-x, --ex CMD` | run an arbitrary gdb command after connecting (repeatable) |
-| `--preset NAME` | boot-combination preset (arm64-uefi, x86-pvh, riscv-uefi …) |
-| `--entry-pa` / `--anchor` / `--break-kind` / `--ram-base` / `--scan` | manually specify a combination that is not auto-detected |
-| `--profile FILE.json` / `--dtb FILE` | inject a machine descriptor for a non-QEMU board |
+| `target remote :PORT` | connect to the gdbstub (a plain gdb command) |
+| `GDBTOOLS_AUTO=1` | run `kearly on`, `kearly bootbreak` and `kearly status` on attach |
+| `GDBTOOLS_PRESET=NAME`, or `kearly preset NAME` | boot-combination preset (arm64-uefi, x86-pvh, riscv-uefi …) |
+| `GDBTOOLS_ENTRY_PA`, `GDBTOOLS_ANCHOR`, `GDBTOOLS_BREAK_KIND`, `GDBTOOLS_RAM_BASE`, `GDBTOOLS_SCAN`, or `kearly entry`, `kearly anchor`, `kearly break` | manually specify a combination that is not auto-detected |
+| `GDBTOOLS_PROFILE=FILE.json`, `GDBTOOLS_DTB=FILE`, or `kearly profile FILE`, `kearly dtb FILE` | inject a machine descriptor for a non-QEMU board |
 
 > Summary: **attach to a frozen VM and type the single line `kearly bootbreak`**, and everything from advancing the entry,
 > loading vmlinux+tools, advancing to the entry, calibration, and the automatic hooks is done. From there you type the commands below.
@@ -127,7 +125,7 @@ entry and fixing the offset. The state afterward:
 
 ```
 (gdb) kearly status
-[kgdb] arch=arm64  enabled=True  offset(PA-VA)=0x0001000038000000
+[gdbtools] arch=arm64  enabled=True  offset(PA-VA)=0x0001000038000000
       map=virtual  MMU=on [pc=VA]  steplock=auto  census=off  chaindepth=8
       preset=(default)  anchor=_text  break=sw
       target=(arch defaults)
@@ -142,14 +140,14 @@ entry and fixing the offset. The state afterward:
 
 ```
 (gdb) kearly mmu
-[kgdb] MMU=off [ctrl-reg]  map=physical  pc=0x0000000040080000  SCTLR_EL1.M=0
+[gdbtools] MMU=off [ctrl-reg]  map=physical  pc=0x0000000040080000  SCTLR_EL1.M=0
       pre-MMU: $pc/pointers are PHYSICAL; shadow symbols active.
 ```
 
 After the MMU is turned on:
 
 ```
-[kgdb] MMU=on [ctrl-reg]  map=physical  pc=0x00000000408b003c  SCTLR_EL1.M=1
+[gdbtools] MMU=on [ctrl-reg]  map=physical  pc=0x00000000408b003c  SCTLR_EL1.M=1
       MMU on: kernel VAs resolve natively; kp2v/kv2p translate either way.
 ```
 
@@ -160,9 +158,9 @@ Instead, set a temporary breakpoint at the virtual landing (e.g. `start_kernel`)
 
 ```
 (gdb) kearly overmmu start_kernel
-[kgdb] over_mmu: continue to virtual landing {start_kernel} ...
-[kgdb] >>> MMU ON: $pc now VIRTUAL 0xffff000008c365f0 -- native kernel symbolization active
-[kgdb] landed pc=0xffff000008c365f0 start_kernel in section .init.text  (MMU on)
+[gdbtools] over_mmu: continue to virtual landing {start_kernel} ...
+[gdbtools] >>> MMU ON: $pc now VIRTUAL 0xffff000008c365f0 -- native kernel symbolization active
+[gdbtools] landed pc=0xffff000008c365f0 start_kernel in section .init.text  (MMU on)
 ```
 
 ---
@@ -205,7 +203,7 @@ It distinguishes and labels physical (PA) and virtual (VA) (measured excerpt):
 
 ```
 (gdb) ksregs
-[kgdb] MMU=on EL1  SCTLR_EL1=0x34d5d91d  TTBR0_EL1=0x6d0000b6fdc000  TTBR1_EL1=0x41200000  PSTATE.DAIF=0x7   [MMU=on pc=VA]
+[gdbtools] MMU=on EL1  SCTLR_EL1=0x34d5d91d  TTBR0_EL1=0x6d0000b6fdc000  TTBR1_EL1=0x41200000  PSTATE.DAIF=0x7   [MMU=on pc=VA]
   CurrentEL    0x0000000000000004  (4)   EL1
   SCTLR_EL1    0x0000000034d5d91d  (886429981)   M=1 (MMU on)  C=1 I=1 A=0 SA=1 WXN=0
   TTBR0_EL1    0x006d0000b6fdc000  (30680775531544576)
@@ -243,7 +241,7 @@ arm64 88 / x86 CR·MSR·segment / riscv CSR.
 **Measured output (arm64, excerpt — 88 total)**
 
 ```
-[kgdb] head.S early-boot register census -- arm64   [MMU=on pc=VA]   (88 registers)
+[gdbtools] head.S early-boot register census -- arm64   [MMU=on pc=VA]   (88 registers)
 translation
   TTBR0_EL1          RW  0x760000b68b3000     idmap/user page-table base (MMU enable, switch_mm, resume)
   TTBR1_EL1          RW  0x41200000           kernel/swapper page-table base (KPTI, replace-ttbr1)
@@ -363,7 +361,7 @@ VA 0xffff000008082000   TTBR1_EL1 (kernel/high)   [4KB granule, 4-level (L0..L3)
 
 ```
 (gdb) kpt &_stext
-[kgdb] cannot walk VA 0xffff000008082000 -- page-table base unreadable, or paging is off
+[gdbtools] cannot walk VA 0xffff000008082000 -- page-table base unreadable, or paging is off
        (MMU/satp/CR0.PG). Try after MMU-enable.
 ```
 
@@ -654,7 +652,7 @@ bases safely, via physical reads**.
 
 ```
 (gdb) kearly chaindepth 2
-[kgdb] telescope depth = 2 hops  (safe_chain: bounded, cycle-guarded; ...)
+[gdbtools] telescope depth = 2 hops  (safe_chain: bounded, cycle-guarded; ...)
 # -> TTBR1_EL1  0x41200000  PTbase 0x41200000  ->  0xbeffe000        (stops at 2 hops)
 
 (gdb) kearly chaindepth 8       # default
@@ -791,7 +789,7 @@ split cleanly: pwndbg = rich annotation, ours = arrows.
 > moved base `rbx` (= `%rax − IMM`) → 3. `finish` at `extract_kernel` (rbx+off) → `%rax` = the decompressed main-kernel physical
 > entry point (= the random KASLR base). With that base as the entry, the crossing anchor above then fixes the virtual slide.
 > The offset is derived version-independently by reading `arch/x86/boot/compressed/vmlinux` with `nm`/`objdump` (auto-generated at build time;
-> falls back to `--entry-pa` if absent). Measured: it recovers a different random base each boot (`0x52600000`, `0x28a00000`, `0x0ca00000`
+> falls back to `$GDBTOOLS_ENTRY_PA` if absent). Measured: it recovers a different random base each boot (`0x52600000`, `0x28a00000`, `0x0ca00000`
 > …) every time, the slide (`0x25600000`, `0x27400000` …) cross-validates, and start_kernel hits cleanly. On x86 QEMU is run under TCG for
 > deterministic earliest-boot HW breakpoints.
 >
@@ -810,13 +808,13 @@ gdb's `watch SYM` watches **only the single address the symbol pointed at the mo
 ```
 # armed while MMU off (head.S entry), with the slide still unknown
 (gdb) kw kimage_voffset
-[kgdb] kw 'kimage_voffset'  linkVA=0xffff800082148000  watch  8-byte
+[gdbtools] kw 'kimage_voffset'  linkVA=0xffff800082148000  watch  8-byte
         watch @ 0x0000000042348000  PA  MMU-off/idmap  (head.S data writes, page tables)  [wp 2]
         watch @ 0xffff800082148000  IMG high kernel map (start_kernel & steady state)  [wp 3]
         (IMG auto-re-arms to linkVA+slide the moment the KASLR slide is known)
 
 (gdb) kearly kaslr auto
-[kgdb] KASLR slide = 0x253005a00000 applied: ...
+[gdbtools] KASLR slide = 0x253005a00000 applied: ...
 
 (gdb) info watchpoints          # IMG has moved to linkVA+slide
 2       hw watchpoint  keep y   *(unsigned long long *)0x42348000
@@ -837,7 +835,7 @@ Thread 1 hit Hardware watchpoint 3: *(unsigned long long *)0x43a56000
 Old value = 0x0
 New value = 0x48000000
 preserve_boot_args () at arch/arm64/kernel/head.S:174
-[kgdb] MMU=off [ctrl-reg]  map=physical  pc=0x0000000042bca710  SCTLR_EL1.M=0
+[gdbtools] MMU=off [ctrl-reg]  map=physical  pc=0x0000000042bca710  SCTLR_EL1.M=0
 ```
 
 `-r` (rwatch)·`-a` (awatch) and `kw *ADDR [SIZE]` (SIZE ∈ {1,2,4,8}) work the same way.
@@ -874,7 +872,7 @@ and returned a plausible, meaningless value like `0x0000800000400000`. Now it re
 
 ```
 (gdb) kv2p $pc
-[kgdb] kv2p: 0x0000000040200000 is not a kernel virtual address -- it looks PHYSICAL.
+[gdbtools] kv2p: 0x0000000040200000 is not a kernel virtual address -- it looks PHYSICAL.
       Right now: MMU off, so addresses here are PHYSICAL.
       Use `kp2v` for this direction, or `sym` which accepts either.
 ```
@@ -1082,7 +1080,7 @@ Now the tool scans the running image and answers directly — with not a single 
 
 ```
 (gdb) kearly regimes
-[kgdb] early-boot MMU regimes for this build
+[gdbtools] early-boot MMU regimes for this build
   entry     PHYS   link 0xffff800080000000  PA 0x0000000040200000
             kernel entry, MMU off, PC physical  -- _text
   mmuon     PHYS   link 0xffff8000829b84a8  PA 0x0000000042bb84a8
@@ -1144,7 +1142,7 @@ this time that path is exposed as a user command.
 Stopped at that spot, the tool tells you first — because a feature with no discoverability might as well not exist:
 
 ```
-[kgdb] note: $pc 0x0000000080201048 is physical and translation is on, so `x` cannot read it.
+[gdbtools] note: $pc 0x0000000080201048 is physical and translation is on, so `x` cannot read it.
        Use `kx/16xb $pc` (physical examine) or `cfgdis` here.
 ```
 
@@ -1174,11 +1172,11 @@ The user types no further command.
 ```
 (gdb) b start_kernel
 Breakpoint 5 at 0x42bc0bd8: start_kernel. (2 locations)
-[kgdb] kaslr: that breakpoint targets a high VA but the slide is still unknown -- armed a silent
+[gdbtools] kaslr: that breakpoint targets a high VA but the slide is still unknown -- armed a silent
        catcher on the MMU-crossing (phys 0x42bb8518); the slide is read and applied in passing,
        without stopping.
 (gdb) continue
-[kgdb] KASLR slide = 0x3de518400000 applied: all symbols relocated to runtime VAs
+[gdbtools] KASLR slide = 0x3de518400000 applied: all symbols relocated to runtime VAs
 Thread 1 hit Breakpoint 5.2, start_kernel () at init/main.c:915
 915	{
 ```
@@ -1193,7 +1191,7 @@ respecting the user's stop, and applies later when execution reaches the crossin
 ```
 Thread 1 hit Hardware watchpoint 2: *(unsigned long long *)0x43a56000
 preserve_boot_args () at arch/arm64/kernel/head.S:174
-[kgdb] kaslr: another breakpoint stopped first (pc=0x42bca710) -- left a PERSISTENT catcher [bp 5]
+[gdbtools] kaslr: another breakpoint stopped first (pc=0x42bca710) -- left a PERSISTENT catcher [bp 5]
        on the crossing (phys 0x42bb8518).  Keep debugging: the slide is read and applied
        automatically the moment execution reaches it.
 ```
@@ -1205,9 +1203,9 @@ yet. The tool sees that `$pc` is below the decompressor load address (`0x100000`
 and first recovers the random physical base via the decompressor chain. **No environment variable or flag is needed.**
 
 ```
-[kgdb] x86 KASLR: extract_kernel reached; decompressing kernel (finish) ...
-[kgdb] x86 KASLR: recovered main-kernel phys base 0x0000000039e00000 via the decompressor
-[kgdb] KASLR slide = 0x13e00000 applied
+[gdbtools] x86 KASLR: extract_kernel reached; decompressing kernel (finish) ...
+[gdbtools] x86 KASLR: recovered main-kernel phys base 0x0000000039e00000 via the decompressor
+[gdbtools] KASLR slide = 0x13e00000 applied
 Thread 1 hit Breakpoint 5.2, start_kernel () at init/main.c:915
 ```
 
@@ -1278,7 +1276,7 @@ Analyzing head.S by reading it with `objdump`, what catches the eye is the **lin
 ```
 (gdb) b *0xffff8000829b80a8
 Breakpoint 2 at 0xffff8000829b80a8
-[kgdb] note: 0xffff8000829b80a8 is a LINK address and this kernel is KASLR-relocated, so that
+[gdbtools] note: 0xffff8000829b80a8 is a LINK address and this kernel is KASLR-relocated, so that
        exact byte will not be executed once the slide is known.  Its physical twin has been
        armed alongside, so a probe here still fires while the MMU is off.
 
@@ -1335,7 +1333,7 @@ so "observed == expected" holds even if the slide is wrong. Two witnesses outsid
   nowhere in the machine, so no debugger can set it. Instead of quietly missing, the tool states the reason and the remedy:
 
   ```
-  [kgdb] kaslr: the kernel is still compressed at this point, so there is nothing to
+  [gdbtools] kaslr: the kernel is still compressed at this point, so there is nothing to
          calibrate against yet -- run `kearly bootbreak` first (it recovers the
          randomized base), then re-arm.
   ```
