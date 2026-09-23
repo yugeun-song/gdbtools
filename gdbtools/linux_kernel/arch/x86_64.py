@@ -261,6 +261,25 @@ def _qemu_ram_window():
     return best
 
 
+_QEMU_MIN = (8, 1)
+
+
+@safe(default=False)
+def _qemu_stop_reply_gated():
+    ver = (execstr("monitor info version") or "").strip()
+    m = re.match(r"(\d+)\.(\d+)", ver)
+    if not m:
+        LOG.add("QEMU version unreadable: %r" % ver[:40])
+        return True
+    if (int(m.group(1)), int(m.group(2))) >= _QEMU_MIN:
+        return True
+    print("[%s] UEFI: QEMU %s reports the monitor's stop to gdb as a stop reply and would "
+          "leave gdb out of step, so the guest is not driven through the monitor; use "
+          "QEMU %d.%d or newer, or pin $GDBTOOLS_ENTRY_PA."
+          % (NAME, ver.split()[0], _QEMU_MIN[0], _QEMU_MIN[1]))
+    return False
+
+
 @safe(default=False)
 def _qemu_advance(ms):
     """Let the guest run for `ms` milliseconds without gdb resuming it: QEMU's own
@@ -268,7 +287,9 @@ def _qemu_advance(ms):
     neither do its stop hooks nor a DAP client's state machine.  gdb cannot READ the
     guest afterwards -- its view is of the last real stop -- which is why everything
     the search touches goes through the monitor instead.  QEMU-only: a target without
-    a monitor gets False."""
+    a monitor gets False.  QEMU 8.1 or newer only: an older gdbstub answered the
+    monitor's stop with a stop reply gdb never asked for, and gdb's next `continue`
+    returned on it at once."""
     import time
     # execstr is @safe(default=""), so a target with no monitor answers with an EMPTY
     # string rather than raising.  Empty is therefore the only evidence that the
@@ -276,6 +297,8 @@ def _qemu_advance(ms):
     status = (execstr("monitor info status") or "").strip()
     if not status or "unning" in status:
         return False                                  # no monitor here, or not ours to drive
+    if not _qemu_stop_reply_gated():
+        return False
     out = execstr("monitor cont")
     if out and ("Undefined" in out or "unknown" in out.lower()):
         return False
@@ -434,7 +457,7 @@ def _x86_find_bzimages(sess):
     cv = sess._compressed_vmlinux()
     head = _x86_image_head(cv) if cv else None
     if not _qemu_advance(_EFI_SETTLE_MS):
-        print("[%s] UEFI: cannot step the guest -- no QEMU monitor behind this target, "
+        print("[%s] UEFI: cannot step the guest -- no usable QEMU monitor behind this target, "
               "so the loaded image cannot be looked for." % NAME)
         return []
     ms = _EFI_SETTLE_MS
@@ -645,7 +668,7 @@ class X86_64(X86_64Common, KernelArch):
         #   3. break at extract_kernel (rbx + off), then `finish` -> %rax = the
         #      decompressed main-kernel physical entry (2MB-aligned, KASLR base).
         # Returns that PA, or None (no compressed vmlinux / unexpected shape -> caller
-        # falls back to the nominal entry or --entry-pa).  head_64.S (compressed):
+        # falls back to the nominal entry or $GDBTOOLS_ENTRY_PA).  head_64.S (compressed):
         # startup_64 self-reloc + `.Lrelocated: call extract_kernel; jmp *%rax`.
         cv = sess._compressed_vmlinux()
         if cv is None:
