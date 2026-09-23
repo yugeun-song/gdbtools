@@ -15,12 +15,38 @@ from .base import KernelArch
 
 
 # A TxSZ the architecture does not allow is not a VA size.  ARMv8 permits 16..39,
-# widened at the low end to 12 by LVA, and the kernel only ever programs a value in
-# that range.  Anything else is a field nobody set -- u-boot leaves T1SZ at 0 with
+# widened at the low end to 12 by LVA (8 by LVA3) and at the high end to 48 by TTST;
+# ID_AA64MMFR2_EL1 says which apply, and the loosest bounds stand in when it cannot
+# be read.  Anything else is a field nobody set -- u-boot leaves T1SZ at 0 with
 # TTBR1 walks disabled -- and calling that "VA 64-bit" states a configuration that
 # does not exist.  Say it is unset instead; EPD1 on the same row says why.
+_TXSZ_BOUNDS = {}
+
+
+def _txsz_bounds():
+    try:
+        inf = gdb.selected_inferior()
+        key = (getattr(inf, "connection_num", None), inf.pid)
+    except Exception:
+        key = None
+    if key in _TXSZ_BOUNDS:
+        return _TXSZ_BOUNDS[key]
+    mmfr2 = evi("$ID_AA64MMFR2_EL1")
+    if mmfr2 is None:
+        mmfr2 = monitor_reg("ID_AA64MMFR2_EL1")
+    if mmfr2 is None:
+        bounds = (8, 48)
+    else:
+        varange, st = (mmfr2 >> 16) & 0xF, (mmfr2 >> 28) & 0xF
+        bounds = ((16 if varange == 0 else 12 if varange == 1 else 8), (48 if st else 39))
+    if key is not None:
+        _TXSZ_BOUNDS[key] = bounds
+    return bounds
+
+
 def _txsz_reading(which, v):
-    if not (12 <= v <= 39):
+    lo, hi = _txsz_bounds()
+    if not (lo <= v <= hi):
         return "%s TxSZ unset/reserved" % which
     return "%s VA %d-bit" % (which, 64 - v)
 
@@ -304,7 +330,8 @@ class Arm64(Arm64Common, KernelArch):
             tsz, gshift = (tcr >> 16) & 0x3F, self._TG1_SHIFT.get((tcr >> 30) & 3)
         else:
             tsz, gshift = tcr & 0x3F, self._TG0_SHIFT.get((tcr >> 14) & 3)
-        if gshift is None or not (16 <= tsz <= 39):
+        lo, hi = _txsz_bounds()
+        if gshift is None or not (lo <= tsz <= hi):
             return None
         va_bits, per_level = 64 - tsz, gshift - 3
         levels = -(-(va_bits - gshift) // per_level)      # ceil division
@@ -341,7 +368,7 @@ class Arm64(Arm64Common, KernelArch):
         # worth following) -- more correct, and safe.
         n = re.sub(r"_el[0123]$", "", name.lower())
         if n in ("ttbr0", "ttbr1"):
-            base = value & ((1 << 48) - 1) & ~0xFFF
+            base = self._ttbr_base(value)
             asid = (value >> 48) & 0xFFFF
             hexv = PWN.color("yellow", "0x%x" % value) or ("0x%x" % value)
             if base == 0:
@@ -442,7 +469,8 @@ class Arm64(Arm64Common, KernelArch):
         page_shift = ({1: 14, 2: 12, 3: 16}.get(tg, 12) if is_ttbr1
                       else {0: 12, 1: 16, 2: 14}.get(tg, 12))
         stride = page_shift - 3
-        va_bits = 64 - tsz if 1 <= tsz <= 47 else 48
+        lo, hi = _txsz_bounds()
+        va_bits = 64 - tsz if lo <= tsz <= hi else 48
         addr_bits = max(va_bits - page_shift, stride)
         nlevels = (addr_bits + stride - 1) // stride
         # Is the other half shaped the same?  Cheap: the same register is already
@@ -460,6 +488,21 @@ class Arm64(Arm64Common, KernelArch):
                        "halves_differ": (_otsz != tsz or _ops != page_shift)}
         return True
 
+    def _ttbr_base(self, ttbr):
+        base = ttbr & ((1 << 48) - 1) & ~0xFFF
+        if self._pa_size_52():
+            base |= ((ttbr >> 2) & 0xF) << 48
+        return base
+
+    def _pa_size_52(self):
+        el = self._cur_el() or 1
+        tcr = self.sysreg("TCR_EL%d" % el)
+        if tcr is None:
+            return False
+        if el == 3 or (el == 2 and not ((self.sysreg("HCR_EL2") or 0) >> 34) & 1):
+            return ((tcr >> 16) & 7) == 6
+        return ((tcr >> 32) & 7) == 6
+
     def pt_base_raw(self, va):
         """The base register's contents, read WITHOUT the translation gate.
 
@@ -474,7 +517,7 @@ class Arm64(Arm64Common, KernelArch):
         ttbr = self.sysreg(regname)
         if ttbr is None:
             return None
-        base = ttbr & ((1 << 48) - 1) & ~0xFFF
+        base = self._ttbr_base(ttbr)
         return None if base == 0 else (label, base)
 
     def pt_config_probe_for(self, va):
@@ -500,7 +543,7 @@ class Arm64(Arm64Common, KernelArch):
         ttbr = self.sysreg(regname)
         if ttbr is None:
             return None
-        base = ttbr & ((1 << 48) - 1) & ~0xFFF            # strip ASID + align
+        base = self._ttbr_base(ttbr)                      # strip ASID + align
         if base == 0:
             return None
         if not self.pt_config_probe(is_ttbr1):
@@ -528,7 +571,7 @@ class Arm64(Arm64Common, KernelArch):
         af, ap, sh, ai = (desc >> 10) & 1, (desc >> 6) & 3, (desc >> 8) & 3, (desc >> 2) & 7
         pxn, uxn, ng, con = (desc >> 53) & 1, (desc >> 54) & 1, (desc >> 11) & 1, (desc >> 52) & 1
         apn = {0: "RW-", 1: "RWEL0", 2: "RO-", 3: "ROEL0"}[ap]
-        shn = {0: "NS", 1: "?", 2: "OSh", 3: "ISh"}[sh]
+        shn = {0: "NSh", 1: "?", 2: "OSh", 3: "ISh"}[sh]
         return "AF=%d %s AttrIdx=%d %s%s%s%s%s" % (
             af, apn, ai, shn, " PXN" if pxn else "", " UXN" if uxn else "",
             " nG" if ng else "", " Cont" if con else "")
