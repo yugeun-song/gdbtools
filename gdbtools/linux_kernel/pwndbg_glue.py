@@ -322,17 +322,6 @@ class _SafeProbe:
         self.installed = False
         self._mon = None            # the next target may not be a QEMU guest at all
 
-    def _read_memory(self, inferior, address, size, partial=False):
-        """Wrapper bound as GDBProcess.read_memory -- `inferior` is the bound self."""
-        try:
-            block = self._active() and self._mapped(address) is False
-        except Exception:
-            block = False
-        if block:
-            self.blocked += 1
-            raise self._unmapped_error(address)
-        return self._orig(inferior, address, size, partial)
-
     def flush(self):
         self._cache.clear()
         self._ram_cache.clear()

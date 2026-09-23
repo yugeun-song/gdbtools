@@ -28,8 +28,27 @@ class _Ring:
 LOG = _Ring()
 
 
+_DEBUG = bool(os.environ.get("GDBTOOLS_DEBUG"))
+_BUG_TYPES = (NameError, AttributeError, TypeError)
+_REPORTED = set()
+
+
+def _report(where, e):
+    key = (where, type(e).__name__, str(e))
+    if not _DEBUG:
+        if not isinstance(e, _BUG_TYPES) or key in _REPORTED:
+            return
+        _REPORTED.add(key)
+    try:
+        gdb.write("[%s] %s: %s: %s\n" % (NAME, where, type(e).__name__, e), gdb.STDERR)
+    except Exception:
+        pass
+
+
 def safe(default=None):
-    """Decorator: swallow every exception, log it, return `default`."""
+    """Decorator: swallow every exception, log it, return `default`.  A NameError,
+    AttributeError or TypeError is also reported on gdb's stderr, once per site and
+    message; with $GDBTOOLS_DEBUG set every swallowed exception is."""
     def deco(fn):
         def wrap(*a, **k):
             try:
@@ -37,6 +56,7 @@ def safe(default=None):
             except Exception as e:                      # deliberately catch-all
                 LOG.add("[%s] %s: %s" % (getattr(fn, "__name__", "?"),
                                          type(e).__name__, e))
+                _report(getattr(fn, "__name__", "?"), e)
                 return default
         wrap.__name__ = getattr(fn, "__name__", "wrapped")
         return wrap

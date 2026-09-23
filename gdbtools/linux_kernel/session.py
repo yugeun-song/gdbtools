@@ -86,7 +86,7 @@ class Session:
     def load_overrides(self):
         """Apply overrides idempotently in precedence order (low -> high):
         preset -> JSON profile (anchor/break) -> explicit env flags.  So an
-        explicit --anchor wins over the profile, which wins over the preset."""
+        explicit $GDBTOOLS_ANCHOR wins over the profile, which wins over the preset."""
         p = _env("PRESET")
         if p and self.preset != p:
             self.apply_preset(p, quiet=True)
@@ -121,6 +121,8 @@ class Session:
             print("[%s] preset '%s'%s: anchor=%s break=%s -- %s" %
                   (NAME, name, "" if p["verified"] else " (designed, not lab-verified)",
                    self.anchor or "<image-base>", self.break_kind or "<arch-default>", p["desc"]))
+        elif not p["verified"]:
+            print("[%s] preset '%s' is designed, not lab-verified" % (NAME, name))
         return True
 
     def current_anchor(self):
@@ -2111,7 +2113,10 @@ class Session:
         if va is None:
             return True
         pa = self.v2p(va)
-        lo, hi = a.eff_phys_window()
+        win = a.eff_phys_window()
+        if win is None:
+            return True
+        lo, hi = win
         return pa is not None and lo <= pa <= hi
 
     @safe(default=False)
@@ -2190,7 +2195,8 @@ class Session:
                 # reports that file missing it can say nothing about which walk would
                 # have run.
                 print("[%s] x86 KASLR: base recovery unavailable ($GDBTOOLS_X86_DECOMP_VMLINUX "
-                      "unset or unreadable); trying nominal entry -- pass --entry-pa if it misses."
+                      "unset or unreadable); trying nominal entry -- set $GDBTOOLS_ENTRY_PA "
+                      "(or `kearly entry PA`) if it misses."
                       % NAME)
         base = self.resolve_entry()              # image base (_text load address) PA
         # x86_64: $GDBTOOLS_ENTRY_PA / info-roms report the IMAGE BASE (where the
