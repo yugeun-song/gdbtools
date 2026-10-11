@@ -8,19 +8,13 @@ import os
 from ...common.runtime import *
 from ..physmem import *
 from ...common.arch.x86_64 import X86_64Common
-from .base import KernelArch, _parse_range
+from .base import KernelArch
 
 
 def _binutil(name):
-    """`nm` / `objdump`, injectable.
-
-    These are this package's one host-toolchain dependency, and the README states
-    that configuration reaches it only through GDBTOOLS_*.  A machine whose
-    binutils is not on $PATH -- or whose `nm` cannot read the target's ELF -- can
-    now name the program instead of having no way to say it.  Unset means the
-    plain name and the usual $PATH lookup, which is what every machine here has,
-    so nothing changes by default."""
-    return _env("BINUTIL_" + name.upper()) or name
+    """`nm` / `objdump`: $GDBTOOLS_BINUTIL_NM / _OBJDUMP when stated, else the
+    plain name on $PATH."""
+    return config.get("BINUTIL_" + name.upper()) or name
 
 
 
@@ -34,8 +28,9 @@ def _x86_decomp_offsets(cv):
     out of %rax at the jmp yields the moved base rbx, and extract_kernel = rbx + off.
     Returns None if the compressed vmlinux or the expected shape is absent."""
     import subprocess
+    nm_prog, objdump_prog = _binutil("nm"), _binutil("objdump")   # outside the try: a bad value must surface
     try:
-        nm = subprocess.check_output([_binutil("nm"), cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        nm = subprocess.check_output([nm_prog, cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
     ek = None
@@ -48,7 +43,7 @@ def _x86_decomp_offsets(cv):
         return None
     try:
         dis = subprocess.check_output(
-            [_binutil("objdump"), "-d", "--start-address=0x200", "--stop-address=0x400", cv],
+            [objdump_prog, "-d", "--start-address=0x200", "--stop-address=0x400", cv],
             stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
@@ -99,13 +94,17 @@ _HDRS_OFF = 0x202
 _BOOT_FLAG_OFF = 0x1FE
 _SETUP_SECTS_OFF = 0x1F1
 
+_GPR64 = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
+
 
 @safe(default=None)
 def _nm_value(cv, name):
     """Value of one symbol in an ELF, via nm.  None when the file or symbol is absent."""
     import subprocess
+    prog = _binutil("nm")
     try:
-        out = subprocess.check_output([_binutil("nm"), cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        out = subprocess.check_output([prog, cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
     for line in out.splitlines():
@@ -121,8 +120,9 @@ def _nm_sym(cv, name):
     which is the caller's cue to fall back to a fixed window.  Knowing the size is what
     keeps a scan of one function from running on into the next one."""
     import subprocess
+    prog = _binutil("nm")
     try:
-        out = subprocess.check_output([_binutil("nm"), "-S", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        out = subprocess.check_output([prog, "-S", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
     for line in out.splitlines():
@@ -161,9 +161,10 @@ def _x86_efi_handoff_off(cv):
         return None
     start, size = sym
     end = start + (size if size else 0x8000)
+    prog = _binutil("objdump")
     try:
         dis = subprocess.check_output(
-            [_binutil("objdump"), "-d", "--start-address=0x%x" % start,
+            [prog, "-d", "--start-address=0x%x" % start,
              "--stop-address=0x%x" % end, cv],
             stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
@@ -207,9 +208,10 @@ def _x86_image_head(cv, n=8):
     vmlinux, for confirming that an address really holds the image before running the
     guest at it.  Read through objdump, which the offset parser above already needs."""
     import subprocess
+    prog = _binutil("objdump")
     try:
         dis = subprocess.check_output(
-            [_binutil("objdump"), "-d", "--start-address=0x0", "--stop-address=0x%x" % (n + 16), cv],
+            [prog, "-d", "--start-address=0x0", "--stop-address=0x%x" % (n + 16), cv],
             stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
         return None
@@ -230,19 +232,14 @@ def _qemu_ram_window():
     flat view rather than probed: a read outside RAM is the one thing physmem warns
     must never be issued, so the bound has to come from the model.  Flash and ROM
     regions are excluded by name -- they are backed like RAM but hold no guest image."""
-    # An operator who states a range outranks the model.  GDBTOOLS_SCAN names the
-    # exact window to look in; GDBTOOLS_PHYS_WINDOW states where the image may
-    # plausibly live.  Both were previously ignored here, which made the search
-    # unsteerable on a machine whose mtree does not describe RAM the way this
-    # expects -- the one case where stating a range is the only remaining option.
+    # A stated range outranks the model: GDBTOOLS_SCAN names the window to look
+    # in, GDBTOOLS_PHYS_WINDOW where the image may live.
     for _k in ("SCAN", "PHYS_WINDOW"):
-        _v = _env(_k)
-        if _v:
-            _r = _parse_range(_v, _k)
-            if _r:
-                LOG.add("UEFI search window from $GDBTOOLS_%s: %s-%s"
-                        % (_k, fmt(_r[0]), fmt(_r[1])))
-                return _r
+        _r = config.get(_k)
+        if _r:
+            LOG.add("UEFI search window from $GDBTOOLS_%s: %s-%s"
+                    % (_k, fmt(_r[0]), fmt(_r[1])))
+            return _r
     out = execstr("monitor info mtree -f")
     if not out:
         return None
@@ -484,6 +481,7 @@ def _x86_find_bzimages(sess):
 
 class X86_64(X86_64Common, KernelArch):
     entry_symbol = "startup_64"
+    image_base_symbol = "_text"         # startup_64 sits in .init.text on newer kernels
     # x86 KASLR randomizes the PHYSICAL base, not just the virtual one: the
     # decompressor picks a slot anywhere in usable RAM, and measured boots have
     # landed hundreds of megabytes apart.  Whoever supplies $GDBTOOLS_PHYS_WINDOW
@@ -563,9 +561,13 @@ class X86_64(X86_64Common, KernelArch):
             return None
         for i in range(len(blob) - 2):
             if blob[i] == 0x0F and blob[i + 1] == 0x22 and (blob[i + 2] & 0xF8) == 0xD8:
-                return {"pa": (base + i) & MASK, "link": (link + i) & MASK,
-                        "desc": "startup_64+0x%x: mov %%r%d,%%cr3  (installs early_top_pgt)"
-                                % (i, blob[i + 2] & 0x07)}
+                # A REX.B prefix selects r8..r15 and is where the instruction starts.
+                rex = i > 0 and 0x40 <= blob[i - 1] <= 0x4F
+                at = i - 1 if rex else i
+                gpr = _GPR64[(blob[i + 2] & 7) + (8 if rex and blob[i - 1] & 1 else 0)]
+                return {"pa": (base + at) & MASK, "link": (link + at) & MASK,
+                        "desc": "startup_64+0x%x: mov %%%s,%%cr3  (installs early_top_pgt)"
+                                % (at, gpr)}
         return None
 
     def find_crossing(self, sess):
@@ -673,13 +675,11 @@ class X86_64(X86_64Common, KernelArch):
         cv = sess._compressed_vmlinux()
         if cv is None:
             return None
-        # Which walk applies is the launcher's to state, not this package's to guess:
-        # $GDBTOOLS_X86_DECOMP_PA is where a DIRECT boot's decompressor is loaded, and
-        # only a direct boot has one.  It cannot be decided by looking either -- with
-        # `-kernel` the option ROM copies the image there during boot, so at the reset
-        # vector the address is legitimately empty and the breakpoint is what waits
-        # for it.
-        load = _env_int("X86_DECOMP_PA")
+        # Which walk applies is the launcher's to state: $GDBTOOLS_X86_DECOMP_PA is
+        # where a DIRECT boot's decompressor is loaded, and only a direct boot has
+        # one.  It cannot be decided by looking -- at the reset vector the address is
+        # legitimately empty.  An invalid value raises rather than picking a walk.
+        load = config.get("X86_DECOMP_PA")
         if load is None:
             return self.recover_kaslr_base_efi(sess)
         offs = _x86_decomp_offsets(cv)
@@ -748,17 +748,23 @@ class X86_64(X86_64Common, KernelArch):
                 % (cr0, efer, cr4, la57))
 
     def auto_calibrate(self, sess):
-        # Kernel-text window: VA = PA - phys_base + KBASE  =>  PA-VA = phys_base-KBASE.
-        # Under nokaslr phys_base==0 -> offset == -KBASE.  Refine if readable.
-        pb = 0
-        if self.pc_is_virtual():
-            v = evi("phys_base")
-            if v is not None:
-                pb = v
-        return (pb - self.KBASE) & MASK
-        # No sysreg override: ksr falls through to gdb ($cr0 etc., which QEMU 11
-        # exposes as flag registers) then the QEMU monitor -- with an honest source
-        # label instead of an opaque "[via arch]".
+        """PA - linkVA for a kernel running from its high map, or None.
+
+        The text mapping is runtimeVA = PA - phys_base + KBASE, and runtimeVA =
+        linkVA + slide, so PA - linkVA = phys_base - KBASE + slide.  phys_base is read
+        at its RUNTIME VA, using the slide the page tables show; anything unreadable
+        refuses rather than assuming phys_base 0.  With pc still physical nothing here
+        says where the image sits, so that refuses too."""
+        if not self.pc_is_virtual():
+            return None
+        slide = self.detect_kaslr_slide(sess)
+        pbv = symval("phys_base")
+        if slide is None or pbv is None:
+            return None
+        pb = evi("*(unsigned long long *)0x%x" % ((pbv - sess.kaslr_slide + slide) & MASK))
+        if pb is None:
+            return None
+        return (pb - self.KBASE + slide) & MASK
 
     def return_addr(self):
         # x86 has no link register; a freshly-called function's return address is

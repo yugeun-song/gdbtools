@@ -154,14 +154,15 @@ class Arm64(Arm64Common, KernelArch):
                 "%s=0x%x -> M(bit0)=%d" % (name, v, int(on)))
 
     def auto_calibrate(self, sess):
+        # A physical pc does not say where the image starts; refuse (see base).
         pc = reg("pc")
-        if pc is not None and not self._is_va(pc):
-            va = symval(self.entry_symbol)
-            return None if va is None else (pc - va) & MASK
+        if pc is None or not self._is_va(pc):
+            return None
         # Attached post-MMU (pc is a VA): kimage_voffset = VA - PA for the image,
-        # so PA-VA = -kimage_voffset.  Set by the time start_kernel runs.
+        # so PA-VA = -kimage_voffset.  Read at the LINK address: right for an unslid
+        # kernel; under KASLR that address is normally unmapped and the read fails.
         kv = evi("kimage_voffset")
-        return None if kv is None else (-kv) & MASK
+        return None if not kv else (-kv) & MASK
 
     def detect_kaslr_slide(self, sess):
         # arm64: slide = kimage_voffset + offset, where
@@ -426,8 +427,8 @@ class Arm64(Arm64Common, KernelArch):
             return "[%s]" % " ".join(letters)
         if n == "tcr":
             t0, t1 = value & 0x3F, (value >> 16) & 0x3F
-            return "T0SZ=%d (VA %d-bit)  T1SZ=%d (VA %d-bit)" % (
-                t0, 64 - t0, t1, 64 - t1)
+            return "T0SZ=%d (%s)  T1SZ=%d (%s)" % (
+                t0, _txsz_reading("TTBR0", t0), t1, _txsz_reading("TTBR1", t1))
         return None
 
     # --- page-table walk (4KB granule / up to 4 levels, TCR-driven) -------
@@ -453,6 +454,7 @@ class Arm64(Arm64Common, KernelArch):
         call's behind: an explicit `kpgd <PA>` issued after a successful live
         dump would otherwise decode the named table with the shape of a regime it
         has nothing to do with, and print it as if it had been read."""
+        self._ptcfg_invalid = None             # set below only when TCR was read
         el = self._cur_el()
         if el is None:
             self._ptcfg = {}
@@ -466,11 +468,18 @@ class Arm64(Arm64Common, KernelArch):
         # the architecture, not a typo.
         tsz = ((tcr >> 16) & 0x3F) if is_ttbr1 else (tcr & 0x3F)
         tg = ((tcr >> 30) & 3) if is_ttbr1 else ((tcr >> 14) & 3)
-        page_shift = ({1: 14, 2: 12, 3: 16}.get(tg, 12) if is_ttbr1
-                      else {0: 12, 1: 16, 2: 14}.get(tg, 12))
-        stride = page_shift - 3
+        page_shift = (self._TG1_SHIFT if is_ttbr1 else self._TG0_SHIFT).get(tg)
         lo, hi = _txsz_bounds()
-        va_bits = 64 - tsz if lo <= tsz <= hi else 48
+        if page_shift is None or not (lo <= tsz <= hi):
+            # A reserved granule or an unset TxSZ is no shape at all (u-boot leaves
+            # T1SZ=0 with TTBR1 walks disabled); refuse instead of assuming one.
+            self._ptcfg = {}
+            self._ptcfg_invalid = "TCR_EL%d %s=%d, TG=%d describe no paging shape" % (
+                el, "T1SZ" if is_ttbr1 else "T0SZ", tsz, tg)
+            return False
+        self._ptcfg_invalid = None
+        stride = page_shift - 3
+        va_bits = 64 - tsz
         addr_bits = max(va_bits - page_shift, stride)
         nlevels = (addr_bits + stride - 1) // stride
         # Is the other half shaped the same?  Cheap: the same register is already
@@ -478,8 +487,7 @@ class Arm64(Arm64Common, KernelArch):
         # this half.
         _otsz = (tcr & 0x3F) if is_ttbr1 else ((tcr >> 16) & 0x3F)
         _otg = ((tcr >> 14) & 3) if is_ttbr1 else ((tcr >> 30) & 3)
-        _ops = ({0: 12, 1: 16, 2: 14}.get(_otg, 12) if is_ttbr1
-                else {1: 14, 2: 12, 3: 16}.get(_otg, 12))
+        _ops = (self._TG0_SHIFT if is_ttbr1 else self._TG1_SHIFT).get(_otg)
         self._ptcfg = {"page_shift": page_shift, "nlevels": nlevels,
                        "stride": stride,
                        "top_shift": page_shift + (nlevels - 1) * stride,
@@ -499,7 +507,14 @@ class Arm64(Arm64Common, KernelArch):
         tcr = self.sysreg("TCR_EL%d" % el)
         if tcr is None:
             return False
-        if el == 3 or (el == 2 and not ((self.sysreg("HCR_EL2") or 0) >> 34) & 1):
+        if el == 2:
+            hcr = self.sysreg("HCR_EL2")
+            if hcr is None:
+                # E2H decides TCR_EL2's layout; unknown, so claim no 52-bit base.
+                LOG.add("arm64: HCR_EL2 unreadable at EL2; TTBR read as a 48-bit base")
+                return False
+            nvhe = not ((hcr >> 34) & 1)
+        if el == 3 or (el == 2 and nvhe):
             return ((tcr >> 16) & 7) == 6
         return ((tcr >> 32) & 7) == 6
 
@@ -547,9 +562,11 @@ class Arm64(Arm64Common, KernelArch):
         if base == 0:
             return None
         if not self.pt_config_probe(is_ttbr1):
-            # TCR unreadable while the MMU is on: the table exists but its shape
-            # is unknown.  Say so instead of decoding it as 4KB/4-level, which is
-            # right on this lab's machines and wrong on a 16K or 64K granule one.
+            if getattr(self, "_ptcfg_invalid", None):
+                LOG.add("arm64 pt_base: refusing -- " + self._ptcfg_invalid)
+                return None                    # TCR read: this half has no shape
+            # TCR unreadable while the MMU is on: decode as 4KB/4-level, recorded as
+            # assumed so pt_config_desc() says so.
             self._ptcfg = {"page_shift": 12, "nlevels": 4, "stride": 9,
                            "top_shift": 39, "start": 0, "probed": False}
         return (label, base)

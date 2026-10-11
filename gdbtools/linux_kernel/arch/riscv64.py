@@ -81,7 +81,7 @@ class Riscv64(Riscv64Common, KernelArch):
             return None
         foff = evi("(unsigned long long)&((struct kernel_mapping*)0)->virt_addr")
         if foff is None:
-            foff = _env_int("RISCV_KERNEL_MAP_VIRT_OFF")
+            foff = config.get("RISCV_KERNEL_MAP_VIRT_OFF")
             if foff is None:
                 LOG.add("riscv kaslr: struct kernel_mapping has no DWARF here and "
                         "GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF is unset")
@@ -178,16 +178,16 @@ class Riscv64(Riscv64Common, KernelArch):
                 "satp=0x%x -> MODE=%d (%s)" % (satp, mode, info[0]))
 
     def auto_calibrate(self, sess):
+        # A physical pc does not say where the image starts; refuse (see base).
         pc = reg("pc")
-        if pc is not None and not self._is_va(pc):
-            va = symval(self.entry_symbol)
-            return None if va is None else (pc - va) & MASK
+        if pc is None or not self._is_va(pc):
+            return None
         # Attached post-MMU (pc is a VA): kernel_map.va_kernel_pa_offset = VA - PA
-        # for the kernel image, so PA-VA = -that.  (riscv linear map uses
-        # va_pa_offset; for symbolizing image code the kernel offset is correct.)
+        # for the kernel image, so PA-VA = -that.  Read at the LINK address: right
+        # for an unslid kernel; under KASLR that address is normally unmapped.
         for sym in ("kernel_map.va_kernel_pa_offset", "va_kernel_pa_offset"):
             v = evi(sym)
-            if v is not None:
+            if v:
                 return (-v) & MASK
         return None
 

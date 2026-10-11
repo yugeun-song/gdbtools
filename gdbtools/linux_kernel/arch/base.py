@@ -17,26 +17,10 @@ from ..pwndbg_glue import PWN
 from ..target import TARGET
 
 
-def _parse_range(text, name):
-    """'lo:hi' -> (lo, hi), or None after saying why.  A range that was supplied
-    and does not parse is a mistake worth hearing about: dropped silently, the
-    caller proceeds as though nothing was supplied and the operator never learns
-    their value was ignored."""
-    if ":" in text:
-        lo, hi = text.split(":", 1)
-        try:
-            return (int(lo, 0) & MASK, int(hi, 0) & MASK)
-        except Exception:
-            pass
-    msg = ("%s%s is set to %r, which is not a 'lo:hi' range; ignoring it"
-           % (_ENV_PREFIX, name, text))
-    LOG.add(msg)
-    print("[%s] %s" % (NAME, msg))
-    return None
-
-
 class KernelArch:
     entry_symbol = None          # symbol whose PA == $pc at the first frozen stop
+    image_base_symbol = None     # what an image-base PA (ENTRY_PA, info roms) locates;
+                                 # None: the entry symbol itself
     entry_break_kind = "hw"      # "sw": entry not overwritten -> sw bp ok; "hw":
                                  # entry gets relocated over, so a sw bp is clobbered
     entry_magic = None           # (word, offset_from_text): scan RAM for the Image
@@ -70,16 +54,11 @@ class KernelArch:
     def eff_phys_window(self):
         """The physical range the kernel image may plausibly sit in, or None.
 
-        Supplied, never assumed: $GDBTOOLS_PHYS_WINDOW ("lo:hi") or the machine
-        profile.  With neither, the sanity check that uses this has nothing to
-        check against and the caller skips it rather than testing against a range
-        that describes some other board."""
-        pw = _env("PHYS_WINDOW")
-        if pw:
-            r = _parse_range(pw, "PHYS_WINDOW")
-            if r:
-                return r
-        return TARGET.phys_window(self)
+        Supplied, never assumed: $GDBTOOLS_PHYS_WINDOW or the machine profile/DTB.
+        With neither, the sanity check that uses this is skipped rather than run
+        against a range that describes some other board."""
+        pw = config.get("PHYS_WINDOW")
+        return pw if pw is not None else TARGET.phys_window(self)
 
     # --- locate the kernel entry PA (scan the Image magic, else the hint) ---
     # 128 MiB. Wide enough to cover every load address these boards use (arm64
@@ -91,30 +70,21 @@ class KernelArch:
     def _scan_ranges(self):
         """Candidate (start,end) physical ranges to scan for the Image magic.
 
-        Every range is supplied: $GDBTOOLS_SCAN 'lo:hi', $GDBTOOLS_RAM_BASE, the
-        JSON profile, or RAM regions read out of a DTB.  Empty when nothing was
-        supplied, which makes the scan find nothing rather than sweep a range that
-        belongs to a different board."""
-        # How far past a stated RAM base to look when only a base is known.  A
-        # scan span is a cost/coverage tunable, not a property of any board, so it
-        # is a named default with an override rather than a literal repeated at two
-        # use sites: a board that loads its kernel further in can say so instead of
-        # having the scan quietly stop short of it and report "not found".
-        span_default = _env_int("SCAN_SPAN")
-        if span_default is None:
-            span_default = self.SCAN_SPAN_DEFAULT
-
+        Every range is supplied: $GDBTOOLS_SCAN (which replaces all the others),
+        $GDBTOOLS_RAM_BASE, the profile's `scan` (which replaces the RAM-derived
+        ranges) or RAM regions read out of the profile/DTB.  Empty when nothing was
+        supplied, so the scan finds nothing rather than sweeping another board's RAM."""
+        sc = config.get("SCAN")
+        if sc is not None:
+            return [sc]
+        span_default = config.get("SCAN_SPAN") or self.SCAN_SPAN_DEFAULT
         out = []
-        sc = _env("SCAN")
-        if sc:
-            r = _parse_range(sc, "SCAN")
-            if r:
-                out.append(r)
-        rb = _env_int("RAM_BASE")
+        rb = config.get("RAM_BASE")
         if rb is not None:
             out.append((rb, (rb + span_default) & MASK))
-        # profile / DTB supplied machine RAM (non-QEMU boards)
-        out.extend(TARGET.scan_ranges())
+        prof = TARGET.scan_ranges()
+        if prof:
+            return out + prof
         for base, size in TARGET.ram_regions(self):
             # A DTB states the real size; use it when it is smaller than the
             # default sweep, and cap at the default when a region is huge, so a
@@ -126,29 +96,23 @@ class KernelArch:
     def discover_load_pa(self):
         """Ask QEMU where it ACTUALLY loaded the kernel image -- fully dynamic,
         no magic and no hardcoded address (works when -kernel is loaded in place,
-        i.e. arm64/riscv).  Parses 'monitor info roms': the kernel is the rom whose
-        name matches the image, else the largest mem=ram rom that is not the
-        bootloader / dtb / fw rom.  On a non-QEMU stub this yields None and the
-        caller falls back to the DTB/profile-driven scan."""
+        i.e. arm64/riscv).  Parses 'monitor info roms': the kernel is the RAM rom whose
+        FILE name is a kernel image.  When none is named like one this answers None
+        (the caller scans for the magic) rather than picking a likely rom.  A
+        non-QEMU stub yields None as well."""
         out = execstr("monitor info roms")
         if not out:
             return None
-        best, best_sz = None, -1
         for line in out.splitlines():
             m = re.search(r"addr=([0-9a-fA-F]+)\s+size=(0x[0-9a-fA-F]+)\s+"
                           r"mem=ram\s+name=\"([^\"]*)\"", line)
             if not m:
                 continue
-            addr, sz, name = int(m.group(1), 16) & MASK, int(m.group(2), 16), m.group(3)
-            if any(k in name for k in ("Image", "bzImage", "vmlinux")):
+            addr, name = int(m.group(1), 16) & MASK, m.group(3)
+            if any(k in os.path.basename(name) for k in ("Image", "vmlinux", "vmlinuz")):
                 LOG.add("load PA %s from 'info roms' name=%s" % (fmt(addr), name))
                 return addr
-            low = name.lower()
-            if sz > best_sz and not any(k in low for k in ("bootloader", "dtb", "rom@", "fw")):
-                best, best_sz = addr, sz
-        if best is not None:
-            LOG.add("load PA %s from 'info roms' (largest ram rom)" % fmt(best))
-        return best
+        return None
 
     def find_entry_pa(self):
         # 0. machine descriptor (JSON profile) pins the image-base PA -- highest
@@ -275,14 +239,9 @@ class KernelArch:
 
     # --- calibration: return offset (PA - VA) mod 2^64, or None ---
     def auto_calibrate(self, sess):
-        pc = reg("pc")
-        if pc is None:
-            return None
-        if not self._is_va(pc):
-            va = symval(self.entry_symbol) if self.entry_symbol else None
-            return None if va is None else (pc - va) & MASK
-        # pc is already a VA (attached post-MMU, e.g. at start_kernel): subclasses
-        # may recover the image offset from a kernel variable; base class cannot.
+        """PA - linkVA read out of the running kernel, or None.  A physical pc alone
+        does not say where the image starts (only `kearly calibrate SYM` asserts
+        that), so the base class has nothing to read."""
         return None
 
     def detect_kaslr_slide(self, sess):
@@ -616,9 +575,9 @@ class KernelArch:
         PHYSICAL memory (one monitor read per node), so it works with the MMU on
         OR off.  Bounded by cap_* against a pathological/looping tree."""
         if cap_leaves is None:
-            cap_leaves = _env_int("MAP_CAP_LEAVES") or self.MAP_CAP_LEAVES
+            cap_leaves = config.get("MAP_CAP_LEAVES") or self.MAP_CAP_LEAVES
         if cap_nodes is None:
-            cap_nodes = _env_int("MAP_CAP_NODES") or self.MAP_CAP_NODES
+            cap_nodes = config.get("MAP_CAP_NODES") or self.MAP_CAP_NODES
         names = self.pt_levels()
         nlevels = len(names)
         if not nlevels:
@@ -631,7 +590,7 @@ class KernelArch:
             if state["nodes"] >= cap_nodes or len(leaves) >= cap_leaves:
                 return
             state["nodes"] += 1
-            words = read_phys_words(tbl, self.pt_entries())
+            words = read_phys_words(tbl, self.pt_entries(top=(level == 0)))
             if not words:
                 return
             shift = shifts[level]
