@@ -153,8 +153,9 @@ Attach to a frozen kernel and calibrate:
 (gdb) kearly bootbreak
 ```
 
-Or export `GDBTOOLS_AUTO=1` before starting gdb and all of that happens on
-attach. Boards that QEMU cannot describe take a JSON profile through
+Or export `GDBTOOLS_AUTO=1` before starting gdb: `kearly on` then arms itself the
+moment a kernel image is loaded (a launcher adds `kearly bootbreak`). Boards that
+QEMU cannot describe take a JSON profile through
 `$GDBTOOLS_PROFILE` (see `profiles/`) or a device tree through `$GDBTOOLS_DTB`.
 
 `docs/early-boot.md` is the full manual: calibration, MMU regimes, page tables,
@@ -185,8 +186,8 @@ a kernel that adds a flag is described correctly without being taught about, and
 one that carries no enum has its flags printed raw with that said out loud.
 
 After `mem_init()` the arrays survive only where `CONFIG_ARCH_KEEP_MEMBLOCK` is
-set. arm64 and riscv select it; x86_64 does not, since the only symbol that
-selects it there is `INTEL_TDX_HOST`. 6.x sets `memblock_memory` to NULL in
+set. arm64 selects it always, riscv only with `ACPI` (6.12) or `ACPI`/`KEXEC`
+(mainline), x86_64 only for `INTEL_TDX_HOST`. 6.x sets `memblock_memory` to NULL in
 `memblock_discard()`, so the freed case is reported rather than printed as a
 memory map; 4.6 has no such pointer and the answer is then honestly unknown.
 
@@ -201,32 +202,45 @@ board boots at 0x40200000" is right until the day it is not, and on that day it
 produces a session that looks calibrated while every address is quietly off.
 
 Everything arrives as a `GDBTOOLS_`-prefixed environment variable set before gdb
-starts. There is no second spelling and no search path.
+starts. There is no second spelling and no search path. Each one is parsed by its
+type; a variable that is **set** and does not parse is a loud error naming the
+variable and the value, not a silent fall-through to another source. Unset keeps
+the default. The table is the one declared in `gdbtools/common/config.py` (checked
+with `python3 -B -m gdbtools.common.config --check README.md`).
 
-| variable | what it states |
-| --- | --- |
-| `GDBTOOLS_AUTO` | arm the kernel session on attach: stop hook, shadow symbols, MMU-transition notices. Without it nothing hooks the session and `kearly on` is manual |
-| `GDBTOOLS_ENTRY_PA` | physical address of the kernel image base, for when the target cannot report it. On x86_64 you either pin a base you already know here, or leave it unset so the decompressor recovery below finds the relocated one — the two are exclusive, and a pinned value suppresses the recovery |
-| `GDBTOOLS_SCAN` | `lo:hi` physical range to search for the image magic |
-| `GDBTOOLS_RAM_BASE` | RAM base, as a shorthand for a scan range starting there |
-| `GDBTOOLS_PHYS_WINDOW` | `lo:hi` range the image may plausibly occupy, for the sanity check. Absent, the check is skipped rather than run against some other board's range |
-| `GDBTOOLS_PROFILE` | JSON machine description (see `profiles/`) |
-| `GDBTOOLS_DTB` | device tree blob describing the board |
-| `GDBTOOLS_PRESET` | boot-combination preset: firmware entry symbol and breakpoint kind |
-| `GDBTOOLS_ANCHOR` | calibration anchor symbol, overriding the preset |
-| `GDBTOOLS_BREAK_KIND` | `sw` or `hw` for the entry breakpoint |
-| `GDBTOOLS_X86_KASLR` | recover the decompressor-randomized physical base on attach |
-| `GDBTOOLS_X86_DECOMP_PA` | where the bzImage decompressor is loaded, for a direct boot. A firmware chain does not load it that way and needs no value here |
-| `GDBTOOLS_X86_DECOMP_VMLINUX` | path to `arch/x86/boot/compressed/vmlinux`, which KASLR recovery reads |
-| `GDBTOOLS_NO_COLOR`, `GDBTOOLS_KDIS_ASCII` | plain output, for terminals that need it |
-| `GDBTOOLS_DEBUG` | report every exception the safety layer swallows on gdb's stderr, naming the function it came from. A `NameError`, `AttributeError` or `TypeError` is reported even without it, once per site, since those are bugs in this package rather than conditions of the target |
-| `GDBTOOLS_BINUTIL_NM`, `GDBTOOLS_BINUTIL_OBJDUMP` | the `nm` / `objdump` to run for the x86 decompressor parse. Unset means the plain name and the usual `$PATH` lookup; state one where binutils is elsewhere, or where the host's cannot read the target's ELF |
-| `GDBTOOLS_SCAN_SPAN` | how far past a stated `RAM_BASE` (or a DTB `/memory` base) to scan for the image magic. Default 128 MiB, which covers arm64's TEXT_OFFSET, riscv's 2 MB-aligned convention and x86's 16 MB. `GDBTOOLS_SCAN` replaces the range outright |
-| `GDBTOOLS_MAP_CAP_LEAVES`, `GDBTOOLS_MAP_CAP_NODES` | traversal caps for `mmview`'s page-table walk. Not correctness limits -- they stop a corrupt or circular table from being read forever, and `mmview` says when it truncated |
-| `GDBTOOLS_MEMBLOCK_CAP` | how many regions `kmemblock` prints per type before truncating. Default 512; `kmemblock TYPE full` lifts it for one call |
-| `GDBTOOLS_FZF`, `GDBTOOLS_FZF_OPTS` | the fzf binary `fz` runs, and options appended to its arguments. Unset means the plain name and the usual `$PATH` lookup; `fz` degrades to a numbered prompt and then to a listing when it is not there |
-| `GDBTOOLS_FZ_KEY` | a readline key spec, optionally with a subject (`\C-t`, `\C-r history`, `\e[15~ commands`), bound to `fz` when gdbtools loads. Unset binds nothing |
-| `GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF` | byte offset of `virt_addr` inside `struct kernel_mapping`, for a riscv vmlinux built without DWARF. It is **not** a constant -- 8 on 6.12, 0 on mainline -- so with neither DWARF nor this value the KASLR slide is reported as unknown rather than computed from a guess |
+<!-- gdbtools-env:begin -->
+| variable | type | meaning |
+| --- | --- | --- |
+| `GDBTOOLS_AUTO` | bool | arm the kernel session once a kernel image is loaded: stop hook, shadow symbols, MMU-transition notices. Unset: `kearly on` is manual |
+| `GDBTOOLS_ENTRY_PA` | address | physical address of the kernel image base. On x86_64 a stated base suppresses the decompressor recovery |
+| `GDBTOOLS_SCAN` | range | physical range searched for the image magic; replaces every derived range |
+| `GDBTOOLS_RAM_BASE` | address | RAM base; the scan covers `SCAN_SPAN` bytes from it |
+| `GDBTOOLS_SCAN_SPAN` | count | bytes scanned past `RAM_BASE` or a DTB `/memory` base. Default 128 MiB |
+| `GDBTOOLS_PHYS_WINDOW` | range | physical range the image may occupy, for the calibration sanity check. Unset: the check is skipped |
+| `GDBTOOLS_PROFILE` | file | JSON machine description (see `profiles/`), validated field by field |
+| `GDBTOOLS_DTB` | file | device tree blob describing the board |
+| `GDBTOOLS_PRESET` | preset name | boot-combination preset (`kearly preset list`) |
+| `GDBTOOLS_ANCHOR` | symbol | calibration and entry-break anchor symbol, overriding the preset |
+| `GDBTOOLS_BREAK_KIND` | `sw` \| `hw` | breakpoint kind for the entry break |
+| `GDBTOOLS_X86_KASLR` | bool | recover the decompressor-randomized physical base in `kearly bootbreak` |
+| `GDBTOOLS_X86_DECOMP_PA` | address | where a direct boot loads the bzImage decompressor; selects the direct-boot recovery. Unset: the EFI-stub recovery |
+| `GDBTOOLS_X86_DECOMP_VMLINUX` | file | `arch/x86/boot/compressed/vmlinux`, read by the x86 base recovery |
+| `GDBTOOLS_BINUTIL_NM` | program | `nm` for the x86 decompressor parse. Unset: `nm` on `$PATH` |
+| `GDBTOOLS_BINUTIL_OBJDUMP` | program | `objdump` for the same parse. Unset: `objdump` on `$PATH` |
+| `GDBTOOLS_NO_COLOR` | bool | monochrome `cfgdis` and pwndbg flow panel |
+| `GDBTOOLS_KDIS_ASCII` | bool | ASCII arrows in `cfgdis` and the pwndbg flow panel |
+| `GDBTOOLS_DEBUG` | bool | report every exception the safety layer swallows on gdb's stderr; NameError, AttributeError and TypeError are reported regardless |
+| `GDBTOOLS_MAP_CAP_LEAVES` | count | `mmview` leaf cap (default 20000); `mmview` says when it truncated |
+| `GDBTOOLS_MAP_CAP_NODES` | count | `mmview` table-node cap (default 60000) |
+| `GDBTOOLS_MEMBLOCK_CAP` | count | regions `kmemblock` prints per type (default 512); `kmemblock TYPE full` lifts it |
+| `GDBTOOLS_FZF` | program | fzf binary for `fz`. Unset: `fzf` on `$PATH`, else a numbered prompt |
+| `GDBTOOLS_FZF_OPTS` | words | options appended to fzf's arguments |
+| `GDBTOOLS_FZ_KEY` | key [subject] | readline key, optionally with a subject (`\C-t`, `\C-r history`), bound to `fz` at load |
+| `GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF` | int | offset of `virt_addr` in `struct kernel_mapping`, for a riscv vmlinux without DWARF (8 on 6.12, 0 on mainline) |
+<!-- gdbtools-env:end -->
+
+Booleans take `1/0`, `true/false`, `yes/no` or `on/off` (case-insensitive) and
+reject anything else; a range is `lo:hi` with `lo < hi`.
 
 ### Install it as a library, not globally
 
@@ -333,7 +347,10 @@ memory. Those are readings, not guesses.
 
 **Required**
 
-- `gdb` built with Python 3 support. Check with `gdb --configuration | grep python`.
+- `gdb` built with Python 3 support whose Python layer starts. Check with
+  `gdb -nx -batch -ex 'python gdb.VERSION'`; `--configuration` still lists
+  Python for a cross gdb older than the data directory it shares with the host
+  gdb, and that gdb fails here.
 
 **Optional, detected rather than assumed**
 

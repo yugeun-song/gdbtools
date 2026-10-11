@@ -71,7 +71,7 @@ ones that matter here, with their in-session equivalents:
 | setting | effect |
 |---|---|
 | `target remote :PORT` | connect to the gdbstub (a plain gdb command) |
-| `GDBTOOLS_AUTO=1` | run `kearly on`, `kearly bootbreak` and `kearly status` on attach |
+| `GDBTOOLS_AUTO=1` | arm `kearly on` once a kernel image is loaded (a launcher such as kbuildlab also runs `kearly bootbreak`) |
 | `GDBTOOLS_PRESET=NAME`, or `kearly preset NAME` | boot-combination preset (arm64-uefi, x86-pvh, riscv-uefi …) |
 | `GDBTOOLS_ENTRY_PA`, `GDBTOOLS_ANCHOR`, `GDBTOOLS_BREAK_KIND`, `GDBTOOLS_RAM_BASE`, `GDBTOOLS_SCAN`, or `kearly entry`, `kearly anchor`, `kearly break` | manually specify a combination that is not auto-detected |
 | `GDBTOOLS_PROFILE=FILE.json`, `GDBTOOLS_DTB=FILE`, or `kearly profile FILE`, `kearly dtb FILE` | inject a machine descriptor for a non-QEMU board |
@@ -711,8 +711,10 @@ Dump of assembler code for function memchr
 
 ### Automatic context section — `$GDBTOOLS_AUTO` only (`flow` = radare2 arrow window, parallel to pwndbg disasm)
 
-When attached via `$GDBTOOLS_AUTO`, the tool **adds only two sections (`kgdb`·`flow`) to pwndbg** —
-**it removes or changes none of pwndbg's defaults.** So **two disasm windows come up side by side, each independent**:
+When attached via `$GDBTOOLS_AUTO`, the tool **adds three sections (`kgdb`·`msysreg`·`flow`) to pwndbg**
+and changes two pwndbg settings it restores on `kearly off` — `auto-explore-pages` off (its probe can
+crash a QEMU target), and on arm64 `emulate` off (its disasm can SIGABRT gdb). The `flow` window runs
+**beside pwndbg's own disasm, each independent**:
 
 - **`[ DISASM / … / set emulate on ]`** — pwndbg's own window. Fully untouched, so its emulation (`X3 => 4`,
   `CPSR` flags, `✔`/`✘` branch prediction, telescope) and colors are all as-is. Hang-prone spots (`_text` etc.) are handled by
@@ -1373,7 +1375,7 @@ so "observed == expected" holds even if the slide is wrong. Two witnesses outsid
 
 | architecture | paging | levels | validation |
 |---|---|---|---|
-| arm64 v4.6 | 4KB/48-bit | 4 | kpt (initial 2MB block · runtime 4KB page both kv2p MATCH), kpgd, mmview, kcensus(88), panel, chaindepth |
+| arm64 v4.6 | 4KB/39-bit | 3 | kpt (initial 2MB block · runtime 4KB page both kv2p MATCH), kpgd, mmview, kcensus(88), panel, chaindepth |
 | x86_64 v6.12 (LA57) | 5-level | 5 | kpt/mmview 5-level, kernel filter |
 | x86_64 v6.12 (`no5lvl`) | 4-level | 4 | kpt PML4→PDPT→PD, kv2p MATCH |
 | riscv64 v6.12 | Sv57 | 5 | kpt L4→L1 BLOCK kv2p MATCH, mmview, kcensus(21 CSR) |
