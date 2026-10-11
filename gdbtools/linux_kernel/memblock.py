@@ -109,9 +109,9 @@ def _liveness():
     freed, because it has a second cause.
 
     memblock_discard() is a real function only where ARCH_KEEP_MEMBLOCK is
-    unset -- x86_64 here, since the only symbol selecting it is INTEL_TDX_HOST.
-    arm64 and riscv compile it to an empty static inline, so the symbol does not
-    exist and nothing there can ever NULL the pointer.
+    unset: x86_64 selects it only for INTEL_TDX_HOST, arm64 always, riscv only
+    with ACPI (6.12) or ACPI || KEXEC (mainline).  Where it is set the function is
+    an empty static inline, the symbol is absent, and nothing can NULL the pointer.
 
     And a CONFIG_RELOCATABLE riscv64 image keeps a relocated pointer's value in
     the RELA addend rather than in .data, so `memblock_memory` reads 0 from
@@ -153,19 +153,19 @@ reserved is what has been claimed back out of it: the kernel image, the initrd,
          the DT, the early page tables, every memblock_alloc so far.
 
 Valid from the kernel's first instruction until mem_init().  After that it
-depends on CONFIG_ARCH_KEEP_MEMBLOCK -- arm64 and riscv select it, x86_64 does
-not -- and this says which case it is looking at rather than printing a freed
-array as if it were live."""
+depends on CONFIG_ARCH_KEEP_MEMBLOCK -- arm64 selects it, riscv with ACPI (or
+KEXEC on mainline), x86_64 only for TDX -- and this says which case it is looking
+at rather than printing a freed array as if it were live."""
 
     def __init__(self, name="kmemblock"):
         super(KMemblock, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         parts = (arg or "").split()
         full = any(p.lower() == "full" for p in parts)
         want = [p for p in parts if p.lower() != "full"]
-        cap = _env_int("MEMBLOCK_CAP") or CAP
+        cap = config.get("MEMBLOCK_CAP") or CAP
 
         mb = ev("memblock")
         if mb is None:

@@ -543,7 +543,7 @@ dead memory-read path can never take the session down."""
     def __init__(self, name="kdtb"):
         super(KDtb, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         toks = (arg or "").split()
         opts = {"header": False, "rsv": False, "tree": False, "hex": False,
@@ -759,4 +759,4 @@ dead memory-read path can never take the session down."""
 __all__ = ['FDT_MAGIC', 'FDT_BEGIN_NODE', 'FDT_END_NODE', 'FDT_PROP', 'FDT_NOP',
            'FDT_END', 'FdtError', 'FdtStats', 'fdt_parse_header', 'fdt_header_notes',
            'fdt_reservations', 'fdt_walk', 'fdt_format_value', 'fdt_dump_lines',
-           'fdt_tree_lines', 'fdt_collect', 'fdt_locate', 'KDtb']
+           'fdt_tree_lines', 'fdt_collect', 'KDtb']

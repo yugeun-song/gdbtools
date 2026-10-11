@@ -107,7 +107,7 @@ Subcommands:
     def __init__(self, name="kearly"):
         super(KEarly, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         args = (arg or "").split()
         sub = args[0].lower() if args else "status"
@@ -143,10 +143,15 @@ Subcommands:
                 SESSION.clear_calibration()
         elif sub == "entry":
             if len(args) > 1 and args[1].lower() not in ("-", "auto"):
-                SESSION.entry_pa = evi(args[1])
+                v = evi(args[1])
+                if v is None:
+                    print("usage: kearly entry <image-base PA | auto>   ('%s' did not evaluate)"
+                          % args[1])
+                    return
+                SESSION.entry_pa = v
                 # A stated entry is an answer: the x86 guards stand down for it the
                 # same way they do for $GDBTOOLS_ENTRY_PA.
-                SESSION._entry_pinned = SESSION.entry_pa is not None
+                SESSION._entry_pinned = True
                 print("[%s] entry (image-base) PA = %s" % (NAME, fmt(SESSION.entry_pa)))
             else:
                 SESSION.entry_pa = None
@@ -286,7 +291,9 @@ Subcommands:
         if arg == "show":
             self._show_target()
         elif arg in ("guest", "auto"):
-            TARGET.try_guest_dtb(SESSION.ensure_arch())
+            why = TARGET.try_guest_dtb(SESSION.ensure_arch())
+            if why:
+                print("[%s] kearly dtb guest: %s" % (NAME, why))
             SESSION.entry_pa = None          # a freshly-read DTB can change the scan
             self._show_target()
         else:
@@ -326,7 +333,7 @@ class P2V(gdb.Command):
     def __init__(self, name="kp2v"):
         super(P2V, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         pa = evi(arg)
         if pa is None:
@@ -352,7 +359,7 @@ class V2P(gdb.Command):
     def __init__(self, name="kv2p"):
         super(V2P, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         va = evi(arg)
         if va is None:
@@ -391,7 +398,7 @@ Usage:  kb SYMBOL  |  kb *ADDR  |  kb FILE:LINE       (remove with `delete`)"""
     def __init__(self, name="kb"):
         super(KB, self).__init__(name, gdb.COMMAND_BREAKPOINTS)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         SESSION.kb(arg)
 
@@ -419,7 +426,7 @@ cores typically expose 4).  Remove them with `delete` like any watchpoint."""
     def __init__(self, name="kw"):
         super(KW, self).__init__(name, gdb.COMMAND_BREAKPOINTS)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         SESSION.kw(arg)
 class KSr(gdb.Command):
@@ -430,7 +437,7 @@ class KSr(gdb.Command):
     def __init__(self, name="ksr"):
         super(KSr, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         name = arg.strip()
         if not name:
@@ -466,7 +473,7 @@ register the stub/monitor cannot supply shows '?' with the single-step hint."""
     def __init__(self, name="ksregs"):
         super(KSregs, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         a = SESSION.ensure_arch()
         if a is None:
@@ -521,7 +528,7 @@ the link register.  `kfin ADDR` runs to an explicit return address instead."""
             return None
         return "which is outside this kernel image (%s .. %s)" % (fmt(lo), fmt(hi))
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         a = SESSION.ensure_arch()
         if a is None:
@@ -589,7 +596,7 @@ window; `kearly msysreg off|compact|full` controls that one."""
     def __init__(self, name="kbits"):
         super(KBits, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         a = SESSION.ensure_arch()
         if a is None:
@@ -634,7 +641,7 @@ on every stop."""
     def __init__(self, name="kcensus"):
         super(KCensus, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         a = SESSION.ensure_arch()
         if a is None:
@@ -670,7 +677,7 @@ which is a different claim from the tool reading it out of a register."""
     def __init__(self, name="kpt"):
         super(KPt, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         parts = (arg or "").split()
         hexbytes = any(p.lower() in ("hex", "bytes", "raw") for p in parts)
@@ -699,12 +706,25 @@ which is a different claim from the tool reading it out of a register."""
             print(ln)
 
 
+def _take_level(parts):
+    """Pull `level N` out of an argument list -> (N or None, the rest)."""
+    low = [p.lower() for p in parts]
+    if "level" not in low:
+        return None, parts
+    i = low.index("level")
+    try:
+        return int(parts[i + 1], 0), parts[:i] + parts[i + 2:]
+    except (IndexError, ValueError):
+        raise gdb.GdbError("level needs a number (0 = the top table)")
+
+
 class KPgd(gdb.Command):
-    """kpgd [TABLE_PA] [MAXROWS] : dump the non-zero entries of a page-table page.
+    """kpgd [TABLE_PA [level N]] [MAXROWS] : dump the non-zero entries of a page-table page.
 Default: the TOP-level table (arm64 L0/PGD, x86 PML4, riscv satp root) for $pc's
 regime.  Each row shows the index, raw descriptor, type, output PA (+symbol) and
-attributes.  Pass an explicit TABLE_PA (e.g. a 'table -> 0x...' PA printed by kpt)
-to dump a specific lower level.
+attributes.  A lower-level table needs its level, because nothing in the bytes
+says which one it is: kpt prints the command for each 'table -> 0x...' it follows,
+e.g. `kpgd 0x41201000 level 1`.
 
 With no TABLE_PA this reports the LIVE tables, and it refuses when there are none:
 translation off means the base register holds the previous stage's value, not a
@@ -721,9 +741,9 @@ exactly when you want to look at what the bootloader built."""
     def __init__(self, name="kpgd"):
         super(KPgd, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
-        parts = (arg or "").split()
+        level, parts = _take_level((arg or "").split())
         # A TABLE_PA that does not evaluate must be refused, not dropped.  It used
         # to fall through to None, which is how "no argument" is spelled -- so a
         # typo answered the LIVE-table question instead, complete with a
@@ -742,26 +762,26 @@ exactly when you want to look at what the bootloader built."""
             except Exception:
                 pass
         for ln in (SESSION.pgd_dump_lines(va=reg("pc"), table_pa=table_pa,
-                                          maxrows=maxrows) or []):
+                                          maxrows=maxrows, level=level) or []):
             print(ln)
 
 
 class KPtHex(gdb.Command):
-    """kpthex [TABLE_PA] [N | full] : byte-level HEX view of a page-table page --
+    """kpthex [TABLE_PA [level N]] [N | full] : byte-level HEX view of a page-table page --
 each raw descriptor split into its 8 little-endian bytes exactly as they sit in
 physical RAM, next to the reconstructed 64-bit value and a short decode.  Default:
 the TOP-level table for $pc's regime (arm64 L0/PGD, x86 PML4, riscv satp root),
 first N non-zero entries (N=64 default).  Pass 'full' to hexdump the whole 4KB page
 (16 bytes/row, xxd-style).  Reads PHYSICAL memory via the QEMU monitor, so it works
 AFTER the MMU is on (where gdb's x / pwndbg hexdump on a physical page-table address
-fail).  TABLE_PA may be a 'table -> 0x...' PA printed by kpt."""
+fail).  A lower-level TABLE_PA takes its level as for kpgd (`level N`)."""
 
     def __init__(self, name="kpthex"):
         super(KPtHex, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
-        parts = (arg or "").split()
+        level, parts = _take_level((arg or "").split())
         full = any(p.lower() in ("full", "all", "page") for p in parts)
         parts = [p for p in parts if p.lower() not in ("full", "all", "page")]
         table_pa = None
@@ -778,7 +798,7 @@ fail).  TABLE_PA may be a 'table -> 0x...' PA printed by kpt."""
             except Exception:
                 count = None
         for ln in (SESSION.pt_hex_lines(va=reg("pc"), table_pa=table_pa,
-                                        count=count, full=full) or []):
+                                        count=count, full=full, level=level) or []):
             print(ln)
 
 
@@ -793,7 +813,7 @@ defaults to the image base (_text / _start / startup_64)."""
     def __init__(self, name="koff"):
         super(KOff, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         parts = (arg or "").strip().split()
         for ln in (SESSION.koff_lines(parts[0] if parts else None) or []):
@@ -812,8 +832,8 @@ reads through QEMU's HMP `xp` instead, which bypasses translation entirely and
 therefore works in every regime: MMU off, idmap, mid-switch, or fully virtual.
 
 Syntax follows `x` closely enough to be muscle-memory:  kx/16xb $pc,  kx/8gx 0x...
-N = count, U = unit (b/h/w/g), F = format (x hex, d decimal, i is not supported --
-use cfgdis).  Default /16xb.  A kernel VA argument is converted to its physical
+N = count, U = unit (b/h/w/g), F = format (x hex, d signed / u unsigned decimal; i
+is not supported -- use cfgdis).  Default /16xb.  A kernel VA argument is converted to its physical
 address first (and the conversion is printed), so `kx $pc` is right in either
 regime.  gdb's own `x` is untouched."""
 
@@ -822,7 +842,7 @@ regime.  gdb's own `x` is untouched."""
     def __init__(self, name="kx"):
         super(KX, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         spec, expr = "", (arg or "").strip()
         if expr.startswith("/"):
@@ -864,7 +884,7 @@ regime.  gdb's own `x` is untouched."""
         for i in range(0, len(raw) // unit, per):
             vals = []
             for j in range(i, min(i + per, len(raw) // unit)):
-                v = int.from_bytes(raw[j * unit:(j + 1) * unit], "little")
+                v = int.from_bytes(raw[j * unit:(j + 1) * unit], "little", signed=(form == "d"))
                 vals.append(("0x%0*x" % (unit * 2, v)) if form == "x" else str(v))
             print("0x%016x:\t%s" % ((pa + i * unit) & MASK, "\t".join(vals)))
 
@@ -885,7 +905,7 @@ regime including the pre-MMU physical phase:
     def __init__(self, name):
         super(MmView, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         a = (arg or "").lower()
         want_idmap = "noidmap" not in a

@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+from ..common import config
 
 
 # ----------------------------------------------------------------------------
@@ -41,5 +42,6 @@ PRESETS = {
                     "desc": "M-mode/nommu; satp stays 0 -- set $GDBTOOLS_RAM_BASE=0x80000000"},
 }
 
+config.provide("PRESET", choices=PRESETS)
 
 __all__ = ['PRESETS']

@@ -15,6 +15,20 @@ from .fdt import _DEFAULT_ADDRESS_CELLS, _DEFAULT_SIZE_CELLS
 # dependency; degrade-safe (returns None on any malformed blob).
 # FDT is big-endian; tokens: BEGIN_NODE=1 END_NODE=2 PROP=3 NOP=4 END=9.
 # ----------------------------------------------------------------------------
+def _memory_regs(props, addr_cells, size_cells):
+    """(base, size) pairs of a root child with device_type "memory", else [].
+    The type, not the name: Linux's early_init_dt_scan_memory reads it the same way."""
+    if props.get("device_type", b"").split(b"\0", 1)[0] != b"memory":
+        return []
+    val, ab, sb = props.get("reg", b""), addr_cells * 4, size_cells * 4
+    stride = ab + sb
+    if not stride:
+        return []
+    return [(int.from_bytes(val[i:i + ab], "big") & MASK,
+             int.from_bytes(val[i + ab:i + stride], "big") & MASK)
+            for i in range(0, len(val) - stride + 1, stride)]
+
+
 @safe(default=None)
 def parse_dtb(data):
     if not data or len(data) < 40:
@@ -27,13 +41,10 @@ def parse_dtb(data):
     end_struct = off_struct + size_struct if size_struct else len(data)
     p = off_struct
     depth = 0
-    node_stack = []
-    # Devicetree Spec v0.4 sec 2.3.5: a client that finds these absent assumes 2
-    # for #address-cells and 1 for #size-cells.  This said 2/2, which is what
-    # arm64 DTBs happen to declare -- so it agreed with every board tested and
-    # would misparse the reg of any /memory node on a board that omits them.
-    # fdt.py in this same package already uses the spec values; the two parsers
-    # disagreeing about one DTB is its own bug.
+    # One dict of properties per open node.  RAM is a direct child of the root with
+    # device_type = "memory" (Devicetree Spec 3.4); a name check would also match
+    # memory-controller@... (MMIO) and reserved-memory's memory@... children.
+    nodes = []
     addr_cells, size_cells = _DEFAULT_ADDRESS_CELLS, _DEFAULT_SIZE_CELLS
     mem_regs = []
     bootargs = None
@@ -46,11 +57,15 @@ def parse_dtb(data):
             end = data.index(b"\0", p)
             name = data[p:end].decode("latin1", "replace")
             p = (end + 1 + 3) & ~3
-            node_stack.append(name)
+            nodes.append((name, {}))
             depth += 1
         elif tok == 2:                     # FDT_END_NODE
-            if node_stack:
-                node_stack.pop()
+            if nodes:
+                name, props = nodes.pop()
+                if depth == 2:
+                    mem_regs.extend(_memory_regs(props, addr_cells, size_cells))
+                    if name == "chosen" and "bootargs" in props:
+                        bootargs = props["bootargs"].split(b"\0", 1)[0].decode("latin1", "replace")
             depth -= 1
         elif tok == 3:                     # FDT_PROP
             plen, nameoff = struct.unpack_from(">II", data, p)
@@ -62,21 +77,12 @@ def parse_dtb(data):
                 pname = strings[nameoff:pend].decode("latin1", "replace")
             except Exception:
                 pname = ""
-            cur = node_stack[-1] if node_stack else ""
             if depth == 1 and pname == "#address-cells" and len(val) >= 4:
                 addr_cells = struct.unpack(">I", val[:4])[0]
             elif depth == 1 and pname == "#size-cells" and len(val) >= 4:
                 size_cells = struct.unpack(">I", val[:4])[0]
-            elif cur.startswith("memory") and pname == "reg":
-                ab, sb = addr_cells * 4, size_cells * 4
-                stride = ab + sb
-                if stride:
-                    for i in range(0, len(val) - stride + 1, stride):
-                        a = int.from_bytes(val[i:i + ab], "big")
-                        s = int.from_bytes(val[i + ab:i + stride], "big")
-                        mem_regs.append((a & MASK, s & MASK))
-            elif cur == "chosen" and pname == "bootargs":
-                bootargs = val.split(b"\0", 1)[0].decode("latin1", "replace")
+            if nodes and pname in ("reg", "device_type", "bootargs"):
+                nodes[-1][1][pname] = val
         elif tok == 4:                     # FDT_NOP
             continue
         elif tok == 9:                     # FDT_END
