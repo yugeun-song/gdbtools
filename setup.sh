@@ -67,11 +67,19 @@ BLOCK
 }
 
 has_block()   { [[ -f "$INIT" ]] && grep -qF "$BEGIN" "$INIT"; }
+# Rewritten in place (cat >), never replaced (mv): a symlinked init file stays a
+# symlink and keeps its mode.  Untouched when there is no block to remove.
 strip_block() {
-    [[ -f "$INIT" ]] || return 0
-    awk -v b="$BEGIN" -v e="$END" '
-        index($0,b){skip=1} !skip{print} index($0,e){skip=0}' "$INIT" > "${INIT}.gdbtools.tmp"
-    mv "${INIT}.gdbtools.tmp" "$INIT"
+    has_block || return 0
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/gdbtools-init.XXXXXX")"
+    if ! awk -v b="$BEGIN" -v e="$END" '
+            index($0,b){skip=1} !skip{print} index($0,e){skip=0}' "$INIT" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    cat "$tmp" > "$INIT"
+    rm -f "$tmp"
 }
 
 if [[ "$MODE" == "check" ]]; then
@@ -96,10 +104,12 @@ if [[ "$MODE" == "check" ]]; then
     fi
     say "root pointer  $([[ -r "${CONF}/root" ]] && cat "${CONF}/root" || echo '(unset)')"
     if command -v gdb >/dev/null 2>&1; then
-        if gdb -q -nx -batch -ex "source $LOADER" -ex 'python import gdbtools' >/dev/null 2>&1; then
-            say "gdb import    ok"
+        # gdb -batch exits non-zero when its LAST command fails; `help cmdinfo` only
+        # succeeds if the loader got as far as registering the commands.
+        if gdb -q -nx -batch -ex "source $LOADER" -ex 'help cmdinfo' >/dev/null 2>&1; then
+            say "gdb load      ok"
         else
-            warn "gdb cannot import the package"
+            warn "gdb cannot load the package: gdb -nx -batch -ex 'source $LOADER'"
         fi
     fi
     exit 0
@@ -107,7 +117,12 @@ fi
 
 if [[ "$MODE" == "library" ]]; then
     echo "installing gdbtools (library mode) from ${REPO}"
-    strip_block && say "gdb init file ${INIT}  (no global source; any prior block removed)"
+    if has_block; then
+        strip_block
+        say "gdb init file ${INIT}  (the global source line was removed)"
+    else
+        say "gdb init file ${INIT}  (not touched)"
+    fi
     mkdir -p "$CONF"
     printf '%s\n' "$REPO" > "${CONF}/root"
     say "root pointer  ${CONF}/root"
@@ -118,8 +133,19 @@ if [[ "$MODE" == "library" ]]; then
 fi
 
 if [[ "$MODE" == "uninstall" ]]; then
-    strip_block && say "removed the loader block from ${INIT}"
-    rm -rf "$CONF" && say "removed ${CONF}"
+    # Only what setup.sh writes: the init-file block and ${CONF}/root.  Anything
+    # else in ${CONF} (an env file, profiles) is the user's and stays.
+    if has_block; then
+        strip_block
+        say "removed the loader block from ${INIT}"
+    fi
+    if [[ -e "${CONF}/root" ]]; then
+        rm -f "${CONF}/root"
+        say "removed ${CONF}/root"
+    fi
+    if rmdir "$CONF" 2>/dev/null; then
+        say "removed ${CONF} (it was empty)"
+    fi
     say "the checkout at ${REPO} was left alone"
     exit 0
 fi
