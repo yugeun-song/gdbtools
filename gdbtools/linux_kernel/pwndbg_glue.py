@@ -86,6 +86,9 @@ def context_kgdb(*args, **kwargs):
             if b:
                 return [b] + lines
         return lines
+    except ConfigError as e:
+        report_config_error(e)
+        return []
     except Exception:
         return []
 
@@ -107,6 +110,9 @@ def context_msysreg(*args, **kwargs):
             if b:
                 return [b] + lines
         return lines
+    except ConfigError as e:
+        report_config_error(e)
+        return []
     except Exception:
         return []
 
@@ -125,14 +131,17 @@ def context_flow(*args, **kwargs):
         if kwargs.get("with_banner", True):
             title = "disasm + arrows"
             try:                                # match pwndbg's disasm banner arch tag
-                import pwndbg.aglib.arch as _a
-                title = "disasm + arrows / %s" % _a.name
+                import pwndbg.aglib             # `arch` is an attribute, not a module
+                title = "disasm + arrows / %s" % pwndbg.aglib.arch.name
             except Exception:
                 pass
             b = PWN.banner(title, width=kwargs.get("width"))
             if b:
                 return [b] + lines
         return lines
+    except ConfigError as e:
+        report_config_error(e)
+        return []
     except Exception:
         return []
 
@@ -235,6 +244,9 @@ class _SafeProbe:
                 # read sent to QEMU and no exception thrown.
                 try:
                     block = _g._active() and _g._mapped(address) is False
+                except ConfigError as e:
+                    report_config_error(e)
+                    block = False
                 except Exception:
                     block = False
                 if block:
@@ -452,7 +464,7 @@ class _SafeProbe:
         self._ram_cache[page] = ok
         return ok
 
-    @safe(default=None)
+    @safe(default=None, boundary="hook")      # runs inside pwndbg's read path
     def _rescue(self, addr, size):
         """A live pwndbg read of `addr` failed -- re-serve it from QEMU's `monitor xp`.
 
@@ -601,31 +613,19 @@ class _SafeProbe:
         return self._monitor_alive() is True
 
     def _unmapped_error(self, addr):
-        """Raise the SAME exception type pwndbg's own read raises on failure.
-
-        This is the entire correctness of the guard.  pwndbg's callers -- chain.py's
-        pointer telescope, the register context enhancer -- wrap each read in
-        `except pwndbg.dbg_mod.Error: break`, and pwndbg's gdb backend raises exactly
-        that type (`raise pwndbg.dbg_mod.Error(e)` in dbg_mod/gdb/__init__.py) when a
-        read fails.  Raising `gdb.MemoryError` instead -- which is NOT a subclass of
-        pwndbg.dbg_mod.Error -- sails straight through those handlers and kills the
-        whole `context`.  That is the bug the user hit at start_kernel: $x20 held the
-        junk value 0xe11, the register enhancer telescoped it, and the guard's wrong
-        exception type turned an unreadable pointer into a fatal one.
-        """
+        """The exception pwndbg's own failed read raises, for the aglib.memory.read
+        fallback level: its callers catch pwndbg.dbg_mod.DebuggerError, and a
+        gdb.MemoryError would escape them and abort the whole `context`.  (The
+        GDBProcess.read_memory level never gets here: a blocked read is answered
+        with zero bytes instead.)"""
         msg = "Cannot access memory at address 0x%x" % addr
-        # At GDBProcess.read_memory the caller catches `gdb.error` and re-raises it as
-        # pwndbg.dbg_mod.Error (dbg_mod/gdb/__init__.py:711), so raising gdb.MemoryError
-        # (a gdb.error subclass) here reproduces the exact type the real read failure
-        # would have produced.  At the higher aglib.memory.read level there is no such
-        # wrapping, so raise pwndbg's Error directly.
-        if getattr(self, "_level", "") == "GDBProcess.read_memory":
-            return gdb.MemoryError(msg)
         try:
             import pwndbg.dbg_mod as _dm
-            return _dm.Error(msg)
         except Exception:
             return gdb.MemoryError(msg)
+        # DebuggerError is the name since pwndbg's dbg_mod exists; Error is older.
+        exc = getattr(_dm, "DebuggerError", None) or getattr(_dm, "Error", None)
+        return exc(msg) if exc else gdb.MemoryError(msg)
 
     def _read(self, addr, count, *a, **kw):
         try:
@@ -661,7 +661,7 @@ _KGUARDS = (
     ("pwndbg.aglib.kernel", "kversion", None),
     # `address_markers` is arch/arm64/mm/dump.c's table of VA-layout labels, which
     # pwndbg walks with a bare memory.u64() on a KERNEL VA to name vmmap ranges.  At
-    # head.S _text the MMU is off, so that read raises pwndbg.dbg_mod.Error and it
+    # head.S _text the MMU is off, so that read raises pwndbg.dbg_mod.DebuggerError and it
     # propagates all the way out of the register panel:
     #   context -> context_regs -> get_regs -> vmmap.find -> get_memory_map
     #     -> GDBProcess.vmmap -> kernel_vmmap -> _apply_address_markers
