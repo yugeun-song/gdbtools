@@ -18,8 +18,12 @@ class X86_64Common(ArchCommon):
         "data16", "data32", "addr16", "addr32", "rex", "rex.w",
         "cs", "ds", "es", "fs", "gs", "ss"))
 
-    def branch_target(self, mnem, ops):
+    def split_prefixes(self, mnem, ops):
         while mnem.lower() in self._PREFIXES and ops:
             p = ops.split(None, 1)
             mnem, ops = p[0], (p[1] if len(p) > 1 else "")
+        return mnem, ops
+
+    def branch_target(self, mnem, ops):
+        mnem, ops = self.split_prefixes(mnem, ops)
         return super(X86_64Common, self).branch_target(mnem, ops)

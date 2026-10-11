@@ -17,7 +17,7 @@ pointer exists, and in userspace means a corrupted or missing frame chain."""
     def __init__(self, name="stackscan"):
         super(StackScan, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         n = 32
         if arg.strip():
@@ -42,13 +42,14 @@ pointer exists, and in userspace means a corrupted or missing frame chain."""
                 print("      `kearly regimes` shows where that is for this build.")
             return
         hits = 0
+        size, ctype = word()
         for i in range(n):
-            val = evi("*(unsigned long long *)0x%x" % ((sp + i * 8) & MASK))
+            val = evi("*(%s *)0x%x" % (ctype, (sp + i * size) & MASK))
             if val is None:
                 continue
             res = resolve(val)
             if res and res[2]:
-                print("  [sp+0x%03x] %s  %s  %s" % (i * 8, fmt(val), res[0], res[2]))
+                print("  [sp+0x%03x] %s  %s  %s" % (i * size, fmt(val), res[0], res[2]))
                 hits += 1
         if hits == 0:
             print("[%s] no symbolizable pointers in %d words from $sp" % (NAME, n))

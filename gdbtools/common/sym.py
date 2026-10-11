@@ -15,7 +15,7 @@ Otherwise the address is looked up as given."""
     def __init__(self, name="sym"):
         super(Sym, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         addr = evi(arg)
         if addr is None:

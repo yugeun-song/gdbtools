@@ -48,6 +48,11 @@ class ArchCommon:
         """gdb/binutils mnemonic -> the Capstone spelling pwndbg prints."""
         return self.MNEM_ALIASES.get(mnem, mnem)
 
+    def split_prefixes(self, mnem, ops):
+        """(mnemonic, operands) with any instruction prefix the disassembler printed
+        as its own token moved out of the way.  No such prefixes here."""
+        return mnem, ops
+
     def branch_target(self, mnem, ops):
         """Absolute target address of a direct jump, else None.  Arch-independent
         extraction: gate on BRANCH_RE, then take the LAST comma-separated operand,

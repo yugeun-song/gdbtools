@@ -301,6 +301,9 @@ def classify():
     derived_gone = sorted((kernel | other_py) - recognised)
     kernel &= recognised
     other_py &= recognised
+    # Another extension's claim on one of our names, kept before the subtraction
+    # below removes our names from its set.
+    contested = sorted(ours & (pwndbg | kernel | other_py))
 
     # Most authoritative first, each subtracted from the next, so a name is
     # reported once and the counts add up to what gdb answers to.
@@ -332,7 +335,7 @@ def classify():
     groups = {"gdbtools": ours_r, "pwndbg": pwndbg_r, "kernel": kernel,
               "python": other_py, "user": user, "gdb": builtin}
     res = {"groups": groups, "recognised": recognised, "subs": subs,
-           "alias": pw_alias, "contested": sorted(ours & (pwndbg | kernel | other_py)),
+           "alias": pw_alias, "contested": contested,
            "dirs": sorted({f.rsplit("/", 1)[0] for f in py.values() if f}),
            "py_subs": sorted(py_subs), "notes": notes}
     setattr(gdb, _CACHE_ATTR, (key, res))
@@ -384,7 +387,7 @@ their subcommand counts, because `set` alone is not a command you can run.
             for p in paths:
                 print("    %s" % p)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         parts = (arg or "").split()
         oneline = any(p in ("-1", "--names") for p in parts)

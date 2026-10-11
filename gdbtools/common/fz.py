@@ -50,7 +50,7 @@ _MAX_PRINT = 200          # how many lines the last-resort listing prints
 
 
 def _fzf_bin():
-    return _env("FZF") or "fzf"
+    return config.get("FZF") or "fzf"
 
 
 @safe(default=None)
@@ -77,9 +77,7 @@ def _pick_fzf(items, prompt, query):
             "--no-multi", "--exit-0"]
     if query:
         argv += ["--query", query]
-    extra = _env("FZF_OPTS")
-    if extra:
-        argv += extra.split()
+    argv += config.get("FZF_OPTS") or []
     try:
         p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              text=True)
@@ -347,19 +345,31 @@ def bind_key(key, subject="history"):
     return True
 
 
-@safe()
+def _parse_key_spec(text):
+    """$GDBTOOLS_FZ_KEY -> (key, subject), or ValueError(what it should be)."""
+    parts = str(text).split()
+    if not 1 <= len(parts) <= 2:
+        raise ValueError("KEY [SUBJECT]")
+    why = _refuse_key(parts[0])
+    if why:
+        raise ValueError("a key spec bind can take (%s)" % why)
+    subject = parts[1] if len(parts) > 1 else "history"
+    if subject not in SUBJECTS:
+        raise ValueError("KEY [SUBJECT] with SUBJECT one of: " + ", ".join(SUBJECTS))
+    return parts[0], subject
+
+
+@safe(boundary="hook")
 def bind_from_env():
     r"""Honour $GDBTOOLS_FZ_KEY at load time, and only then.
 
     The value is a readline key spec, optionally followed by a subject:
     `\C-t`, or `\C-r history`, or `\e[15~ commands`.
     """
-    spec = _env("FZ_KEY")
+    spec = config.get("FZ_KEY")
     if not spec:
         return
-    parts = spec.split()
-    key = parts[0]
-    subject = parts[1] if len(parts) > 1 else "history"
+    key, subject = spec
     if bind_key(key, subject):
         print("[%s] fz: %s runs `fz %s`" % (NAME, key, subject))
 
@@ -401,7 +411,7 @@ not the commands typed in this one."""
     def __init__(self, name="fz"):
         super(Fz, self).__init__(name, gdb.COMMAND_SUPPORT)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         parts = (arg or "").split()
         run = any(p == "--run" for p in parts)
@@ -464,12 +474,16 @@ not the commands typed in this one."""
             gdb.execute("help " + word, from_tty=False)
         elif action == "address":
             print(sel)
-            execstr("info address " + word)
+            where = (execstr("info address " + word) or "").strip()
+            if where:
+                print(where)
             out = execstr("info line " + word)
             if out and "No line number" not in out:
                 print(out.strip())
         else:
             print(sel)
 
+
+config.provide("FZ_KEY", check=_parse_key_spec)
 
 __all__ = ["Fz", "bind_key", "bind_from_env"]

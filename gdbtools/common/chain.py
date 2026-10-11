@@ -51,7 +51,8 @@ def safe_chain(addr, phys=False, hops=None, step=None):
         rd = _read_phys_u64
         nxtf = step or (lambda v: v & ((1 << 48) - 1) & ~0xFFF)
     else:
-        rd = lambda a: evi("*(unsigned long long *)0x%x" % (a & MASK))
+        ctype = word()[1]
+        rd = lambda a: evi("*(%s *)0x%x" % (ctype, a & MASK))
         nxtf = step or (lambda v: v & MASK)
     out, seen, cur = [], set(), addr & MASK
     for _ in range(max(1, hops)):
@@ -86,7 +87,7 @@ session loaded the physical/virtual side of each hop is reported too."""
     def __init__(self, name="chain"):
         super(Chain, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         parts = (arg or "").split()
         addr = evi(parts[0]) if parts else None
@@ -101,17 +102,18 @@ session loaded the physical/virtual side of each hop is reported too."""
         if addr is None:
             print("[%s] no address, and $sp is unavailable. usage: chain ADDR [N]" % NAME)
             return
+        size, ctype = word()
         for i in range(max(1, min(n, 64))):
-            slot = (addr + i * 8) & MASK
-            val = evi("*(unsigned long long *)0x%x" % slot)
+            slot = (addr + i * size) & MASK
+            val = evi("*(%s *)0x%x" % (ctype, slot))
             if val is None:
-                print("%02d:%04x  %s  <unreadable>" % (i, i * 8, fmt(slot)))
+                print("%02d:%04x  %s  <unreadable>" % (i, i * size, fmt(slot)))
                 continue
             res = resolve(val)
             sym = ""
             if res and res[2]:
                 sym = "  %s %s" % (res[0], short(res[2]))
-            print("%02d:%04x| %s%s" % (i, i * 8, safe_chain(val) or fmt(val), sym))
+            print("%02d:%04x| %s%s" % (i, i * size, safe_chain(val) or fmt(val), sym))
 
 
 __all__ = ["safe_chain", "Chain"]

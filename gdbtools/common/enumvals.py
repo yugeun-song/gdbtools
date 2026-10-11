@@ -81,7 +81,7 @@ arch and a remote target; no running inferior required.
     def __init__(self, name="enumvals"):
         super(EnumVals, self).__init__(name, gdb.COMMAND_DATA)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         want_hex, name = _split_flag(arg)
         if not name:
