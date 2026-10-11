@@ -25,6 +25,22 @@ if _HERE not in sys.path:
 for _m in [m for m in list(sys.modules) if m == "gdbtools" or m.startswith("gdbtools.")]:
     del sys.modules[_m]
 
-import gdbtools.bootstrap as _bootstrap
+# A cross gdb that shares its data directory with a newer host gdb has only the
+# low-level _gdb module: its `gdb` package fails to import.  Say that, once,
+# instead of the package failing halfway on an ImportError about _gdb internals.
+try:
+    import gdb as _gdb_pkg
+    _why = None if hasattr(_gdb_pkg, "execute") else "it has no gdb.execute"
+except ImportError as _e:
+    _why = str(_e)
 
-_bootstrap.main()
+if _why is None:
+    import gdbtools.bootstrap as _bootstrap
+
+    _bootstrap.main()
+else:
+    sys.stderr.write(
+        "[gdbtools] not loaded: this gdb's Python `gdb` package does not work (%s).\n"
+        "[gdbtools] Its data directory belongs to a different gdb version; start it with\n"
+        "[gdbtools] --data-directory=<its own data directory>, or use a gdb whose Python\n"
+        "[gdbtools] layer starts (`gdb -nx -batch -ex 'python gdb.VERSION'`).\n" % _why)

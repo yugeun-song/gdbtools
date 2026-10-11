@@ -110,26 +110,29 @@ def _register():
               "still works where one exists (e.g. `symbol-file` for `sym`)" % NAME)
 
 
-@safe()
+@safe(boundary="hook")
 def _autostart():
     # AUTO-enable (stop hook + shadow + banner + per-stop sysreg line) ONLY when
-    # launched via the kernel runner, which sets $GDBTOOLS_AUTO.  A plain
-    # `gdb vmlinux` must NOT auto-attach: the commands are still registered (type
-    # `kearly on` to opt in), but nothing hooks the session and gdb stays stock.
-    # This is a hard requirement -- never auto-attach outside the launcher.
-    if not _env("AUTO"):
+    # $GDBTOOLS_AUTO says so.  A plain `gdb vmlinux` must NOT auto-attach: the
+    # commands are still registered (`kearly on` opts in), but nothing hooks the
+    # session and gdb stays stock.
+    if not config.get("AUTO"):
         LOG.add("not autostarting (no $GDBTOOLS_AUTO; plain gdb -> manual `kearly on`)")
         return
-    a = SESSION.ensure_arch()
-    if a is not None and SESSION.looks_like_kernel():
-        SESSION.enable()
-        SESSION.load_overrides()
-        LOG.add("autostarted for arch=%s" % a.key)
+    if not SESSION.try_autostart():
+        # An init-file install runs before gdb reads the program named on its
+        # command line; the session's new_objfile hook arms it when one appears.
+        SESSION._autostart_pending = True
+        LOG.add("autostart deferred until a kernel image is loaded")
 
 
 def main():
     """Entry point for the gdbtools.py shim."""
     _register()
+    for msg in config.validate_all():
+        report_config_error(msg)
+    SESSION.loaded_banner = ("[%s] early-boot symbolizer loaded (%s)"
+                             % (NAME, " | ".join(n for _c, n in KERNEL_COMMANDS)))
     # Only when $GDBTOOLS_FZ_KEY says so; a debugger's keys are the user's.
     bind_from_env()
     _autostart()
@@ -137,6 +140,4 @@ def main():
     # global `source` from a gdb init file stays silent in ordinary sessions.
     # The common commands are registered either way.
     if SESSION.enabled:
-        print("[%s] early-boot symbolizer loaded (kearly | kb | kw | kx | kp2v | kv2p | "
-              "ksr | ksregs | kbits | kcensus | kpt | kpgd | kpthex | koff | mmview | kfin | kdtb)"
-              % NAME)
+        print(SESSION.loaded_banner)

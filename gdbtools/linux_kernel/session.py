@@ -73,34 +73,127 @@ class Session:
         self._pending_del = set()   # sibling bps orphaned by `delete`, dropped at the next safe point
         self._in_adopt = False      # hard reentrancy guard around sibling creation
         self._in_advance = False     # inside _advance_to_crossing: suppress on_stop auto-apply
-        self.x86_kaslr = bool(_env("X86_KASLR"))  # x86 cold-frozen: recover the
-                                    # decompressor-randomized physical base in bootbreak
+        self._armed_entry_pa = None  # where bootbreak last armed the entry break
+        self._program = None         # main symbol file the cached state was derived from
+        self._objfile_hooked = False
+        self._autostart_pending = False  # $GDBTOOLS_AUTO stated before a kernel was loaded
+        self.loaded_banner = None    # set by bootstrap; printed when AUTO arms late
+
+    @property
+    def x86_kaslr(self):
+        """$GDBTOOLS_X86_KASLR: recover the decompressor-randomized physical base in
+        bootbreak.  Read at use, so an invalid value is refused where it matters."""
+        return bool(config.get("X86_KASLR"))
 
     @safe()
     def ensure_arch(self):
+        self._follow_program()
         if self.arch is None:
             self.arch = detect_arch()
         return self.arch
+
+    def _follow_program(self):
+        """Forget what was derived from a program gdb no longer debugs (`file` with
+        another image): the arch, the vmlinux path and the calibration.  The old
+        shadow objfile is removed by the next _shadow_load / `kearly off`."""
+        try:
+            main = gdb.current_progspace().filename
+        except Exception:
+            return
+        if not main or main == self._program:
+            return
+        prev, self._program = self._program, main
+        if prev is None:
+            self.arch = None                   # may have come from gdb's default arch
+            return
+        self.arch = None
+        self.vmlinux = None
+        if self.offset is not None or self.kaslr_slide or self.entry_pa is not None:
+            self.offset, self.kaslr_slide, self.entry_pa = None, 0, None
+            self._entry_recovered = self._entry_pinned = False
+            self._kaslr_pending = None
+            print("[%s] gdb now debugs %s; the calibration made for %s is cleared"
+                  % (NAME, main, prev))
+
+    def try_autostart(self):
+        """Arm the session if a kernel image is loaded; False when there is none yet."""
+        a = self.ensure_arch()
+        if a is None or not self.looks_like_kernel():
+            return False
+        self._autostart_pending = False
+        self.enable()
+        self.load_overrides()
+        LOG.add("autostarted for arch=%s" % a.key)
+        return True
+
+    @safe(boundary="hook")
+    def _on_new_objfile(self, _evt):
+        # $GDBTOOLS_AUTO stated before gdb loaded the program (an init-file install
+        # runs before command-line files are read): arm once the kernel appears.
+        if self._autostart_pending and not self.enabled and self.try_autostart():
+            if self.loaded_banner:
+                print(self.loaded_banner)
+
+    _EVENTS = (("stop", "on_stop"), ("breakpoint_created", "_on_bp_created"),
+               ("breakpoint_deleted", "_on_bp_deleted"), ("before_prompt", "_on_prompt"),
+               ("cont", "_on_cont"), ("new_objfile", "_on_new_objfile"))
+    _NOT_CARRIED = frozenset(("arch", "enabled", "_hooked", "_bp_hooked", "_prompt_hooked",
+                              "_cont_hooked", "_objfile_hooked", "_catcher_obj"))
+
+    def _adopt(self, prevs):
+        """Take over from sessions an earlier load left connected: detach every
+        handler they registered, carry the live one's state over, and re-arm."""
+        live = next((p for p in prevs if getattr(p, "enabled", False)), prevs[-1])
+        was_enabled = bool(getattr(live, "enabled", False))
+        for p in prevs:
+            for event, attr in self._EVENTS:
+                cb, registry = getattr(p, attr, None), getattr(gdb.events, event, None)
+                if cb is not None and registry is not None:
+                    try:
+                        registry.disconnect(cb)
+                    except Exception:
+                        pass
+            p.enabled = False
+        mine = vars(self)
+        for k, v in vars(live).items():
+            if k in mine and k not in self._NOT_CARRIED:
+                mine[k] = v
+        key = getattr(getattr(live, "arch", None), "key", None)
+        self.arch = next((c() for c in ARCHES if c.key == key), None) if key else None
+        pend = self._kaslr_pending
+        if pend and pend.get("obj") is not None:
+            # The internal catcher calls back into the old session: replace it.
+            try:
+                pend["obj"].delete()
+            except Exception:
+                pass
+            self._kaslr_pending = None
+            self._catch_wanted = not self.kaslr_slide
+        old_probe = getattr(live.__class__.on_stop, "__globals__", {}).get("SAFEPROBE")
+        if old_probe is not None and old_probe is not SAFEPROBE:
+            SAFEPROBE.mode = getattr(old_probe, "mode", SAFEPROBE.mode)
+        if was_enabled:
+            self.enable()
 
     @safe()
     def load_overrides(self):
         """Apply overrides idempotently in precedence order (low -> high):
         preset -> JSON profile (anchor/break) -> explicit env flags.  So an
         explicit $GDBTOOLS_ANCHOR wins over the profile, which wins over the preset."""
-        p = _env("PRESET")
+        p = config.get("PRESET")
         if p and self.preset != p:
             self.apply_preset(p, quiet=True)
         pa = TARGET.anchor()
         if pa:
             self.anchor = pa
         pbk = TARGET.break_kind()
-        if pbk in ("sw", "hw"):
+        if pbk:
             self.break_kind = pbk
-        an = _env("ANCHOR")
+        an = config.get("ANCHOR")
         if an:
             self.anchor = an
-        bk = _env("BREAK_KIND")
-        if bk in ("sw", "hw"):
+        bk = config.get("BREAK_KIND")
+        if bk:
             self.break_kind = bk
 
     @safe(default=False)
@@ -188,7 +281,7 @@ class Session:
         which every address is silently off.  Cached."""
         if self.entry_pa is not None:
             return self.entry_pa
-        ovr = _env_int("ENTRY_PA")
+        ovr = config.get("ENTRY_PA")
         if ovr is not None:
             self.entry_pa = ovr
             return ovr
@@ -209,6 +302,7 @@ class Session:
 
     @safe(default=None)
     def vmlinux_path(self):
+        self._follow_program()
         if self.vmlinux:
             return self.vmlinux
         fallback = None
@@ -238,7 +332,7 @@ class Session:
         loaded vmlinux: where that file sits relative to the build tree is a fact
         about the caller's tree layout, not about the kernel, and guessing it means
         silently analysing the wrong binary when the guess is close but wrong."""
-        return _env("X86_DECOMP_VMLINUX")
+        return config.get("X86_DECOMP_VMLINUX")
 
     @safe(default=False)
     def _hbreak_to(self, pa):
@@ -983,7 +1077,7 @@ class Session:
             return "unknown"
         if a._is_va(pc):
             return "virtual addressing is up (past the phys->high-VA switch)"
-        entry = self.resolve_entry()
+        entry = self.entry_cpu_pa()
         st, _ = self.mmu_state()
         if entry is None:
             return "physical, entry PA not resolved yet"
@@ -1036,7 +1130,7 @@ class Session:
             return "kearly arch <key>   (auto-detect found no supported arch)"
         if self.offset is None:
             return "kearly bootbreak    (reach the kernel entry and calibrate)"
-        entry = self.resolve_entry()
+        entry = self.entry_cpu_pa()
         if pc is not None and entry is not None and not a._is_va(pc) and pc < entry:
             return "kearly bootbreak    (still before the kernel entry)"
         if pc is not None and not a._is_va(pc):
@@ -1418,14 +1512,15 @@ class Session:
         else:
             lines.append("  top-table PA 0x%x%s   (EXPLICIT root -- not read from a "
                          "translation register)" % (w["base"], self._sym_suffix(w["base"])))
-        for lv in w["levels"]:
+        for depth, lv in enumerate(w["levels"]):
             nm, idx, ent, desc = lv["name"], lv["index"], lv["entry_pa"], lv["desc"]
             if desc is None:
                 lines.append("  %-7s [%3d] @PA 0x%-10x <unreadable>" % (nm, idx, ent))
                 continue
             kind = lv["kind"]
             if kind == "table":
-                tail = "table -> 0x%x%s" % (lv["next_pa"], self._sym_suffix(lv["next_pa"]))
+                tail = "table -> 0x%x%s  (kpgd 0x%x level %d)" % (
+                    lv["next_pa"], self._sym_suffix(lv["next_pa"]), lv["next_pa"], depth + 1)
             elif kind in ("block", "page"):
                 tail = "%s  %s" % (kind.upper(), lv.get("attrs", ""))
             else:
@@ -1446,12 +1541,30 @@ class Session:
             lines.append("  => NOT MAPPED (no valid leaf descriptor)")
         return lines
 
+    def _table_level(self, a, level, explicit, cmd):
+        """(level, shift, count, label) for a table dump, or a list of refusal lines.
+        A live root is the top table; an explicit TABLE_PA is at `level` (default 0,
+        the top), because nothing in the bytes says which level a table is."""
+        cfg = getattr(a, "_ptcfg", {}) or {}
+        names = a.pt_levels()
+        nlevels = cfg.get("nlevels") or len(names)
+        level = level or 0
+        if level and not explicit:
+            return ["[%s] %s: `level` applies to an explicit TABLE_PA; the live root is "
+                    "the top table" % (NAME, cmd)]
+        if not 0 <= level < nlevels:
+            return ["[%s] %s: level %d is outside this shape's 0..%d"
+                    % (NAME, cmd, level, nlevels - 1)]
+        shift = a.pt_index(0, level)[1]
+        label = names[level] if level < len(names) else "L%d" % level
+        return level, shift, a.pt_entries(top=(level == 0)), label
+
     @safe(default=None)
-    def pgd_dump_lines(self, va=None, table_pa=None, maxrows=80):
+    def pgd_dump_lines(self, va=None, table_pa=None, maxrows=80, level=None):
         a = self.ensure_arch()
         if a is None or not getattr(a, "pagewalk_supported", False):
             return ["[%s] unsupported" % NAME]
-        regime, explicit, note = "explicit TABLE_PA", table_pa is not None, ""
+        regime, note = "explicit TABLE_PA", ""
         if table_pa is None:
             probe = va if va is not None else reg("pc")
             rb = a.pt_base(probe if probe is not None else 0)
@@ -1481,15 +1594,17 @@ class Session:
                     % (NAME, table_pa),
                     "  Raw bytes are still available and need no shape:  kpthex 0x%x full"
                     % table_pa]
-        top_shift, nlevels = cfg["top_shift"], cfg["nlevels"]
-        # The TOP table: the count is what the VA size indexes, not a whole page.
-        _n = a.pt_entries(top=True)
+        lv = self._table_level(a, level, regime == "explicit TABLE_PA", "kpgd")
+        if isinstance(lv, list):
+            return lv
+        level, shift, _n, label = lv
+        nlevels = cfg["nlevels"]
         words = read_phys_words(table_pa, _n)
         if not words:
             return ["[%s] cannot read table @0x%x (physical read failed)" % (NAME, table_pa)]
-        lvl0 = a.pt_levels()[0] if a.pt_levels() else "L0"
-        lines = ["top table %s @PA 0x%x   regime %s   [%s]%s   (non-zero of %d entries)" %
-                 (lvl0, table_pa, regime, a.pt_config_desc(), note, _n)]
+        lines = ["table %s (level %d%s) @PA 0x%x   regime %s   [%s]%s   (non-zero of %d entries)" %
+                 (label, level, ", top" if level == 0 else "", table_pa, regime,
+                  a.pt_config_desc(), note, _n)]
         shown = 0
         for i, d in enumerate(words):
             if not d:
@@ -1497,7 +1612,7 @@ class Session:
             if shown >= maxrows:
                 lines.append("  ... (stopped at %d rows; raise with 'kpgd <addr> <n>')" % maxrows)
                 break
-            kind, nxt, leaf, attrs = a.pt_decode(d, 0, top_shift, nlevels)
+            kind, nxt, leaf, attrs = a.pt_decode(d, level, shift, nlevels)
             out = nxt if kind == "table" else (leaf if leaf is not None else 0)
             lines.append("  [%3d] 0x%016x  %-7s -> 0x%-10x%s %s" %
                          (i, d, kind, out or 0, self._sym_suffix(out or 0), attrs or ""))
@@ -1507,7 +1622,7 @@ class Session:
         return lines
 
     @safe(default=None)
-    def pt_hex_lines(self, va=None, table_pa=None, count=None, full=False):
+    def pt_hex_lines(self, va=None, table_pa=None, count=None, full=False, level=None):
         a = self.ensure_arch()
         if a is None or not getattr(a, "pagewalk_supported", False):
             return ["[%s] unsupported" % NAME]
@@ -1535,13 +1650,22 @@ class Session:
         # With no shape read from the target, print the bytes and say the decode
         # is missing rather than decode them against an assumed 4-level/39-bit
         # layout that is wrong on Sv39 and on a 16K granule.
-        top_shift = cfg.get("top_shift")
         nlevels = cfg.get("nlevels")
-        if top_shift is None or nlevels is None:
+        shift = None
+        if cfg.get("top_shift") is None or nlevels is None:
             note += "   [no decode -- paging shape unread]"
-            top_shift, nlevels = None, None
-        # The TOP table: the count is what the VA size indexes, not a whole page.
-        _n = a.pt_entries(top=True)
+            if level:
+                return ["[%s] kpthex: level %d needs the paging shape, which could not be read"
+                        % (NAME, level)]
+            _n = a.pt_entries()
+        else:
+            lv = self._table_level(a, level, regime == "explicit TABLE_PA", "kpthex")
+            if isinstance(lv, list):
+                return lv
+            level, shift, _n, _label = lv
+            note += "   level %d" % level
+        if full:
+            _n = a.pt_entries()                # the whole granule page, raw
         words = read_phys_words(table_pa, _n)
         if not words:
             return ["[%s] cannot read table @0x%x (physical read failed)" % (NAME, table_pa)]
@@ -1567,13 +1691,13 @@ class Session:
                 break
             ent_pa = table_pa + i * 8
             bstr = " ".join("%02x" % c for c in struct.pack("<Q", d & MASK))
-            if top_shift is None:
+            if shift is None:
                 # Bytes are a fact; a decode without a known granule is not.
                 lines.append("  [%3d] 0x%-11x  %s   0x%016x   (shape unread)"
                              % (i, ent_pa, bstr, d))
                 shown += 1
                 continue
-            kind, nxt, leaf, attrs = a.pt_decode(d, 0, top_shift, nlevels)
+            kind, nxt, leaf, attrs = a.pt_decode(d, level, shift, nlevels)
             if kind == "table":
                 dec = "TABLE -> 0x%x%s" % (nxt or 0, self._sym_suffix(nxt or 0))
             elif kind in ("block", "page"):
@@ -1959,8 +2083,8 @@ class Session:
             pci = next((i for i, r in enumerate(rows) if r[0] == (pc & MASK)), 0)
         lo = max(0, pci - self.kdis_before)
         hi = min(len(rows), pci + self.kdis_after + 1)
-        return _kdismod._kdis_lines(rows[lo:hi], arch, color=not _env("NO_COLOR"),
-                           ascii_mode=bool(_env("KDIS_ASCII")))
+        return _kdismod._kdis_lines(rows[lo:hi], arch, color=not config.get("NO_COLOR"),
+                                    ascii_mode=bool(config.get("KDIS_ASCII")))
 
     @safe()
     def _install_kdisasm_section(self):
@@ -2010,22 +2134,52 @@ class Session:
         cfg = getattr(PWN._ctx, "config_context_sections", None)
         val = getattr(cfg, "value", None)
         if isinstance(val, str) and "flow" in val.split():
-            parts = val.split()
-            fi = parts.index("flow")
-            if "disasm" not in parts:           # we replaced disasm -> restore it in place
-                parts[fi] = "disasm"
-            else:
-                parts.pop(fi)
-            new = " ".join(parts)
+            # The install only inserted `flow`; take exactly that back out.
+            new = " ".join(p for p in val.split() if p != "flow")
             try:
                 cfg.value = new                 # direct: avoid pwndbg's list-reverting validator
             except Exception:
                 exec_confirmless("set context-sections %s" % new)
         self._kdisasm_installed = False
 
+    def _base_symbol(self, a):
+        return getattr(a, "image_base_symbol", None) or a.entry_symbol
+
+    def _entry_delta(self, a):
+        """Link distance from the image-base symbol to the entry symbol (x86 puts
+        startup_64 in .init.text on newer kernels), or None when unresolvable."""
+        bsym = self._base_symbol(a)
+        if bsym == a.entry_symbol:
+            return 0
+        e, t = symval(a.entry_symbol), symval(bsym)
+        return None if e is None or t is None else (e - t) & MASK
+
+    @safe(default=None)
+    def entry_cpu_pa(self):
+        """PA where the CPU enters the kernel: the image-base PA moved by
+        _entry_delta.  Equal to resolve_entry() on arm64/riscv."""
+        a = self.ensure_arch()
+        base = self.resolve_entry()
+        if a is None or base is None:
+            return None
+        d = self._entry_delta(a)
+        return None if d is None else (base + d) & MASK
+
     @safe(default=None)
     def link_entry_va(self):
-        """LINK virtual address of the kernel image base (the entry symbol).
+        """LINK virtual address of the entry symbol."""
+        a = self.ensure_arch()
+        if a is None or not a.entry_symbol:
+            return None
+        if self._base_symbol(a) == a.entry_symbol:
+            return self.link_image_base_va()
+        v = symval(a.entry_symbol)
+        return (v - self.kaslr_slide) & MASK if v is not None and a._is_va(v) else None
+
+    @safe(default=None)
+    def link_image_base_va(self):
+        """LINK virtual address of the kernel image base, which is what
+        resolve_entry()'s PA locates.
 
         On a PIE/ET_DYN vmlinux (riscv CONFIG_RELOCATABLE) the physical SHADOW
         (add-symbol-file'd at PA) adds a second copy of the ELF ENTRY symbol
@@ -2039,7 +2193,8 @@ class Session:
         a = self.ensure_arch()
         if a is None:
             return None
-        v = symval(a.entry_symbol) if a.entry_symbol else None
+        sym = self._base_symbol(a)
+        v = symval(sym) if sym else None
         if v is not None and a._is_va(v):
             return (v - self.kaslr_slide) & MASK
         base = self.resolve_entry()
@@ -2067,11 +2222,11 @@ class Session:
             # Independent of where $pc currently is, so it stays correct even when
             # a preset anchor stopped us at primary_entry / _start_kernel.
             base = self.resolve_entry()
-            evs = self.link_entry_va()           # image-base link VA (ET_DYN/PIE-safe)
+            evs = self.link_image_base_va()      # the symbol that PA locates (PIE-safe)
             if base is not None and evs is not None:
                 off = (base - evs) & MASK
             else:
-                off = a.auto_calibrate(self)     # ($pc-at-entry, or post-MMU VA) fallback
+                off = a.auto_calibrate(self)     # read from a running kernel, or None
         if off is None:
             if not quiet:
                 print("[%s] calibration failed -- are you stopped in early head.S? "
@@ -2150,7 +2305,7 @@ class Session:
         # from the decompressor (arm64/riscv return None -- fixed physical load) and pin
         # it as entry_pa, so the normal entry break below lands on the relocated kernel.
         _need_x86 = False
-        if a.key == "x86_64" and _env_int("ENTRY_PA") is None:
+        if a.key == "x86_64" and config.get("ENTRY_PA") is None:
             _need_x86 = self.x86_kaslr
             if not _need_x86 and self._compressed_vmlinux():
                 # Auto-detect the cold-frozen case instead of relying on an env flag.
@@ -2161,13 +2316,19 @@ class Session:
                 # this point the kernel is not there, so the scan runs to completion over
                 # all of guest memory and takes minutes.
                 _pc = reg("pc")
-                _dpa = _env_int("X86_DECOMP_PA")
+                _dpa = config.get("X86_DECOMP_PA")
                 _need_x86 = (_pc is not None and _dpa is not None
                              and (_pc & MASK) < _dpa)
                 if _need_x86:
                     LOG.add("x86: pc=%s below decompressor load -> auto decompressor recovery" % fmt(_pc))
         if _need_x86:
             _b = a.recover_kaslr_base(self)
+            _d = self._entry_delta(a) if _b is not None else None
+            if _b is not None and _d is None:
+                print("[%s] x86 KASLR: recovered entry %s, but %s/%s are not in the symbol "
+                      "table, so the image base it implies is unknown." % (
+                          NAME, fmt(_b), a.entry_symbol, self._base_symbol(a)))
+                return False
             if _b is not None:
                 # Everything derived while the decompressor was still running was based on
                 # the NOMINAL load address, because the real kernel was not in RAM yet: a
@@ -2179,13 +2340,13 @@ class Session:
                 self.kaslr_slide = 0
                 self._shadow_unload()
                 self._kaslr_pending = None
-                self.entry_pa = _b               # overwrite the nominal (auto-cached) PA
-                self._entry_recovered = True     # _b is the ELF entry PA, not image base
+                self.entry_pa = (_b - _d) & MASK  # _b is the ELF entry; keep the image base
+                self._entry_recovered = True
                 # Name the route that produced the number.  X86_DECOMP_PA is what
                 # recover_kaslr_base itself routes on: stated means a direct boot, whose
                 # decompressor is walked; unset means a firmware chain, where the EFI
                 # stub hands the entry over and the decompressor stages never execute.
-                _route = ("the decompressor" if _env_int("X86_DECOMP_PA") is not None
+                _route = ("the decompressor" if config.get("X86_DECOMP_PA") is not None
                           else "the EFI stub")
                 print("[%s] x86 KASLR: recovered main-kernel phys base %s via %s; "
                       "breaking there." % (NAME, fmt(_b), _route))
@@ -2198,30 +2359,22 @@ class Session:
                       "unset or unreadable); trying nominal entry -- set $GDBTOOLS_ENTRY_PA "
                       "(or `kearly entry PA`) if it misses."
                       % NAME)
-        base = self.resolve_entry()              # image base (_text load address) PA
-        # x86_64: $GDBTOOLS_ENTRY_PA / info-roms report the IMAGE BASE (where the
-        # loader places _text), but the CPU enters at the ELF entry point,
-        # startup_64.  Older kernels emit startup_64 at _text, so the two coincide;
-        # newer ones place it in .init.text, well above _text, and a break at the
-        # image base is never reached.  Shift the base to the entry by its link
-        # offset from _text (a build constant, read from vmlinux, so a rebuild that
-        # moves startup_64 needs no reconfiguration).  Skipped when the base was
-        # RECOVERED (that value is already the ELF entry PA) and a no-op on
-        # arm64/riscv, whose load address IS the entry symbol.
-        if a.key == "x86_64" and base is not None and not self._entry_recovered:
-            _e, _t = symval(a.entry_symbol), symval("_text")
-            if _e is not None and _t is not None and _e != _t:
-                base = (base + (_e - _t)) & MASK
-                self.entry_pa = base
+        # resolve_entry() is the IMAGE BASE PA; the CPU enters at the entry symbol,
+        # which on newer x86 sits in .init.text well above _text.  Computed here and
+        # never written back, so a second bootbreak starts from the same base.
+        entry = self.entry_cpu_pa()
         anchor = self.current_anchor()
         # break target PA = entry_PA + (&anchor - &entry_symbol)
-        break_pa = base
-        if base is not None and anchor and a.entry_symbol and anchor != a.entry_symbol:
+        break_pa = entry
+        if entry is not None and anchor and a.entry_symbol and anchor != a.entry_symbol:
             d, e = symval(anchor), symval(a.entry_symbol)
-            if d is not None and e is not None:
-                break_pa = (base + (d - e)) & MASK
-            else:
-                print("[%s] anchor '%s' not in vmlinux; using image base" % (NAME, anchor))
+            if d is None or e is None:
+                print("[%s] anchor '%s' is not a symbol in this vmlinux, so there is no break "
+                      "address to compute; fix it ($GDBTOOLS_ANCHOR, the profile, the preset) "
+                      "or clear it with `kearly anchor -`." % (NAME, anchor))
+                return False
+            break_pa = (entry + (d - e)) & MASK
+        self._armed_entry_pa = break_pa
         if pc is not None and break_pa is not None and pc == break_pa:
             return self.calibrate()              # already at the entry
         if break_pa is None:
@@ -2469,7 +2622,7 @@ class Session:
               (NAME, fmt(pc), where, "on" if vp else ("off" if vp is False else "?")))
 
     # --- stop hook ---
-    @safe()
+    @safe(boundary="hook")
     def on_stop(self, _evt):
         if not self.enabled:
             return
@@ -2484,8 +2637,7 @@ class Session:
             # also "physical" but are NOT the kernel entry, so calibrating there
             # would be wrong.  Use `kearly bootbreak` to reach the entry first.
             pc = reg("pc")
-            epa = self.resolve_entry()
-            if pc is not None and epa is not None and pc == epa:
+            if pc is not None and pc in (self.entry_cpu_pa(), self._armed_entry_pa):
                 self.calibrate(quiet=True)
         elif self.offset is None and m in ("virtual", "idmap"):
             # Running kernel (post-MMU): resolve_entry's physical Image-magic scan
@@ -2761,7 +2913,7 @@ class Session:
                 elif not mmu_on and not en:
                     execstr("enable %s" % locstr)
 
-    @safe()
+    @safe(boundary="hook")
     def _on_bp_created(self, bp):
         n = getattr(bp, "number", None)
         if n is None:
@@ -2876,7 +3028,7 @@ class Session:
                 if not live:
                     groups.remove(g)
 
-    @safe()
+    @safe(boundary="hook")
     def _on_bp_deleted(self, bp):
         num = getattr(bp, "number", -1)
         self._managed_bps.discard(num)
@@ -3093,11 +3245,11 @@ class Session:
         # catcher here too -- the CLI one is deletable and would be lost to a `delete`.
         self._ensure_crossing_catcher("a probe armed earlier", use_python=True)
 
-    @safe()
+    @safe(boundary="hook")
     def _on_prompt(self):
         self._service_catch_wanted()
 
-    @safe()
+    @safe(boundary="hook")
     def _on_cont(self, _evt=None):
         """Resume is the last safe moment before the guest runs again, and unlike a gdb
         prompt it happens in a scripted -ex session too.  Without this, a `watch SYM`
@@ -3233,7 +3385,7 @@ class Session:
             # Leave it uncalibrated and say what to run instead.
             if getattr(a, "key", None) == "x86_64" and self._compressed_vmlinux():
                 _pc = reg("pc")
-                _dpa = _env_int("X86_DECOMP_PA")
+                _dpa = config.get("X86_DECOMP_PA")
                 # X86_DECOMP_PA is stated only for a DIRECT boot, so it cannot carry
                 # this guard on its own any more: under a firmware chain there is no
                 # decompressor address to compare against, and the pre-kernel pc would
@@ -3247,7 +3399,7 @@ class Session:
                 # pre-kernel boot path -- that path is always ring 0.
                 _cpl = evi("$cs")
                 if _pc is not None and not a._is_va(_pc) and (_cpl is None or (_cpl & 3) == 0) and (
-                        (self.x86_kaslr and _env_int("ENTRY_PA") is None
+                        (self.x86_kaslr and config.get("ENTRY_PA") is None
                          and not self._entry_pinned and not self._entry_recovered)
                         or (_dpa is not None and (_pc & MASK) < _dpa)):
                     LOG.add("catcher: x86 still compressed -- not calibrating from the reset vector")
@@ -3576,8 +3728,29 @@ class Session:
         uninstall_kernel_guards()
 
 
-try:
-    SESSION                      # re-sourcing preserves calibration / shadow state
-except NameError:
-    SESSION = Session()
+def _previous_sessions():
+    """Sessions an earlier load of this package left behind in this gdb."""
+    prev = getattr(gdb, "_gdbtools_session", None)
+    if prev is not None:
+        return [prev]
+    if getattr(gdb, "_gdbtools_command_names", None) is None:
+        return []                              # the first load in this gdb
+    import gc                                  # a load that predates the attribute
+    return [o for o in gc.get_objects()
+            if type(o).__name__ == "Session" and type(o).__module__ == __name__]
+
+
+# Re-sourcing builds this module afresh; the previous Session's handlers are
+# detached and its state carried over, so a re-source neither doubles every hook
+# nor drops the calibration.
+_PREV = _previous_sessions()
+SESSION = Session()
+if _PREV:
+    SESSION._adopt(_PREV)
+gdb._gdbtools_session = SESSION
 state.set_session(SESSION)
+try:
+    gdb.events.new_objfile.connect(SESSION._on_new_objfile)
+    SESSION._objfile_hooked = True
+except Exception:
+    LOG.add("new_objfile event unavailable")
