@@ -2,8 +2,10 @@
 import json
 import struct
 import gdb
-import os
 import re
+
+from . import config
+from .config import ConfigError
 
 MASK = (1 << 64) - 1
 NAME = "gdbtools"
@@ -28,9 +30,27 @@ class _Ring:
 LOG = _Ring()
 
 
-_DEBUG = bool(os.environ.get("GDBTOOLS_DEBUG"))
+try:
+    _DEBUG = bool(config.get("DEBUG"))
+except config.ConfigError:
+    _DEBUG = False                      # reported by bootstrap's validate pass
 _BUG_TYPES = (NameError, AttributeError, TypeError)
 _REPORTED = set()
+_CONFIG_REPORTED = set()
+
+
+def report_config_error(e, once=True):
+    """Say on gdb's stderr that an injected value is invalid; once per message
+    unless `once` is False."""
+    msg = str(e)
+    if once and msg in _CONFIG_REPORTED:
+        return
+    _CONFIG_REPORTED.add(msg)
+    LOG.add("config: " + msg)
+    try:
+        gdb.write("[%s] %s\n" % (NAME, msg), gdb.STDERR)
+    except Exception:
+        pass
 
 
 def _report(where, e):
@@ -45,14 +65,29 @@ def _report(where, e):
         pass
 
 
-def safe(default=None):
+def safe(default=None, boundary=None):
     """Decorator: swallow every exception, log it, return `default`.  A NameError,
     AttributeError or TypeError is also reported on gdb's stderr, once per site and
-    message; with $GDBTOOLS_DEBUG set every swallowed exception is."""
+    message; with $GDBTOOLS_DEBUG set every swallowed exception is.
+
+    ConfigError (an invalid injected value) is never swallowed on the way up: it
+    passes through to the boundary, where boundary="command" turns it into the
+    command's gdb error and boundary="hook" reports it once and returns `default`."""
     def deco(fn):
         def wrap(*a, **k):
             try:
                 return fn(*a, **k)
+            except ConfigError as e:
+                if boundary == "command":
+                    raise gdb.GdbError("[%s] %s" % (NAME, e))
+                if boundary == "hook":
+                    report_config_error(e)
+                    return default
+                raise
+            except gdb.GdbError:
+                if boundary == "hook":
+                    return default
+                raise                              # a command's own usage error
             except Exception as e:                      # deliberately catch-all
                 LOG.add("[%s] %s: %s" % (getattr(fn, "__name__", "?"),
                                          type(e).__name__, e))
@@ -109,6 +144,16 @@ def reg(name):
     return evi("$" + name)
 
 
+def word():
+    """(size, C type) of the target's pointer-sized word: 8 on the 64-bit kernels
+    this package debugs, 4 on a 32-bit user program."""
+    try:
+        size = int(gdb.lookup_type("void").pointer().sizeof)
+    except Exception:
+        size = 8
+    return (4, "unsigned int") if size == 4 else (8, "unsigned long long")
+
+
 def symval(name):
     """Address (&name) of a symbol as int, or None if the symbol is unknown."""
     return evi("(unsigned long long)&%s" % name)
@@ -155,52 +200,7 @@ def monitor_reg(name):
         return None
 
 
-# Configuration reaches this package one way: a GDBTOOLS_-prefixed environment
-# variable set by whoever launched gdb.  Nothing here searches for a value it was
-# not given, and there is no second spelling to fall back to -- a name that is
-# almost right must fail, not quietly resolve to something else.  Pass the bare
-# suffix ("AUTO"); the prefix is added here.
-_ENV_PREFIX = "GDBTOOLS_"
-
-
-def _env(name):
-    """An injected override, or None if it was not set."""
-    v = os.environ.get(_ENV_PREFIX + name)
-    return v if v else None
-
-
-def _env_int(name):
-    """An injected override as an int, or None if it was not set.
-
-    A value that WAS set and does not parse is reported, not discarded.  Silently
-    returning None there is the worst outcome available: the caller falls through
-    to auto-discovery, usually finds a plausible answer, and the session comes up
-    looking calibrated while the value the operator thought they set was never
-    used."""
-    v = _env(name)
-    if v is None:
-        return None
-    try:
-        return int(v, 0) & MASK
-    except Exception:
-        msg = "%s%s is set to %r, which is not a number; ignoring it" % (_ENV_PREFIX, name, v)
-        LOG.add(msg)
-        print("[%s] %s" % (NAME, msg))
-        return None
-
-
-def _as_int(v):
-    """Coerce a JSON scalar ('0x40000000' | int | '1073741824') to int, or None."""
-    if v is None:
-        return None
-    if isinstance(v, int):
-        return v & MASK
-    try:
-        return int(str(v), 0) & MASK
-    except Exception:
-        return None
-
-
 # Underscore-prefixed helpers are part of this module's public surface for the
 # rest of the package (`from .runtime import *`), which would otherwise skip them.
-__all__ = ['MASK', 'NAME', '_Ring', 'LOG', 'safe', 'ev', 'evi', 'execstr', 'exec_confirmless', 'reg', 'symval', 'fmt', '_h', 'read_guest_bytes', 'monitor_reg', '_ENV_PREFIX', '_env', '_env_int', '_as_int']
+__all__ = ['MASK', 'NAME', '_Ring', 'LOG', 'safe', 'ev', 'evi', 'execstr', 'exec_confirmless', 'reg', 'word', 'symval', 'fmt', '_h', 'read_guest_bytes', 'monitor_reg', 'config', 'ConfigError',
+           'report_config_error']
