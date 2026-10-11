@@ -37,11 +37,41 @@ _SYM_NAME = re.compile(r"^(.+?)(?:\s*\+\s*(\d+))?\s+in section\b")
 # "where does the code end" for a sizeless symbol.  Without it the listing at
 # `_text` disassembles the PE/COFF header as SVE instructions.
 #
-# Read from the ELF because gdb hides mapping symbols from `info symbol`, and as
-# raw structs because iterating pyelftools' symbol objects costs six seconds
-# against eighty milliseconds.  Built lazily, only for a bound that is not solid.
+# Read from the ELF because gdb hides mapping symbols from `info symbol`, as raw
+# ELF64 little-endian structs (no third-party parser).  Built lazily, only for a
+# bound that is not solid.
 _MAP_CACHE = {}
 _SYM64 = struct.Struct("<IBBHQQ")
+_EHDR64 = struct.Struct("<16sHHIQQQIHHHHHH")
+_SHDR64 = struct.Struct("<IIQQQQIIQQ")
+_SHT_SYMTAB = 2
+
+
+def _read_symtab(fh):
+    """(symtab bytes, its string table bytes) of an ELF64 LE file, or None."""
+    eh = fh.read(_EHDR64.size)
+    if len(eh) < _EHDR64.size or eh[:4] != b"\x7fELF" or eh[4] != 2 or eh[5] != 1:
+        return None
+    f = _EHDR64.unpack(eh)
+    shoff, shentsize, shnum = f[6], f[11], f[12]
+    if not shoff or shentsize < _SHDR64.size:
+        return None
+
+    def shdr(i):
+        fh.seek(shoff + i * shentsize)
+        return _SHDR64.unpack(fh.read(_SHDR64.size))
+    if shnum == 0:                          # extended numbering: count in section 0
+        shnum = shdr(0)[5]
+    for i in range(shnum):
+        sh = shdr(i)
+        if sh[1] != _SHT_SYMTAB:
+            continue
+        st = shdr(sh[6])                    # sh_link names the string table
+        fh.seek(sh[4])
+        raw = fh.read(sh[5])
+        fh.seek(st[4])
+        return raw, fh.read(st[5])
+    return None
 
 
 def _mapping_symbols(path):
@@ -55,22 +85,18 @@ def _mapping_symbols(path):
     if key in _MAP_CACHE:
         return _MAP_CACHE[key]
     try:
-        from elftools.elf.elffile import ELFFile
         with open(path, "rb") as fh:
-            elf = ELFFile(fh)
-            symtab = elf.get_section_by_name(".symtab")
-            strtab = elf.get_section_by_name(".strtab")
-            if symtab is None or strtab is None:
-                _MAP_CACHE[key] = None
-                return None
-            raw, strs = symtab.data(), strtab.data()
-        data = []
-        for i in range(len(raw) // _SYM64.size):
-            nm_off, _info, _other, _shndx, val, _size = _SYM64.unpack_from(raw, i * _SYM64.size)
-            # '$' then 'd', two byte comparisons.
-            if nm_off < len(strs) and strs[nm_off] == 0x24 and strs[nm_off + 1] == 0x64:
-                data.append(val)
-        data.sort()
+            tabs = _read_symtab(fh)
+        data = None
+        if tabs is not None:
+            raw, strs = tabs
+            data = []
+            for i in range(len(raw) // _SYM64.size):
+                nm_off, _info, _other, _shndx, val, _size = _SYM64.unpack_from(raw, i * _SYM64.size)
+                # '$' then 'd', two byte comparisons.
+                if nm_off + 1 < len(strs) and strs[nm_off] == 0x24 and strs[nm_off + 1] == 0x64:
+                    data.append(val)
+            data.sort()
     except Exception:
         data = None
     _MAP_CACHE[key] = data
@@ -84,12 +110,12 @@ def _link_address(addr):
     parked on the MMU crossing the counter is still physical while symbols are
     already relocated, and using the counter converts the wrong way."""
     sess = state.session()
-    if sess is None or getattr(sess, "arch", None) is None:
-        return None                       # no kernel session: addresses are already
-                                          # what the linker saw
+    arch = sess.ensure_arch() if sess is not None else None
+    if arch is None:
+        return None
     try:
         va = addr
-        if not sess.arch._is_va(addr):
+        if not arch._is_va(addr):
             if sess.offset is None:
                 return None
             va = sess.p2v(addr)
@@ -203,7 +229,7 @@ def _inlined_at(addr):
     return names[0] if len(names) > 1 else None
 
 
-def _disassemble_bounds(addr):
+def _disassemble_bounds(addr, arch_obj):
     """Bounds from gdb's disassembler, which knows a minimal symbol's size with
     no debug info.  Bounds only: instructions come from the architecture API,
     which is far faster where there is no symtab to cache against."""
@@ -213,16 +239,21 @@ def _disassemble_bounds(addr):
     _, rows = _kdis_parse(txt)
     if not rows:
         return None
-    return rows[0][0], rows[-1][0] + 4
+    last = rows[-1][0]
+    try:
+        size = int(arch_obj.disassemble(last)[0]["length"])
+    except Exception:
+        size = 1                          # still covers the last row and nothing past it
+    return rows[0][0], last + max(size, 1)
 
 
-def _bounds(addr):
+def _bounds(addr, arch_obj):
     """(lo, hi, how) where `how` records what the bound rests on, because a
     synthetic bound must never look like a real one."""
     b = _block_bounds(addr)
     if b:
         return b[0], b[1], "debug-info"
-    b = _disassemble_bounds(addr)
+    b = _disassemble_bounds(addr, arch_obj)
     if b:
         lo, hi = b
         # A span this wide means a boundary label, not a function.  Only then
@@ -290,7 +321,7 @@ _TERMS = {
         "brk": ("trap",), "hlt": ("trap",), "udf": ("undef",),
     },
     "X86_64": {
-        "ret": ("ret",), "retq": ("ret",), "repz retq": ("ret",),
+        "ret": ("ret",), "retq": ("ret",),
         "iret": ("eret",), "iretq": ("eret",), "sysret": ("eret",),
         "sysretq": ("eret",), "sysexit": ("eret",),
         "syscall": ("trap",), "sysenter": ("trap",), "int3": ("trap",),
@@ -308,7 +339,7 @@ _TERMS = {
 # only at the moment control arrives, so away from the counter it is unresolved.
 _INDIRECT_IF_NOT_IMMEDIATE = {
     "X86_64": ("jmp", "jmpq"),
-    "Riscv64": ("jalr", "c.jalr", "j"),
+    "Riscv64": ("j",),        # jalr/c.jalr link a return address: calls, not exits
 }
 
 _IMMEDIATE = re.compile(r"^[\$#]?0x[0-9a-fA-F]+$")
@@ -319,6 +350,7 @@ def _terminator(arch, mnem, ops):
     there, its destination is not in the text."""
     if arch is None:
         return None
+    mnem, ops = arch.split_prefixes(mnem, ops)   # `repz ret`, `notrack jmp *%rax`
     key = arch.__class__.__name__
     m = arch.normalize_mnem(mnem)
     fixed = _TERMS.get(key, {}).get(m)
@@ -385,7 +417,9 @@ def _blocks(rows, insns, arch):
     for b, s in enumerate(starts):
         end = starts[b + 1] - 1 if b + 1 < len(starts) else n - 1
         term = insns[end]["terminator"]
-        mnem = arch.normalize_mnem(rows[end][2]) if arch else rows[end][2]
+        mnem = rows[end][2]
+        if arch:
+            mnem = arch.normalize_mnem(arch.split_prefixes(mnem, rows[end][3])[0])
         conditional = bool(_CONDITIONAL.get(arch.__class__.__name__ if arch else "", re.compile(r"^$")).match(mnem))
         blocks.append({
             "id": b, "first": s, "last": end,
@@ -394,11 +428,15 @@ def _blocks(rows, insns, arch):
         })
         if term in _NO_SUCCESSOR:
             continue
-        if term == "branch" and end in targets:
-            edges.append({"from": b, "to": block_of[targets[end]],
-                          "kind": "true" if conditional else "uncond"})
+        if term == "branch":
+            # An unconditional jump never falls through, even when its target is
+            # outside this listing (a tail call); a conditional one does.
+            if end in targets:
+                edges.append({"from": b, "to": block_of[targets[end]],
+                              "kind": "true" if conditional else "uncond"})
             if conditional and end + 1 < n:
-                edges.append({"from": b, "to": block_of[end + 1], "kind": "false"})
+                edges.append({"from": b, "to": block_of[end + 1],
+                              "kind": "false" if end in targets else "fall"})
         elif end + 1 < n:
             edges.append({"from": b, "to": block_of[end + 1], "kind": "fall"})
     return blocks, edges
@@ -420,7 +458,6 @@ def _dominators(nblocks, pred, entry=0):
     if nblocks == 0:
         return []
     order, seen = [], set()
-    stack = [entry]
     # Reverse post-order over the successor graph, rebuilt from pred.
     succ = [[] for _ in range(nblocks)]
     for b in range(nblocks):
@@ -562,7 +599,7 @@ def _payload_unguarded(addr):
     if arch_obj is None:
         return {"error": "no architecture available; is a target connected?"}
 
-    lo, hi, how = _bounds(addr)
+    lo, hi, how = _bounds(addr, arch_obj)
     rows, clamped = _rows(arch_obj, lo, hi)
     if not rows:
         return {"error": "nothing disassembled at 0x%x" % addr}
@@ -609,11 +646,16 @@ def _payload_unguarded(addr):
         state = ["unknown"] * len(blocks)
         if pc_block is not None:
             idom = _dominators(len(blocks), pred)
+            nb = len(blocks)
             exits = [b["id"] for b in blocks if not succ[b["id"]]]
-            rpred = [list(succ[b]) for b in range(len(blocks))]
-            post = _dominators(len(blocks), rpred, exits[0]) if exits else None
+            # Post-dominance is relative to ALL exits: each one feeds a virtual
+            # exit node `nb`, and "will execute" means "on every path to any exit".
+            post = None
+            if exits:
+                rpred = [list(succ[b]) + ([nb] if b in exits else []) for b in range(nb)] + [[]]
+                post = _dominators(nb + 1, rpred, nb)
             dom = _chain(idom, pc_block)
-            pdom = _chain(post, pc_block) if post else set()
+            pdom = (_chain(post, pc_block) - {nb}) if post else set()
             fwd = _reachable(pc_block, succ)
             for b in range(len(blocks)):
                 if b == pc_block:

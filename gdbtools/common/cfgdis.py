@@ -202,8 +202,8 @@ are ignored -- cfgdis draws its own columns) -- omit it for the current function
     cfgdis start_kernel          by symbol or address
     cfgdis 0x80200000, +0x80     an explicit range
     cfgdis __memset, __memset+0x40
-Options: `ascii` (ASCII glyphs for non-UTF terminals), `mono` (no colour).
-Works in every regime -- physical early-boot addresses and virtual post-MMU
+Options: `ascii` (ASCII glyphs for non-UTF terminals), `mono` (no colour);
+$GDBTOOLS_KDIS_ASCII / $GDBTOOLS_NO_COLOR set the defaults.  Works in every regime -- physical early-boot addresses and virtual post-MMU
 addresses alike -- so it stays useful for the whole session, not just before the
 MMU comes up.  Arrows cover *jumps* (conditional branches + the unconditional
 intra-function jump), not calls -- exactly like radare2's linear view."""
@@ -211,11 +211,11 @@ intra-function jump), not calls -- exactly like radare2's linear view."""
     def __init__(self, name="cfgdis"):
         super(CfgDis, self).__init__(name, gdb.COMMAND_USER)
 
-    @safe()
+    @safe(boundary="command")
     def invoke(self, arg, from_tty):
         toks = (arg or "").split()
-        ascii_mode = False
-        color = not _env("NO_COLOR")
+        ascii_mode = bool(config.get("KDIS_ASCII"))
+        color = not config.get("NO_COLOR")
         while toks and (toks[0].startswith("/")
                         or toks[0].lower() in ("ascii", "utf8", "mono", "nocolor", "color")):
             t = toks.pop(0).lower()
