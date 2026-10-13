@@ -12,10 +12,11 @@ to be true about where the repository lives -- clone it anywhere.
 import os
 import sys
 
-# realpath, not abspath: the loader is commonly reached through a symlink, and
-# abspath would leave sys.path pointing at the link's directory, where there is
-# no `gdbtools` package to import.
-_HERE = os.path.dirname(os.path.realpath(__file__))
+# The code object's own file name, not __file__: when this is sourced from inside
+# another Python file (pwndbg re-sources ~/.gdbinit from its loader), __main__
+# keeps the OUTER file's __file__ and the package would be looked for next to it.
+# realpath, not abspath: the loader is commonly reached through a symlink.
+_HERE = os.path.dirname(os.path.realpath(sys._getframe().f_code.co_filename))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
