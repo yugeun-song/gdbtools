@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# gdbtools -- start gdb with gdbtools loaded, and look after the install.
+set -uo pipefail
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd -P "$(dirname "$_self")/.." && pwd)"
+LOADER="${ROOT}/gdbtools.py"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/gdbtools"
+
+# Colour only on a terminal, never under NO_COLOR or TERM=dumb; ASCII marks
+# outside a UTF-8 locale.
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]]; then
+    B=$'\e[1m' D=$'\e[2m' R=$'\e[31m' G=$'\e[32m' Y=$'\e[33m' C=$'\e[36m' N=$'\e[0m'
+else
+    B="" D="" R="" G="" Y="" C="" N=""
+fi
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) OKM="✓" NOM="✗" ;;
+    *) OKM="+" NOM="x" ;;
+esac
+ok()   { printf '  %s%s%s %s\n' "$G" "$OKM" "$N" "$*"; }
+bad()  { printf '  %s%s%s %s\n' "$R" "$NOM" "$N" "$*"; }
+opt()  { printf '  %s-%s %s\n' "$D" "$N" "$*"; }
+die()  { printf '%sgdbtools:%s %s\n' "$R$B" "$N" "$*" >&2; exit 1; }
+
+usage() {
+    cat <<USAGE
+${B}gdbtools${N} -- gdb extensions for control flow, symbols and early-boot Linux kernels
+
+  ${C}gdbtools gdb${N} [GDB ARGS...]    start gdb with gdbtools loaded (\$GDB picks the gdb)
+  ${C}gdbtools path${N}                 print the loader, for a tool that sources it
+  ${C}gdbtools config${N}               every GDBTOOLS_* setting and its value here
+  ${C}gdbtools doctor${N}               check gdb, its Python, pwndbg and the install
+  ${C}gdbtools install${N} [--global]   record this checkout for kbuildlab and nvim;
+                                --global also loads it in every gdb
+  ${C}gdbtools uninstall${N}            undo install
+  ${C}gdbtools version${N}
+
+Inside gdb: \`kearly config\` and \`kearly set KEY VALUE\` change the same settings.
+USAGE
+}
+
+_family() {
+    local id="" like="" w
+    if [[ -r /etc/os-release ]]; then
+        id="$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"' | head -1)"
+        like="$(sed -n 's/^ID_LIKE=//p' /etc/os-release | tr -d '"' | head -1)"
+    fi
+    for w in $id $like; do
+        case "$w" in
+            arch|manjaro|endeavouros|cachyos) echo "pacman -S gdb"; return ;;
+            debian|ubuntu|linuxmint|pop) echo "apt install gdb-multiarch"; return ;;
+            fedora|rhel|centos|rocky|almalinux) echo "dnf install gdb"; return ;;
+            void) echo "xbps-install gdb-multiarch"; return ;;
+            suse|opensuse|opensuse-leap|opensuse-tumbleweed|sles) echo "zypper install gdb"; return ;;
+        esac
+    done
+}
+
+cmd_doctor() {
+    local gdb="${GDB:-gdb}" rc=0 v
+    printf '%sgdbtools doctor%s\n' "$B" "$N"
+    printf '  %scheckout%s     %s\n' "$C" "$N" "$ROOT"
+    if command -v "$gdb" >/dev/null 2>&1; then
+        v="$("$gdb" --version 2>/dev/null | head -1)"
+        ok "${v:-$gdb}"
+        if v="$("$gdb" -nx -batch -ex 'python import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" \
+           && [[ -n "$v" ]]; then
+            ok "Python $v inside $gdb"
+        else
+            bad "$gdb has no working Python; gdbtools needs it"; rc=1
+        fi
+        if "$gdb" -q -nx -batch -ex "source $LOADER" -ex 'help cmdinfo' >/dev/null 2>&1; then
+            ok "the package loads"
+        else
+            bad "$gdb -nx -batch -ex 'source $LOADER' fails"; rc=1
+        fi
+        if "$gdb" -q -batch -ex 'python print("pwndbg" in __import__("sys").modules)' 2>/dev/null | grep -qx True; then
+            ok "pwndbg is loaded by your gdb init file"
+        else
+            opt "pwndbg is not loaded (optional: the context panels need it)"
+        fi
+    else
+        local h; h="$(_family)"
+        bad "$gdb is not installed${h:+ -- install: $h}"; rc=1
+    fi
+    if [[ -r "$CONF/root" ]]; then
+        if [[ "$(<"$CONF/root")" == "$ROOT" ]]; then ok "recorded for kbuildlab and nvim ($CONF/root)"
+        else bad "$CONF/root names $(<"$CONF/root"), not this checkout -- gdbtools install"; rc=1; fi
+    else
+        bad "not recorded -- gdbtools install"; rc=1
+    fi
+    if command -v gdbtools >/dev/null 2>&1; then ok "on PATH as $(command -v gdbtools)"
+    else opt "not on PATH (./install.sh puts it there)"; fi
+    return $rc
+}
+
+cmd_config() {
+    PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -B - "$B" "$C" "$D" "$N" <<'EOF'
+import os, sys
+from gdbtools.common import config
+B, C, D, N = sys.argv[1:]
+names = config.names()
+w = max(len(n) for n in names) + len(config.PREFIX)
+for n in names:
+    v = os.environ.get(config.PREFIX + n)
+    shown = (C + v + N) if v else (D + "-" + N)
+    print("  %-*s  %s" % (w, config.PREFIX + n, shown))
+print("\n  %sSet them in the environment before gdb starts, or in gdb with `kearly set KEY VALUE`.%s" % (D, N))
+EOF
+}
+
+sub="${1:-help}"; shift || true
+case "$sub" in
+    gdb)       exec "${GDB:-gdb}" -ex "source $LOADER" "$@" ;;
+    path)      printf '%s\n' "$LOADER" ;;
+    config)    cmd_config ;;
+    doctor)    cmd_doctor ;;
+    install)   exec "$ROOT/setup.sh" "$@" ;;
+    uninstall) exec "$ROOT/setup.sh" --uninstall ;;
+    version)   git -C "$ROOT" describe --tags --always --dirty 2>/dev/null \
+                   || sed -n 's/^__version__ = "\(.*\)"/\1/p' "$ROOT/gdbtools/__init__.py" ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; die "unknown command '$sub'" ;;
+esac

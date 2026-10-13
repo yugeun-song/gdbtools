@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Wire this checkout into gdb, and record where it is so other tools can find it.
+# Record where this checkout is, so the tools that start gdb (kbuildlab, the nvim
+# adapter, `gdbtools gdb`) can source it.  A plain gdb stays stock: nothing goes
+# into the gdb init file unless --global asks for it.
 #
-# Nothing is written into the repository: clone it anywhere, run this, and the
-# one machine-specific path lives in your gdb init file, generated rather than
-# hand-written.
+# Nothing is written into the repository: clone it anywhere and run this.
 set -euo pipefail
 
 REPO="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -11,21 +11,24 @@ LOADER="${REPO}/gdbtools.py"
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/gdbtools"
 BEGIN="# >>> gdbtools >>>"
 END="# <<< gdbtools <<<"
-MODE="install"
+MODE="library"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --check)              MODE="check"; shift ;;
         --uninstall)          MODE="uninstall"; shift ;;
         --library|--no-global) MODE="library"; shift ;;
+        --global)             MODE="install"; shift ;;
         -h|--help)
-            cat <<USAGE
-usage: setup.sh [--check] [--library] [--uninstall]
+            cat <<'USAGE'
+usage: setup.sh [--global] [--check] [--uninstall]
 
-  (no option)  write the loader line into the gdb init file gdb actually reads
-  --library    record the root pointer only; do NOT source it globally, so a
-               plain gdb stays stock and a caller (an editor adapter, a lab
-               script) sources gdbtools/gdbtools.py itself
+  (no option)  record the root pointer only, and take any loader line this
+               script wrote out of the gdb init file: a plain gdb stays stock,
+               and kbuildlab, the nvim adapter and `gdbtools gdb` source
+               gdbtools.py themselves
+  --global     also write the loader line into the gdb init file gdb reads,
+               so every gdb loads gdbtools
   --check      report the current state and change nothing
   --uninstall  remove what this script added; the checkout is left alone
 USAGE
@@ -98,9 +101,9 @@ if [[ "$MODE" == "check" ]]; then
             fi
         fi
     elif [[ -r "${CONF}/root" ]]; then
-        say "loader line   absent (library mode: a caller sources it)"
+        say "loader line   absent (library mode: kbuildlab, nvim and \`gdbtools gdb\` source it)"
     else
-        warn "loader line absent from ${INIT} -- run setup.sh (or setup.sh --library)"
+        warn "no root pointer and no loader line -- run setup.sh"
     fi
     say "root pointer  $([[ -r "${CONF}/root" ]] && cat "${CONF}/root" || echo '(unset)')"
     if command -v gdb >/dev/null 2>&1; then

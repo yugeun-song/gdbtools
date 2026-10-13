@@ -2,9 +2,9 @@
 
     (gdb) source /path/to/gdbtools/gdbtools.py
 
-or, once, through setup.sh, which writes that line into the gdb init file gdb
-actually reads.  Sourcing is idempotent and re-sourcing picks up edited modules,
-so a hacking loop is: edit, re-source, run.
+or start gdb with `gdbtools gdb`; `setup.sh --global` writes that line into the
+gdb init file instead.  Sourcing is idempotent and re-sourcing picks up edited
+modules, so a hacking loop is: edit, re-source, run.
 
 The tool locates its own package as this file's sibling and needs nothing else
 to be true about where the repository lives -- clone it anywhere.
