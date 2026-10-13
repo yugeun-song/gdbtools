@@ -9,7 +9,7 @@ has to be a kernel.
 | --- | --- |
 | `cfgjson` | the control-flow graph of the function around an address, as JSON: basic blocks, typed edges, layered ranks, and which blocks are proved executed, unreachable or still unknown |
 | `cfgdis` | the same structure as text, with branch arrows drawn in the left margin |
-| `sym` | name the symbol at an address |
+| `addr2sym` | name the symbol at an address, physical or virtual |
 | `stackscan` | read the stack word by word and name every value that resolves, for when `backtrace` cannot work |
 | `chain` | follow a pointer chain, bounded and cycle-guarded |
 | `enumvals` | list every value of a C/C++ enum as this build defines them, decimal by default or `/x` for hex |
@@ -27,8 +27,8 @@ phys-shifted shadow symbol file, which revives stock gdb and pwndbg alike withou
 patching either.
 
 It adds `kearly kp2v kv2p kb kw ksr ksregs kbits kfin kcensus kpt kpgd kpthex koff kx
-kdtb mmview memlayout kmemblock`, and stays inert until a vmlinux is loaded, so
-sourcing it globally costs an ordinary session nothing. Targets arm64, x86_64 and
+kdtb mmview memlayout kmemblock`. Nothing it does to gdb, pwndbg or the symbol
+table happens unless asked for (see Configuration). Targets arm64, x86_64 and
 riscv64.
 
 `docs/early-boot.md` is the full manual: calibration, MMU regimes, page tables,
@@ -40,44 +40,34 @@ Clone it anywhere; nothing depends on the location.
 
 ```sh
 git clone https://github.com/yugeun-song/gdbtools
-./gdbtools/setup.sh
+./gdbtools/install.sh            # ~/.local/bin/gdbtools; --system: /usr/local/bin (sudo)
+gdbtools doctor
 ```
 
-`setup.sh` asks gdb which init file it actually reads, writes one `source` line
-into it, and records the checkout path under
-`${XDG_CONFIG_HOME:-~/.config}/gdbtools/root` so other tools can find it.
-`--check` reports the state of an installation and changes nothing; `--uninstall`
-removes what it added and leaves the checkout alone.
-
-`setup.sh --library` (alias `--no-global`) records only the checkout path and
-writes no global `source` line, so a plain `gdb` stays exactly stock and a caller
-— an editor's debug adapter, a lab script — sources `gdbtools.py` itself when it
-wants the extension. kbuildlab's `attach` and the nvim adapter both find the
-checkout through that root pointer.
-
-To load it by hand instead:
+`install.sh` links the `gdbtools` command into a directory on `PATH` (it says how
+to add one that is missing; shell files are never edited) and runs `setup.sh`,
+which records the checkout in `${XDG_CONFIG_HOME:-~/.config}/gdbtools/root`.
+kbuildlab's `attach` and the nvim adapter find `gdbtools.py` there and source it
+themselves; a plain `gdb` stays stock. `setup.sh --global` also writes a `source`
+line into the init file gdb reads, so every gdb loads it. `--check` reports,
+`--uninstall` removes what was added.
 
 ```
-(gdb) source /path/to/gdbtools/gdbtools.py
+gdbtools gdb [GDB ARGS]     gdb with gdbtools loaded ($GDB picks the gdb)
+gdbtools path               the loader, for a tool that sources it
+gdbtools config             every GDBTOOLS_* setting and its value here
+gdbtools doctor             gdb, its Python, pwndbg and the install
+(gdb) source /path/to/gdbtools/gdbtools.py      by hand; re-sourcing picks up edits
 ```
 
-Re-sourcing is idempotent and picks up edited modules, so the hacking loop is
-edit, re-source, run.
+### Command names
 
-### The `sym` takeover
-
-Library mode is the recommended mode, because of `sym`. In stock gdb `sym` is the
-unique-prefix abbreviation of `symbol-file`, and registering a command by that
-name silently replaces it for the whole session. Sourcing this package globally
-would therefore change what `sym` does in every gdb session on the machine. In
-library mode the takeover happens only in a session that asked for it, and it is
-announced when it does:
-
-```
-[gdbtools] took over existing gdb command(s): sym
-[gdbtools]   the previous meaning is gone for this session; the full name still
-             works where one exists (e.g. `symbol-file` for `sym`)
-```
+No name here replaces a gdb or pwndbg command. A new name still shares
+abbreviations: without pwndbg, `kearly` makes `k` stop meaning `kill` and `chain`
+makes `ch` stop meaning `checkpoint`; with pwndbg, `kfin` takes `kf` from `kfile`.
+Every abbreviation that resolved before the package loaded and is ambiguous after
+is kept as an alias of what it meant (`cmdinfo kept` lists them), so typing it
+does what it did before.
 
 ## Finding commands: cmdinfo and fz
 
@@ -132,11 +122,13 @@ Attach to a frozen kernel and calibrate:
 ```
 
 Or export `GDBTOOLS_AUTO=1` before starting gdb: `kearly on` then arms itself the
-moment a kernel image is loaded. Boards that QEMU cannot describe take a JSON
-profile through `$GDBTOOLS_PROFILE` (see `profiles/`) or a device tree through
-`$GDBTOOLS_DTB`. On x86_64, whether the image base is recovered and by which route
-(direct boot or EFI stub) is controlled by `GDBTOOLS_ENTRY_PA` and the
-`GDBTOOLS_X86_*` variables below; `docs/early-boot.md` covers it.
+moment a kernel image is loaded. What else the session does -- the shadow symbol
+file, the KASLR slide, the pwndbg panels and guards -- is each its own setting,
+off unless stated; kbuildlab's `attach` states all of them. Boards that QEMU
+cannot describe take a JSON profile through `$GDBTOOLS_PROFILE` (see `profiles/`)
+or a device tree through `$GDBTOOLS_DTB`. On x86_64 the image base is recovered
+through the decompressor or the EFI stub, chosen by `GDBTOOLS_BOOT`;
+`docs/early-boot.md` covers it.
 
 `kmemblock` reads memblock — firmware's or the device tree's memory ranges in
 `memblock.memory`, and everything claimed back out of them in `memblock.reserved`.
@@ -156,24 +148,39 @@ correctly without being taught about it.
 
 ## Configuration is injected, not discovered
 
-This package operates on what it is handed. It carries no machine constants, it
-does not scan the host for a VM to attach to, and it does not derive a path from
-another path. Whoever launches gdb — a lab script, an editor's debug adapter —
-states the machine; if what they state is wrong, the tool fails and says which
-value was missing rather than substituting a plausible one that looks calibrated
-while every address is quietly off.
+This package operates on what it is handed. It does not scan the host for a VM
+and does not derive a path from another path. Whoever launches gdb states the
+machine; a value that is wrong fails by name instead of being replaced by a
+plausible one. The only machine facts it carries are QEMU's default boards (the
+RAM base of `virt`, `pc` and `q35`, used once the QEMU monitor names one of them)
+and the x86 boot protocol's 0x100000 decompressor address for a direct boot.
 
-Everything arrives as a `GDBTOOLS_`-prefixed environment variable set before gdb
-starts. There is no second spelling and no search path. Each one is parsed by its
-type; a variable that is **set** and does not parse is a loud error naming the
-variable and the value, not a silent fall-through to another source. Unset keeps
-the default. The table is the one declared in `gdbtools/common/config.py` (checked
-with `python3 -B -m gdbtools.common.config --check README.md`).
+A setting arrives two ways: a `GDBTOOLS_` environment variable set before gdb
+starts, or `kearly set KEY VALUE` inside the session, which outranks it until
+`kearly unset KEY` (`kearly set KEY -` states it unset, hiding the environment's
+value). `kearly config` shows each value and where it came from, and the hand
+controls (`kearly shadow off`, `kearly kaslr off`, ...) write the same settings,
+so nothing re-derives them behind the user's back. A value that is set and does
+not parse is an error naming it. Every behaviour that changes gdb, pwndbg or the
+symbol table defaults to off. The table is declared in `gdbtools/common/config.py`
+(checked with `python3 -B -m gdbtools.common.config --check README.md`).
 
 <!-- gdbtools-env:begin -->
 | variable | type | meaning |
 | --- | --- | --- |
-| `GDBTOOLS_AUTO` | bool | arm the kernel session once a kernel image is loaded: stop hook, shadow symbols, MMU-transition notices. Unset: `kearly on` is manual |
+| `GDBTOOLS_AUTO` | bool | arm the kernel session once a kernel image is loaded: stop hook, calibration, MMU-transition notices. The behaviours below stay off unless stated. Unset: `kearly on` is manual |
+| `GDBTOOLS_BOOT` | `direct` \| `uboot` \| `uefi` | how the guest was booted. `uboot` and `uefi` make the entry break `hw` unless `BREAK_KIND` says otherwise; on x86_64 `direct` puts the decompressor at the boot-protocol address 0x100000 unless `X86_DECOMP_PA` says otherwise |
+| `GDBTOOLS_SAFEMEM` | `off` \| `auto` \| `on` | guard pwndbg's memory probes by asking QEMU whether a page is RAM before reading it (`kearly safemem`). Unset: off |
+| `GDBTOOLS_PWNDBG_GUARDS` | bool | keep pwndbg's context alive on early-boot reads that throw. Unset: off |
+| `GDBTOOLS_PANELS` | words of `kgdb`, `flow`, `msysreg` | pwndbg context sections to add: `kgdb` (regime badge), `flow` (branch arrows), `msysreg` (system registers and their fields). Unset: none |
+| `GDBTOOLS_EXPLORE_PAGES` | `keep` \| `off` | `off` sets pwndbg's `auto-explore-pages` to `no` while the session is on and restores it after. Unset: keep |
+| `GDBTOOLS_SAFERENDER` | `off` \| `warn` \| `auto` \| `on` | arm64 guard for pwndbg's emulated disassembly: `auto` and `on` turn pwndbg `emulate` off, `warn` only prints a notice (`kearly saferender`). Unset: off |
+| `GDBTOOLS_SHADOW` | bool | load vmlinux again at the physical offset once calibrated, so physical addresses symbolize. Unset: off |
+| `GDBTOOLS_KASLR_APPLY` | `off` \| `auto` | `auto` relocates gdb's symbols to the KASLR slide at the first virtual stop where it is readable (`symbol-file -o`). Unset: off |
+| `GDBTOOLS_CROSSING` | bool | when a high-VA probe is set before the slide is known, arm a hidden hardware breakpoint on the MMU crossing that applies the slide in passing. Unset: off |
+| `GDBTOOLS_ADOPT` | bool | give a plain `b SYM` hardware siblings at its physical and runtime addresses. Unset: off |
+| `GDBTOOLS_BPFIX` | bool | disable a breakpoint's physical location while the MMU is on (`kearly bpfix`). Unset: off |
+| `GDBTOOLS_STEPLOCK` | `off` \| `on` \| `auto` | gdb `scheduler-locking step` while stepping; `auto` only while the MMU is off (`kearly steplock`). Unset: off |
 | `GDBTOOLS_ENTRY_PA` | address | physical address of the kernel image base. On x86_64 a stated base suppresses the decompressor recovery |
 | `GDBTOOLS_SCAN` | range | physical range searched for the image magic; replaces every derived range |
 | `GDBTOOLS_RAM_BASE` | address | RAM base; the scan covers `SCAN_SPAN` bytes from it |
@@ -185,7 +192,7 @@ with `python3 -B -m gdbtools.common.config --check README.md`).
 | `GDBTOOLS_ANCHOR` | symbol | calibration and entry-break anchor symbol, overriding the preset |
 | `GDBTOOLS_BREAK_KIND` | `sw` \| `hw` | breakpoint kind for the entry break |
 | `GDBTOOLS_X86_KASLR` | bool | recover the decompressor-randomized physical base in `kearly bootbreak` |
-| `GDBTOOLS_X86_DECOMP_PA` | address | where a direct boot loads the bzImage decompressor; selects the direct-boot recovery. Unset: the EFI-stub recovery |
+| `GDBTOOLS_X86_DECOMP_PA` | address | where a direct boot loads the bzImage decompressor; selects the direct-boot recovery. Unset: 0x100000 when `BOOT` is `direct`, else the EFI-stub recovery |
 | `GDBTOOLS_X86_DECOMP_VMLINUX` | file | `arch/x86/boot/compressed/vmlinux`, read by the x86 base recovery |
 | `GDBTOOLS_BINUTIL_NM` | program | `nm` for the x86 decompressor parse. Unset: `nm` on `$PATH` |
 | `GDBTOOLS_BINUTIL_OBJDUMP` | program | `objdump` for the same parse. Unset: `objdump` on `$PATH` |
@@ -201,13 +208,17 @@ with `python3 -B -m gdbtools.common.config --check README.md`).
 | `GDBTOOLS_RISCV_KERNEL_MAP_VIRT_OFF` | int | offset of `virt_addr` in `struct kernel_mapping`, for a riscv vmlinux without DWARF (8 on 6.12, 0 on mainline) |
 <!-- gdbtools-env:end -->
 
-Booleans take `1/0`, `true/false`, `yes/no` or `on/off` (case-insensitive) and
-reject anything else; a range is `lo:hi` with `lo < hi`.
+Booleans take `1/0`, `true/false`, `yes/no` or `on/off`; a range is `lo:hi` with
+`lo < hi`; a list is words separated by spaces or commas.
 
-`GDBTOOLS_PATH` is deliberately **not** in the table above and is not read by the
-package. It is a launcher-side name — kbuildlab and the editor adapter use it to
-find `gdbtools.py` before gdb starts — so it lives in this namespace by convention
-but is not part of the package's own contract.
+The default machine is QEMU's own: `virt` on arm64 and riscv64, `pc` or `q35` on
+x86_64. It is used only once QEMU's monitor confirms the machine type, and only
+for RAM the guest has not described itself. A different machine, or a target with
+no QEMU monitor, is said once, and then only what the guest reports, or
+`GDBTOOLS_PROFILE` / `GDBTOOLS_DTB`, describes it.
+
+`GDBTOOLS_PATH` is not in the table: kbuildlab and the nvim adapter read it to find
+`gdbtools.py` before gdb starts, and the package itself never does.
 
 ## Dependencies
 
@@ -219,12 +230,10 @@ but is not part of the package's own contract.
 **Optional, detected rather than assumed**
 
 - [pwndbg](https://github.com/pwndbg/pwndbg). If present, this integrates with it:
-  two extra context sections, and a guard that stops pwndbg's page probing from
-  killing a QEMU target. **Load order matters** — pwndbg must be sourced *before*
-  this, which is what `setup.sh` arranges by appending. pwndbg aborts its entire
-  command set with an `AssertionError` if it loads over a command another
-  extension already registered, so a hand-reordered init file breaks pwndbg, not
-  this.
+  three extra context sections, guards that keep pwndbg's context alive on
+  early-boot reads, and a guard that stops pwndbg's page probing from killing a
+  QEMU target. **Load order matters**: pwndbg must load first, which the launchers
+  get by sourcing this after the init file and `setup.sh --global` by appending.
 - A cross-gdb, or a `gdb` built `--enable-targets=all`, for kernels of another
   architecture.
 - QEMU, or any other gdbstub, for the kernel half. Booting one is not this

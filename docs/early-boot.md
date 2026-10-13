@@ -19,8 +19,10 @@ Every output in this document is captured from a real run (color codes stripped)
 
 ## How to run
 
-The tool is a Python extension that runs inside gdb. `source` `gdbtools.py`
-(after `setup.sh` once, gdb reads it automatically at startup).
+The tool is a Python extension that runs inside gdb: `gdbtools gdb vmlinux`
+starts gdb with it loaded, `source gdbtools.py` loads it by hand, and kbuildlab's
+`attach` and the nvim adapter source it themselves (`setup.sh --global` loads it
+in every gdb instead).
 
 ```bash
 # terminal 1: frozen VM (-S, waiting on the gdbstub)
@@ -34,18 +36,24 @@ aarch64-linux-gnu-gdb vmlinux
 (gdb) kearly status
 ```
 
-Export `GDBTOOLS_AUTO=1` before starting gdb to run those three lines
-automatically at attach, bringing up the stop hook, shadow symbols, and the
-MMU-transition notices with them. Nothing happens on a non-kernel target.
+Export `GDBTOOLS_AUTO=1` before starting gdb to arm the session at attach: the
+stop hook, the calibration and the MMU-transition notices. What else it does is
+each its own setting, off unless stated in the environment or with
+`kearly set KEY VALUE` (`kearly config` lists them): the shadow symbol file
+(`SHADOW`), the KASLR slide applied at the first virtual stop (`KASLR_APPLY`), the
+crossing catcher (`CROSSING`), siblings for plain breakpoints (`ADOPT`), the
+pwndbg panels (`PANELS`), its guards (`PWNDBG_GUARDS`, `SAFEMEM`, `SAFERENDER`)
+and the quiet page scan (`EXPLORE_PAGES`). kbuildlab's `attach` states all of
+them, so its sessions behave as described below. Nothing happens on a non-kernel
+target.
 
 Non-QEMU boards take a JSON profile via `$GDBTOOLS_PROFILE` and a DTB via
 `$GDBTOOLS_DTB`; mid session use `kearly profile FILE` / `kearly dtb FILE`.
 
 **What `kearly bootbreak` does.** After `target remote :PORT` it advances past
 reset/firmware to the kernel entry, calibrates the phys↔virt offset, then runs
-`kearly status`. With `$GDBTOOLS_AUTO` set it also arms the stop hook, shadow
-symbols, and MMU on/off notices (it never auto-attaches to a plain `gdb vmlinux`;
-the signal must be present). `kearly bootbreak arm` only arms the entry
+`kearly status`. With `$GDBTOOLS_AUTO` set the session is armed at attach (it never
+auto-attaches to a plain `gdb vmlinux`; the signal must be present). `kearly bootbreak arm` only arms the entry
 breakpoint and does not resume, for a front end that issues `continue` itself.
 
 Right after attach a banner lists the kernel commands:
@@ -80,17 +88,18 @@ in-session equivalents:
 |---|---|
 | `kearly bootbreak [arm]` | advance past reset/firmware to the kernel entry, then calibrate the offset (auto if `$GDBTOOLS_AUTO`; `arm` arms only, no resume) |
 | `kearly status` / `kearly mmu` | arch · offset · map · MMU on/off · config; `mmu` adds the control-register detail |
-| `kearly on` / `off` | enable/disable the stop hook + shadow symbols |
+| `kearly on` / `off` | enable/disable the session: stop hook, and the behaviours stated on |
+| `kearly config` / `set KEY VALUE` / `unset KEY` | list the GDBTOOLS_* settings with where each came from; state one for this session (`-` hides the environment's value); drop it |
 | `kearly calibrate [SYM]` | (re)compute the phys↔virt offset (auto, or $pc-at-anchor SYM) |
 | `kearly overmmu [SYM]` | cross the MMU-enable boundary safely (temp bp at the virtual landing + continue) |
 | `kearly where` | one-line orientation: regime, pc+symbol+twin, offset, KASLR, phase, next command (read-only) |
 | `kearly regimes [walk\|stop ID]` | this build's early-boot MMU stop points; `walk` arms all, `stop ID` runs to one |
 | `kearly kaslr [auto\|off\|status\|<hex>]` | detect the KASLR slide and relocate symbols so `b SYM` fires; only `auto` moves the CPU |
-| `kearly safemem [on\|off\|auto\|status]` | guard pwndbg's memory probing so a probe that would reach a device model fails instead of killing QEMU (default auto) |
+| `kearly safemem [on\|off\|auto\|status]` | guard pwndbg's memory probing so a probe that would reach a device model fails instead of killing QEMU (`GDBTOOLS_SAFEMEM`, default off) |
 | `kearly census off\|compact\|full` | keep the `kcensus` register census in the panel at every stop (default off) |
 | `kearly chaindepth N` | telescope hop depth for panel chains / `chain` / `ksregs` (default 8) |
 | `kearly steplock on\|off\|auto` | freeze the other cores while single-stepping with the MMU off (default off) |
-| `kearly saferender warn\|on\|off\|auto` | arm64 pwndbg emulation-disasm SIGABRT guard (default auto = `set emulate off`, restored on `kearly off`) |
+| `kearly saferender warn\|on\|off\|auto` | arm64 pwndbg emulation-disasm SIGABRT guard (`GDBTOOLS_SAFERENDER`, default off; `auto` = `set emulate off`, restored on `kearly off`) |
 | `kearly bpfix on\|off` | optional tidy of the dual phys+virt breakpoints (default off; the native dual already fires) |
 | `kearly preset [list\|NAME]` | list or apply a boot-combination preset |
 | `kearly profile <path\|show>` / `kearly dtb <path\|guest\|show>` | inject a machine descriptor / DTB for a non-QEMU board |
@@ -98,7 +107,12 @@ in-session equivalents:
 | `kb SYM \| *ADDR \| FILE:LINE` | regime-aware breakpoint: arms PA(S)=linkVA+offset **and** IMG(S)=linkVA+slide; only the matching regime fires. IMG re-arms when the slide is known |
 | `kw [-r\|-a] SYM \| *ADDR [SIZE]` | regime-aware watchpoint (data twin of `kb`); each consumes 2 HW slots |
 | `kp2v ADDR` / `kv2p ADDR` | physical↔virtual translation |
-| `sym ADDR` | address (physical or virtual) → kernel symbol |
+| `addr2sym ADDR` | address (physical or virtual) → kernel symbol |
+
+A hand control given no argument reports its state and changes nothing; given
+one, it states the matching `GDBTOOLS_*` key for the session, as `kearly set`
+does. `kearly anchor -` and `kearly break -` state the key unset, so the preset,
+the profile or the arch decides again.
 | `stackscan [N]` | scan N stack words and symbolize code pointers (for head.S where backtrace is dead) |
 | `chain [ADDR] [N]` | N-word telescope, physical/virtual aware and symbolized (default $sp, N=8) |
 | `ksr NAME` / `ksregs` | one sysreg / a batch dump of the core sysregs with decode |
@@ -166,7 +180,7 @@ forces or clears it; `kearly on`/`off` toggle the session.
 
 ---
 
-## 2. Address translation and symbolization — `kp2v` / `kv2p` / `sym` / `stackscan`
+## 2. Address translation and symbolization — `kp2v` / `kv2p` / `addr2sym` / `stackscan`
 
 Both directions work once the MMU is on (runtime `$pc`=`cpu_do_idle+8`):
 
@@ -175,9 +189,9 @@ Both directions work once the MMU is on (runtime `$pc`=`cpu_do_idle+8`):
 VA 0xffff000008099f58 -> PA 0x0000000040099f58
 (gdb) kp2v 0x40099f58
 PA 0x0000000040099f58 -> VA 0xffff000008099f58  cpu_do_idle + 8 in section .text of …/vmlinux
-(gdb) sym $pc
+(gdb) addr2sym $pc
 0xffff000008099f58 (VA)  cpu_do_idle + 8 in section .text of …/vmlinux
-(gdb) sym 0x40099f58
+(gdb) addr2sym 0x40099f58
 0x0000000040099f58 (PHYS) -> VA 0xffff000008099f58  cpu_do_idle + 8 in section .text of …/vmlinux
 ```
 
@@ -218,7 +232,8 @@ possible; an unreadable register shows `?` with a single-step hint.
 proc.S) touches, each value with its bit fields on the rows below; a register the
 target will not answer for is omitted (shown as `?` with `kbits full`, never 0).
 The same content renders live in pwndbg's `kernel sysregs` window, controlled by
-`kearly msysreg off|compact|full`.
+`kearly msysreg off|compact|full`, which adds `msysreg` to `GDBTOOLS_PANELS` or
+takes it out.
 
 ---
 
@@ -522,12 +537,13 @@ Dump of assembler code for function memchr
 > the Capstone spelling via `Arch.MNEM_ALIASES`, strip binutils alias comments
 > (`// b.none`), and preserve operands (the `#imm` in `tbz w0, #0x1f, <target>`).
 
-### Automatic context section (`$GDBTOOLS_AUTO`)
+### Context sections (`GDBTOOLS_PANELS`)
 
-When attached via `$GDBTOOLS_AUTO`, the tool adds three sections
-(`kgdb`·`msysreg`·`flow`) to pwndbg and changes two settings it restores on
-`kearly off`: `auto-explore-pages` off (its probe can crash a QEMU target) and,
-on arm64, `emulate` off (its disasm can SIGABRT gdb). The `flow` window runs
+With `GDBTOOLS_PANELS=kgdb flow msysreg` (what kbuildlab's `attach` states), the
+tool adds those three sections to pwndbg; with `EXPLORE_PAGES=off` and
+`SAFERENDER=auto` it changes two settings it restores on `kearly off`:
+`auto-explore-pages` off (its probe can crash a QEMU target) and, on arm64,
+`emulate` off (its disasm can SIGABRT gdb). The `flow` window runs
 **beside** pwndbg's own disasm, each independent:
 
 - **`[ DISASM ]`** — pwndbg's own window, untouched (emulation, CPSR flags, branch
@@ -550,7 +566,7 @@ on arm64, `emulate` off (its disasm can SIGABRT gdb). The `flow` window runs
 > (Unicorn) on some instructions of this EOL kernel — the canonical case is the
 > secondary-CPU earliest stop at `b __secondary_switched` with `sp`/`x29`
 > uninitialized, where **gdb itself dies of SIGABRT**. A native segfault cannot be
-> caught from Python, so at the default `saferender auto` the tool runs its stop
+> caught from Python, so with `saferender auto` the tool runs its stop
 > hook before pwndbg's context render on an arm64 attach and sets `emulate` off
 > (restored on `kearly off`). Use `kearly saferender off` to restore emulation or
 > `warn` to only warn. Our `flow` never breaks on any kernel.
@@ -614,7 +630,7 @@ match, say why rather than answer.
 (gdb) kv2p $pc
 [gdbtools] kv2p: 0x0000000040200000 is not a kernel virtual address -- it looks PHYSICAL.
       Right now: MMU off, so addresses here are PHYSICAL.
-      Use `kp2v` for this direction, or `sym` which accepts either.
+      Use `kp2v` for this direction, or `addr2sym` which accepts either.
 ```
 
 Every refusal says the same three things — what the command assumed / the actual
@@ -722,7 +738,7 @@ stop.
 
 ```
 kearly safemem status      installed / armed / whether the monitor answers / probes blocked / reads rescued
-kearly safemem on|off|auto (default auto: armed on a kernel target wherever the QEMU monitor answers)
+kearly safemem on|off|auto (GDBTOOLS_SAFEMEM; auto arms it on a kernel target wherever the QEMU monitor answers)
 ```
 
 `installed` and `armed` are different questions, and the status line reports both:
