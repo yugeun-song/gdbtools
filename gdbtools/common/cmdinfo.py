@@ -37,10 +37,11 @@ import gdb
 from .runtime import *
 
 
-GROUPS = ("gdbtools", "pwndbg", "kernel", "python", "user", "gdb")
+GROUPS = ("gdbtools", "kept", "pwndbg", "kernel", "python", "user", "gdb")
 
 _LABEL = {
     "gdbtools": "this package",
+    "kept":     "abbreviations this package's names made ambiguous, kept as aliases of what they meant",
     "pwndbg":   "pwndbg, its aliases included",
     "kernel":   "the kernel's own scripts/gdb",
     "python":   "other Python extensions, gdb's bundled ones included",
@@ -315,9 +316,10 @@ def classify():
     # `define` macros land in gdb's user-defined class and so do Python commands
     # registered as COMMAND_USER, which is why this is taken last -- after
     # everything with a source file of its own has been claimed.
-    user = (set(_paths(_help("user-defined"))) & recognised) - placed
+    kept = set(getattr(gdb, "_gdbtools_aliases", None) or ()) & recognised
+    user = (set(_paths(_help("user-defined"))) & recognised) - placed - kept
     user = {u for u in user if " " not in u}
-    builtin = recognised - placed - user
+    builtin = recognised - placed - user - kept
 
     notes = []
     if pw_note:
@@ -332,7 +334,7 @@ def classify():
         notes.append("listed by `help all` but not resolvable on their own: %s"
                      % " ".join(unrecognised))
 
-    groups = {"gdbtools": ours_r, "pwndbg": pwndbg_r, "kernel": kernel,
+    groups = {"gdbtools": ours_r, "kept": kept, "pwndbg": pwndbg_r, "kernel": kernel,
               "python": other_py, "user": user, "gdb": builtin}
     res = {"groups": groups, "recognised": recognised, "subs": subs,
            "alias": pw_alias, "contested": contested,
@@ -346,6 +348,7 @@ class CmdInfo(gdb.Command):
     """cmdinfo [GROUP | COMMAND] [-1] [-c] [--sub] : who registered what gdb answers to.
 
   gdbtools   this package
+  kept       abbreviations this package made ambiguous, kept as aliases
   pwndbg     pwndbg, aliases included
   kernel     the kernel's own scripts/gdb
   python     other Python extensions, gdb's bundled ones included

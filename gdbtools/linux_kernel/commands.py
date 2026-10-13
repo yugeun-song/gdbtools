@@ -343,7 +343,7 @@ class P2V(gdb.Command):
         if a is not None and a._is_va(pa):
             print("[%s] kp2v: %s is already a kernel VIRTUAL address, not a physical one.\n"
                   "      Right now: %s.\n"
-                  "      Use `kv2p` for this direction, or `sym` which accepts either."
+                  "      Use `kv2p` for this direction, or `addr2sym` which accepts either."
                   % (NAME, fmt(pa), SESSION.regime_phrase()))
             return
         va = SESSION.p2v(pa)
@@ -373,7 +373,7 @@ class V2P(gdb.Command):
             # to return exactly such a value.
             print("[%s] kv2p: %s is not a kernel virtual address -- it looks PHYSICAL.\n"
                   "      Right now: %s.\n"
-                  "      Use `kp2v` for this direction, or `sym` which accepts either."
+                  "      Use `kp2v` for this direction, or `addr2sym` which accepts either."
                   % (NAME, fmt(va), SESSION.regime_phrase()))
             return
         pa = SESSION.v2p(va)

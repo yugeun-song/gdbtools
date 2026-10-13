@@ -23,7 +23,7 @@ from .linux_kernel.pwndbg_glue import *
 # contract and a rename must be a visible edit here.
 COMMON_COMMANDS = (
     (CfgJson, "cfgjson"), (CfgDis, "cfgdis"),
-    (Sym, "sym"), (StackScan, "stackscan"), (Chain, "chain"),
+    (Sym, "addr2sym"), (StackScan, "stackscan"), (Chain, "chain"),
     (EnumVals, "enumvals"), (CmdInfo, "cmdinfo"), (Fz, "fz"),
 )
 KERNEL_COMMANDS = (
@@ -88,6 +88,30 @@ def _command_exists(name):
     return _command_status(name) == "command"
 
 
+def _completions(word):
+    try:
+        out = gdb.execute("complete " + word, from_tty=False, to_string=True) or ""
+    except gdb.error:
+        return []
+    return sorted({ln.strip() for ln in out.splitlines()
+                   if ln.strip() and " " not in ln.strip()})
+
+
+def _abbreviations(names):
+    """{prefix: command} for each prefix of `names` that abbreviates exactly one
+    command right now, e.g. `k` for `kill` in a gdb without pwndbg."""
+    out = {}
+    for name in names:
+        for i in range(1, len(name)):
+            p = name[:i]
+            if p in out or p in _OURS or _command_status(p) != "command":
+                continue
+            c = _completions(p)
+            if len(c) == 1 and c[0] != p and c[0] not in _OURS:
+                out[p] = c[0]
+    return out
+
+
 @safe()
 def _register():
     """Construct every command, announcing any name taken over from someone else.
@@ -97,17 +121,39 @@ def _register():
     command with no trace.  pwndbg owns `stack` and `telescope`, which is why
     neither is used here.  Report a collision rather than leaving the loser to be
     discovered by its absence.
+
+    A new name also turns every abbreviation it shares into an ambiguous one:
+    `kearly` makes `k` stop meaning `kill`, `kfin` makes `kf` stop meaning pwndbg's
+    `kfile`.  Each abbreviation that resolved before registration and does not after
+    gets an alias to the command it meant, so typing it does what it did before.
     """
     taken = []
+    names = [n for _c, n in COMMON_COMMANDS + KERNEL_COMMANDS]
+    before = _abbreviations(names)
     for cls, name in COMMON_COMMANDS + KERNEL_COMMANDS:
         if name not in _OURS and _command_status(name) == "command":
             taken.append(name)
         cls(name)
         _OURS.add(name)
+    kept = []
+    aliases = getattr(gdb, "_gdbtools_aliases", None)
+    if aliases is None:
+        aliases = gdb._gdbtools_aliases = {}
+    for p, cmd in sorted(before.items()):
+        if _command_status(p) != "prefix":
+            continue
+        try:
+            gdb.execute("alias %s = %s" % (p, cmd), from_tty=False, to_string=True)
+            kept.append("%s=%s" % (p, cmd))
+            aliases[p] = cmd
+        except gdb.error as e:
+            LOG.add("abbreviation %s=%s not kept: %s" % (p, cmd, e))
+    if kept:
+        LOG.add("abbreviations kept as aliases: %s" % ", ".join(kept))
     if taken:
         print("[%s] took over existing gdb command(s): %s" % (NAME, ", ".join(sorted(set(taken)))))
         print("[%s]   the previous meaning is gone for this session; the full name "
-              "still works where one exists (e.g. `symbol-file` for `sym`)" % NAME)
+              "still works where one exists" % NAME)
 
 
 @safe(boundary="hook")
