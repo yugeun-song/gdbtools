@@ -8,7 +8,7 @@ from ..common.runtime import *
 from .physmem import *
 from .pwndbg_glue import (PWN, SAFEPROBE, context_kgdb, context_flow, context_msysreg,
                           install_kernel_guards, uninstall_kernel_guards)
-from .target import TARGET
+from .target import TARGET, QEMU_PRESETS
 from ..common.arch import ARCHES, detect_arch, _arch_name
 from .presets import PRESETS
 from ..common import state
@@ -51,9 +51,7 @@ class Session:
         self.msysreg_mode = "compact"  # sysreg+bitfield panel: off|compact|full
         self._census_dead = set()   # census regs the stub cannot expose (skip, fast)
         self.chain_hops = 8         # safe_chain telescope depth (kearly chaindepth N)
-        self.saferender = "auto"
         self._saferender_warned = False
-        self.bpfix = False
         self._bp_hooked = False
         self._managed_bps = set()
         self.kaslr_slide = 0
@@ -69,7 +67,6 @@ class Session:
         self._kw_groups = []        # regime-aware watchpoints: same shape + {kind,size}
         self._kw_bp_nums = set()    # gdb watchpoint numbers I created
         self._adopted = set()       # user bp numbers already adopted into regime-aware candidates
-        self.adopt = True           # auto-upgrade a plain `b SYM` to PA(S)+IMG(S) candidates
         self._pending_del = set()   # sibling bps orphaned by `delete`, dropped at the next safe point
         self._in_adopt = False      # hard reentrancy guard around sibling creation
         self._in_advance = False     # inside _advance_to_crossing: suppress on_stop auto-apply
@@ -78,12 +75,61 @@ class Session:
         self._objfile_hooked = False
         self._autostart_pending = False  # $GDBTOOLS_AUTO stated before a kernel was loaded
         self.loaded_banner = None    # set by bootstrap; printed when AUTO arms late
+        self.platform = None         # what the QEMU monitor says this machine is
 
     @property
     def x86_kaslr(self):
         """$GDBTOOLS_X86_KASLR: recover the decompressor-randomized physical base in
         bootbreak.  Read at use, so an invalid value is refused where it matters."""
         return bool(config.get("X86_KASLR"))
+
+    # Behaviours that change gdb, pwndbg or the symbol table are read from the
+    # GDBTOOLS_* contract at each use, so `kearly set` and every hand control below
+    # take effect at once and stay in effect: nothing re-derives them behind the
+    # user's back.  Each defaults to off.
+    @staticmethod
+    def _opt(name, default=None):
+        """A stated GDBTOOLS_<name>, or `default` when unset or invalid (an invalid
+        value was already reported when the package loaded)."""
+        try:
+            v = config.get(name)
+        except config.ConfigError:
+            return default
+        return default if v is None else v
+
+    def _flag(self, name):
+        return bool(self._opt(name, False))
+
+    def panels(self):
+        return self._opt("PANELS", ())
+
+    @property
+    def adopt(self):
+        return self._flag("ADOPT")
+
+    @property
+    def saferender(self):
+        return self._opt("SAFERENDER", "off")
+
+    @property
+    def bpfix(self):
+        return self._flag("BPFIX")
+
+    # BOOT and X86_DECOMP_PA pick a route rather than toggle a feature, so an
+    # invalid value is refused where it is used instead of read as unset.
+    def boot(self):
+        return config.get("BOOT")
+
+    def x86_decomp_pa(self):
+        """Where a direct boot loads the bzImage decompressor: stated, or 0x100000,
+        the protected-mode kernel load address of the x86 boot protocol
+        (Documentation/arch/x86/boot.rst), when the boot is stated as direct.  None
+        for a firmware boot, whose EFI stub loads the image wherever its allocator
+        chose."""
+        pa = config.get("X86_DECOMP_PA")
+        if pa is not None:
+            return pa
+        return 0x100000 if self.boot() == "direct" else None
 
     @safe()
     def ensure_arch(self):
@@ -103,6 +149,7 @@ class Session:
         if not main or main == self._program:
             return
         prev, self._program = self._program, main
+        self.platform = None
         if prev is None:
             self.arch = None                   # may have come from gdb's default arch
             return
@@ -177,12 +224,16 @@ class Session:
 
     @safe()
     def load_overrides(self):
-        """Apply overrides idempotently in precedence order (low -> high):
-        preset -> JSON profile (anchor/break) -> explicit env flags.  So an
-        explicit $GDBTOOLS_ANCHOR wins over the profile, which wins over the preset."""
-        p = config.get("PRESET")
-        if p and self.preset != p:
-            self.apply_preset(p, quiet=True)
+        """Rebuild the anchor and break kind from what is stated now, low -> high:
+        the preset, the JSON profile, then GDBTOOLS_ANCHOR / GDBTOOLS_BREAK_KIND.
+        Rebuilt from nothing each time, so a value no longer stated stops applying."""
+        name = config.get("PRESET")
+        p = PRESETS.get(name) if name else None
+        if p is not None and self.preset != name and not p["verified"]:
+            print("[%s] preset '%s' is designed, not lab-verified" % (NAME, name))
+        self.preset = name if p is not None else None
+        self.anchor = p["anchor"] if p is not None else None
+        self.break_kind = p["break_kind"] if p is not None else None
         pa = TARGET.anchor()
         if pa:
             self.anchor = pa
@@ -197,25 +248,22 @@ class Session:
             self.break_kind = bk
 
     @safe(default=False)
-    def apply_preset(self, name, quiet=False):
+    def apply_preset(self, name):
+        """`kearly preset NAME`: state it for the session and rebuild from it."""
         p = PRESETS.get(name)
         if p is None:
-            if not quiet:
-                print("[%s] unknown preset '%s' (kearly preset list)" % (NAME, name))
+            print("[%s] unknown preset '%s' (kearly preset list)" % (NAME, name))
             return False
         a = self.ensure_arch()
-        if a is not None and p["arch"] != a.key and not quiet:
+        if a is not None and p["arch"] != a.key:
             print("[%s] note: preset '%s' is for %s, target is %s"
                   % (NAME, name, p["arch"], a.key))
+        config.set_session("PRESET", name)
         self.preset = name
-        self.anchor = p["anchor"]
-        self.break_kind = p["break_kind"]
-        if not quiet:
-            print("[%s] preset '%s'%s: anchor=%s break=%s -- %s" %
-                  (NAME, name, "" if p["verified"] else " (designed, not lab-verified)",
-                   self.anchor or "<image-base>", self.break_kind or "<arch-default>", p["desc"]))
-        elif not p["verified"]:
-            print("[%s] preset '%s' is designed, not lab-verified" % (NAME, name))
+        self.load_overrides()
+        print("[%s] preset '%s'%s: anchor=%s break=%s -- %s" %
+              (NAME, name, "" if p["verified"] else " (designed, not lab-verified)",
+               self.current_anchor() or "<image-base>", self.current_break_kind(), p["desc"]))
         return True
 
     def current_anchor(self):
@@ -223,8 +271,16 @@ class Session:
         return self.anchor or (a.entry_symbol if a else None)
 
     def current_break_kind(self):
+        """Stated (session, environment, profile, preset), else `hw` for a firmware
+        boot -- the firmware copies the image to its load address after reset, over
+        any software breakpoint planted while the guest was frozen -- else the
+        arch's own default."""
+        if self.break_kind:
+            return self.break_kind
+        if self.boot() in ("uboot", "uefi"):
+            return "hw"
         a = self.arch
-        return self.break_kind or (getattr(a, "entry_break_kind", "hw") if a else "hw")
+        return getattr(a, "entry_break_kind", "hw") if a else "hw"
 
     # --- manual overrides: everything the auto-pipeline decides is hand-operable
     @safe(default=False)
@@ -245,6 +301,7 @@ class Session:
 
     @safe()
     def set_shadow(self, on):
+        config.set_session("SHADOW", "on" if on else "off")
         if on:
             if self.offset is None:
                 print("[%s] no offset yet -- run kearly bootbreak / calibrate / offset <hex>" % NAME)
@@ -2245,12 +2302,13 @@ class Session:
                 # breakpoint machinery is what used to kill gdb).  A CLI catcher is
                 # deletable, so a later bare `delete` silently takes it away and the slide
                 # is then never applied.  We are in a safe context now: swap it for the
-                # internal, delete-proof one.
+                # internal, delete-proof one -- whatever armed it, CROSSING or a command.
                 if pend.get("bp"):
                     exec_confirmless("delete %s" % pend["bp"])
                 LOG.add("catcher: upgrading the CLI catcher to an internal one")
                 self._kaslr_pending = None
-            if not self._kaslr_pending:
+                self._ensure_crossing_catcher("calibration", use_python=True)
+            elif not self._kaslr_pending and self._flag("CROSSING"):
                 self._ensure_crossing_catcher("calibration", use_python=True)
         if not quiet:
             print("[%s] arch=%s offset(PA-VA)=%s%s" %
@@ -2316,7 +2374,7 @@ class Session:
                 # this point the kernel is not there, so the scan runs to completion over
                 # all of guest memory and takes minutes.
                 _pc = reg("pc")
-                _dpa = config.get("X86_DECOMP_PA")
+                _dpa = self.x86_decomp_pa()
                 _need_x86 = (_pc is not None and _dpa is not None
                              and (_pc & MASK) < _dpa)
                 if _need_x86:
@@ -2346,7 +2404,7 @@ class Session:
                 # recover_kaslr_base itself routes on: stated means a direct boot, whose
                 # decompressor is walked; unset means a firmware chain, where the EFI
                 # stub hands the entry over and the decompressor stages never execute.
-                _route = ("the decompressor" if config.get("X86_DECOMP_PA") is not None
+                _route = ("the decompressor" if self.x86_decomp_pa() is not None
                           else "the EFI stub")
                 print("[%s] x86 KASLR: recovered main-kernel phys base %s via %s; "
                       "breaking there." % (NAME, fmt(_b), _route))
@@ -2419,7 +2477,7 @@ class Session:
         # remove-symbol-file churn that orphans name-based breakpoints set during
         # the physical phase (gdb then spams "location number not found").
         # `kearly off` removes it explicitly.
-        if self.arch is None or self.offset is None:
+        if self.arch is None or self.offset is None or not self._flag("SHADOW"):
             return
         self._shadow_load()
 
@@ -2552,6 +2610,7 @@ class Session:
         if mode not in ("on", "off", "auto"):
             print("usage: kearly steplock <on|off|auto>   (auto = lock while MMU off)")
             return
+        config.set_session("STEPLOCK", mode)
         self.steplock = mode
         self._sync_early_quiet(self.which_map())
         cur = None
@@ -2628,6 +2687,7 @@ class Session:
             return
         if self.ensure_arch() is None:
             return
+        self.check_platform()
         self._maybe_warn_saferender()
         m = self.which_map()
         self._sync_early_quiet(m)
@@ -2663,7 +2723,7 @@ class Session:
         # kernel with no manual `kearly kaslr auto`.  One-shot (guarded on
         # kaslr_slide == 0); apply_kaslr re-arms kb groups itself.
         if m == "virtual" and self.kaslr_slide == 0 and self.offset is not None \
-                and not self._in_advance:
+                and not self._in_advance and self._opt("KASLR_APPLY") == "auto":
             _s = self.detect_kaslr_slide() or self._slide_via_pc_pa()
             if _s:
                 self.apply_kaslr(_s)
@@ -2740,7 +2800,12 @@ class Session:
                   "(compact = only registers this target answers for; "
                   "full = every one, unreadable ones as '?')")
             return
-        self.msysreg_mode = mode
+        # The window is one of PANELS, so the hand control states PANELS too and a
+        # later `kearly on` or re-source keeps what was chosen here.
+        want = [p for p in self.panels() if p != "msysreg"] + ([] if mode == "off" else ["msysreg"])
+        config.set_session("PANELS", " ".join(want) or "-")
+        if mode != "off":
+            self.msysreg_mode = mode
         print("[%s] msysreg panel = %s" % (NAME, mode))
         if mode == "off":
             self._remove_msysreg_section()
@@ -2810,7 +2875,7 @@ class Session:
                   "pwndbg's emulated disasm OFF -- it SIGABRTs gdb on some arm64 instructions; "
                   "off restores it; warn only prints a heads-up)")
             return
-        self.saferender = mode
+        config.set_session("SAFERENDER", mode)
         if mode in ("on", "auto"):
             if "emulate" in self._saved_params:
                 print("[%s] saferender=%s  (pwndbg emulate already guarded)" % (NAME, mode))
@@ -2831,7 +2896,7 @@ class Session:
 
     @safe()
     def _maybe_warn_saferender(self):
-        if self._saferender_warned:
+        if self._saferender_warned or self.saferender == "off":
             return
         a = self.ensure_arch()
         if a is None or a.key != "arm64" or not self._pwndbg_emulates():
@@ -3050,12 +3115,12 @@ class Session:
     def set_bpfix(self, mode):
         mode = (mode or "").lower()
         if mode in ("on", "1", "true", ""):
-            self.bpfix = True
+            config.set_session("BPFIX", "on")
             self._apply_bpfix()
             print("[%s] bpfix=on  (dual native/shadow breakpoints follow the MMU regime: "
                   "physical while MMU off, virtual once on)" % NAME)
         elif mode in ("off", "0", "false"):
-            self.bpfix = False
+            config.set_session("BPFIX", "off")
             for n in list(self._managed_bps):
                 execstr("enable %d" % n)
             self._managed_bps.clear()
@@ -3237,13 +3302,33 @@ class Session:
         """Arm a deferred catcher from a context where creating a breakpoint is safe --
         a gdb prompt, a stop, or one of our own commands.  Never from inside gdb's own
         breakpoint create/delete callbacks."""
-        if not self._catch_wanted or self.kaslr_slide or self._kaslr_pending:
+        if not self._catch_wanted or self.kaslr_slide or self._kaslr_pending \
+                or not self._flag("CROSSING"):
             self._catch_wanted = False
             return
         self._catch_wanted = False
         # A stop hook or a gdb prompt is a safe context, so use the internal python
         # catcher here too -- the CLI one is deletable and would be lost to a `delete`.
         self._ensure_crossing_catcher("a probe armed earlier", use_python=True)
+
+    @safe()
+    def _retire_catcher(self, why):
+        """Take the crossing catcher away, so reaching the crossing applies nothing.
+        Command context only."""
+        pend, self._kaslr_pending = self._kaslr_pending, None
+        self._catch_wanted = False
+        if not pend:
+            return
+        obj = pend.get("obj")
+        if obj is not None:
+            try:
+                obj.delete()
+            except Exception:
+                pass
+            self._catcher_obj = None
+        elif pend.get("bp"):
+            exec_confirmless("delete %s" % pend["bp"])
+        LOG.add("catcher: retired (%s)" % why)
 
     @safe(boundary="hook")
     def _on_prompt(self):
@@ -3282,7 +3367,7 @@ class Session:
         adopt path applied (the shadow alone already yields two locations)."""
         if self.kaslr_slide or self._in_catcher:
             return
-        if not self.enabled:
+        if not self.enabled or not self._flag("CROSSING"):
             return
         # Deliberately do NOT try to work out whether this probe targets a high VA.
         # The previous attempt keyed off _bp_locations(), whose regex only matches the
@@ -3385,7 +3470,7 @@ class Session:
             # Leave it uncalibrated and say what to run instead.
             if getattr(a, "key", None) == "x86_64" and self._compressed_vmlinux():
                 _pc = reg("pc")
-                _dpa = config.get("X86_DECOMP_PA")
+                _dpa = self.x86_decomp_pa()
                 # X86_DECOMP_PA is stated only for a DIRECT boot, so it cannot carry
                 # this guard on its own any more: under a firmware chain there is no
                 # decompressor address to compare against, and the pre-kernel pc would
@@ -3541,7 +3626,8 @@ class Session:
             self._shadow_load()
         self._rearm_kb(slide)                # move kb IMG locations to linkVA+slide
         self._rearm_kw(slide)                # ... and kw IMG watchpoints
-        self._install_pwndbg_section()
+        if "kgdb" in self.panels():
+            self._install_pwndbg_section()
         if slide == 0:
             print("[%s] KASLR slide = 0 (symbols at link addresses; nothing shifted)." % NAME)
         else:
@@ -3563,6 +3649,8 @@ class Session:
             self.set_kaslr("status")
             return
         if arg in ("off", "none"):
+            config.set_session("KASLR_APPLY", "off")
+            self._retire_catcher("kearly kaslr off")
             self.apply_kaslr(0)
             return
         if arg == "status":
@@ -3577,6 +3665,7 @@ class Session:
                 return
             self.apply_kaslr(v)
             return
+        config.set_session("KASLR_APPLY", "auto")
         s = self.detect_kaslr_slide()
         if not s:
             s2 = self._advance_to_crossing()      # frozen boot: advance to the crossing, read slide
@@ -3613,11 +3702,13 @@ class Session:
         st, src = self.mmu_state()
         if prev == "physical" and now == "virtual":
             print("[%s] >>> MMU ON: $pc now VIRTUAL %s -- native kernel symbolization "
-                  "active; shadow kept for residual physical pointers (page tables/DMA). "
-                  "kp2v/kv2p still valid." % (NAME, fmt(pc)))
+                  "active%s. kp2v/kv2p still valid."
+                  % (NAME, fmt(pc), "; shadow kept for residual physical pointers (page "
+                     "tables/DMA)" if self.shadow_addr is not None else ""))
         elif prev == "virtual" and now == "physical":
-            print("[%s] <<< back to PHYSICAL %s (MMU %s) -- shadow symbolization in use."
-                  % (NAME, fmt(pc), st))
+            print("[%s] <<< back to PHYSICAL %s (MMU %s) -- %s."
+                  % (NAME, fmt(pc), st, "shadow symbolization in use" if self.shadow_addr
+                     is not None else "no shadow symbols loaded"))
         else:
             self._annotate(now, prefix="transition")
 
@@ -3645,19 +3736,6 @@ class Session:
             gdb.events.stop.connect(self.on_stop)
             self._hooked = True
         self.enabled = True
-        # pwndbg probes the memory map by reading page-aligned addresses; one that
-        # translates outside RAM crashes QEMU's debug-read path.  Wrap that funnel so
-        # an unmapped probe fails the ordinary way instead of killing the VM.
-        SAFEPROBE.install()
-        # pwndbg's krelease() throws 'Linux version tuple not found' on the fragile early
-        # start_kernel banner read and takes the whole context down with it -- make it
-        # return None (unknown) instead, which pwndbg's own callers already handle.
-        install_kernel_guards()
-        self._install_pwndbg_section()       # render badge+sysregs inside pwndbg ctx
-        self._install_kdisasm_section()      # arrowed disasm next to SOURCE(CODE)
-        self._install_msysreg_section()      # sysregs + their bit fields, own window
-        self._quiet_pagescan()               # silence the useless auto-explore-pages spam
-        self._maybe_warn_saferender()
         if not self._bp_hooked:
             try:
                 gdb.events.breakpoint_created.connect(self._on_bp_created)
@@ -3679,6 +3757,130 @@ class Session:
                 self._cont_hooked = True
             except Exception:
                 LOG.add("cont event unavailable")
+        # After the hooks: a refused setting must not leave the session half-armed.
+        self.apply_settings()
+        self.check_platform()
+
+    @staticmethod
+    def _connection():
+        """Which target connection the platform answer belongs to, so a reconnect
+        (to another machine, perhaps) asks again."""
+        try:
+            c = gdb.selected_inferior().connection
+            return (c.num, c.details) if c is not None else None
+        except Exception:
+            return None
+
+    @safe(default=None)
+    def check_platform(self):
+        """Ask QEMU which machine this is, and use the default machine's facts only
+        if it is that machine.  Asked once per target connection and again after
+        the program changes; a different machine, or no QEMU monitor, is said once,
+        and then only what the guest reports itself -- or GDBTOOLS_PROFILE /
+        GDBTOOLS_DTB -- describes the board."""
+        a = self.ensure_arch()
+        if a is None:
+            return None
+        preset = QEMU_PRESETS.get(a.key)
+        conn = self._connection()
+        if self.platform is None or self.platform.get("conn") != conn:
+            # No target yet (an init-file load arms the session before
+            # `target remote`): nothing can answer, so ask again at the first stop.
+            try:
+                live = bool(gdb.selected_inferior().threads())
+            except Exception:
+                live = False
+            if not live:
+                TARGET.qemu_preset = None
+                return None
+            out = execstr("monitor qom-get /machine type") or ""
+            m = re.search(r'"([A-Za-z0-9_.+-]+?)-machine"', out)
+            machine = m.group(1) if m else None
+            self.platform = {"machine": machine, "conn": conn, "qemu": machine is not None,
+                             "family": re.sub(r"-\d+(\.\d+)*$", "", machine) if machine else None}
+            LOG.add("platform: %r" % (self.platform,))
+            ok = preset is not None and self.platform["family"] in preset["family"]
+            if not ok and not (self._opt("PROFILE") or self._opt("DTB")):
+                if self.platform["qemu"]:
+                    print("[%s] QEMU machine '%s' is not the default (%s), so its preset is not "
+                          "applied; only what the guest reports describes it.  State "
+                          "GDBTOOLS_PROFILE or GDBTOOLS_DTB for this board."
+                          % (NAME, machine,
+                             "/".join(preset["family"]) if preset else "none for " + a.key))
+                else:
+                    print("[%s] the target does not answer `monitor qom-get /machine type`, so "
+                          "the default QEMU machine is not assumed%s.  State GDBTOOLS_PROFILE "
+                          "or GDBTOOLS_DTB to describe the board."
+                          % (NAME, "" if SAFEPROBE.mode == "off" else " and safemem cannot judge reads"))
+        self.platform["ok"] = preset is not None and self.platform["family"] in preset["family"]
+        TARGET.qemu_preset = preset if self.platform["ok"] else None
+        return self.platform
+
+    @safe()
+    def apply_settings(self, name=None):
+        """Bring gdb and pwndbg in line with the stated behaviours -- all of them, or
+        only `name` after `kearly set`.  Each is off unless stated:
+          SAFEMEM        pwndbg probes a page-aligned address to guess its permissions;
+                         one that lands on a device model crashes QEMU's debug-read path,
+                         so the guard asks QEMU whether the page is RAM first
+          PWNDBG_GUARDS  pwndbg's krelease() throws on the early start_kernel banner and
+                         takes the whole context with it; the guards turn that into None
+          PANELS         the kgdb badge, the flow arrows, the msysreg window
+          EXPLORE_PAGES  `off` silences pwndbg's page-scan warnings at every stop
+          SAFERENDER     arm64: pwndbg's emulated disassembly can SIGABRT gdb
+          STEPLOCK       scheduler-locking while stepping"""
+        if not self.enabled:
+            return
+        if name in (None, "SAFEMEM"):
+            SAFEPROBE.mode = self._opt("SAFEMEM", "off")
+            if SAFEPROBE.mode != "off":
+                SAFEPROBE.install()
+            else:
+                SAFEPROBE.uninstall()
+        if name in (None, "PWNDBG_GUARDS"):
+            if self._flag("PWNDBG_GUARDS"):
+                install_kernel_guards()
+            else:
+                uninstall_kernel_guards()
+        if name in (None, "PANELS"):
+            want = self.panels()
+            for key, add, drop in (
+                    ("kgdb", self._install_pwndbg_section, self._remove_pwndbg_section),
+                    ("flow", self._install_kdisasm_section, self._remove_kdisasm_section),
+                    ("msysreg", self._install_msysreg_section, self._remove_msysreg_section)):
+                (add if key in want else drop)()
+        if name in (None, "EXPLORE_PAGES"):
+            if self._opt("EXPLORE_PAGES") == "off":
+                self._quiet_pagescan()
+            else:
+                self._param_restore("auto-explore-pages")
+        if name in (None, "SAFERENDER"):
+            if self.saferender in ("on", "auto"):
+                self._saferender_warned = False
+                self._maybe_warn_saferender()
+            elif self.saferender == "off":
+                self._param_restore("emulate")
+            else:
+                self._maybe_warn_saferender()
+        if name in (None, "STEPLOCK"):
+            st = self._opt("STEPLOCK", "off")
+            if st != self.steplock:
+                self.steplock = st
+                self._sync_early_quiet(self.which_map())
+        if name == "SHADOW":
+            if self._flag("SHADOW"):
+                self._refresh_shadow()
+            else:
+                self._shadow_unload()
+        if name == "BPFIX" and not self.bpfix:
+            for n in list(self._managed_bps):
+                execstr("enable %d" % n)
+            self._managed_bps.clear()
+        if name == "CROSSING":
+            if not self._flag("CROSSING"):
+                self._retire_catcher("CROSSING off")
+            elif self.offset is not None and not self.kaslr_slide:
+                self._ensure_crossing_catcher("CROSSING", use_python=True)
 
     @safe()
     def disable(self):

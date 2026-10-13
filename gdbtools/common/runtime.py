@@ -7,6 +7,14 @@ import re
 from . import config
 from .config import ConfigError
 
+# `kearly set` values live on the gdb module: re-sourcing rebuilds every gdbtools
+# module, and a store kept here would forget what the user stated.
+_STATED = getattr(gdb, "_gdbtools_stated", None)
+if _STATED is None:
+    _STATED = {}
+    gdb._gdbtools_stated = _STATED
+config.bind_session(_STATED)
+
 MASK = (1 << 64) - 1
 NAME = "gdbtools"
 

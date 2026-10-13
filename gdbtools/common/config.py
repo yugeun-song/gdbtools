@@ -1,8 +1,11 @@
 """The GDBTOOLS_* contract: every variable gdbtools reads, its type and meaning.
 
-Unset (or empty) means "not stated" and leaves the feature on its default.  A
-value that is set and does not parse raises ConfigError naming the variable and
-the value; the feature that needed it refuses instead of falling back.  The same
+Two channels state a value: the environment, set by whoever starts gdb, and
+`kearly set KEY VALUE` inside the session, which outranks the environment.
+Unset (or empty) means "not stated" and leaves the feature on its default; every
+behaviour that changes gdb, pwndbg or the symbol table defaults to off.  A value
+that is set and does not parse raises ConfigError naming the variable and the
+value; the feature that needed it refuses instead of falling back.  The same
 types validate a machine profile's fields.  Pure Python, so README's table can
 be checked without gdb:
 
@@ -114,14 +117,52 @@ _TYPES = {
     "symbol": (_symbol, "a symbol name"),
     "words": (_words, "words"),
     "enum": (None, None),
+    "list": (None, None),
     "custom": (None, None),
 }
 
 # (name, type, choices or None, meaning).  README's table is rendered from this.
 _DECL = (
     ("AUTO", "bool", None,
-     "arm the kernel session once a kernel image is loaded: stop hook, shadow symbols, "
-     "MMU-transition notices. Unset: `kearly on` is manual"),
+     "arm the kernel session once a kernel image is loaded: stop hook, calibration, "
+     "MMU-transition notices. The behaviours below stay off unless stated. Unset: "
+     "`kearly on` is manual"),
+    ("BOOT", "enum", ("direct", "uboot", "uefi"),
+     "how the guest was booted. `uboot` and `uefi` make the entry break `hw` unless "
+     "`BREAK_KIND` says otherwise; on x86_64 `direct` puts the decompressor at the "
+     "boot-protocol address 0x100000 unless `X86_DECOMP_PA` says otherwise"),
+    ("SAFEMEM", "enum", ("off", "auto", "on"),
+     "guard pwndbg's memory probes by asking QEMU whether a page is RAM before reading "
+     "it (`kearly safemem`). Unset: off"),
+    ("PWNDBG_GUARDS", "bool", None,
+     "keep pwndbg's context alive on early-boot reads that throw. Unset: off"),
+    ("PANELS", "list", ("kgdb", "flow", "msysreg"),
+     "pwndbg context sections to add: `kgdb` (regime badge), `flow` (branch arrows), "
+     "`msysreg` (system registers and their fields). Unset: none"),
+    ("EXPLORE_PAGES", "enum", ("keep", "off"),
+     "`off` sets pwndbg's `auto-explore-pages` to `no` while the session is on and "
+     "restores it after. Unset: keep"),
+    ("SAFERENDER", "enum", ("off", "warn", "auto", "on"),
+     "arm64 guard for pwndbg's emulated disassembly: `auto` and `on` turn pwndbg "
+     "`emulate` off, `warn` only prints a notice (`kearly saferender`). Unset: off"),
+    ("SHADOW", "bool", None,
+     "load vmlinux again at the physical offset once calibrated, so physical "
+     "addresses symbolize. Unset: off"),
+    ("KASLR_APPLY", "enum", ("off", "auto"),
+     "`auto` relocates gdb's symbols to the KASLR slide at the first virtual stop "
+     "where it is readable (`symbol-file -o`). Unset: off"),
+    ("CROSSING", "bool", None,
+     "when a high-VA probe is set before the slide is known, arm a hidden hardware "
+     "breakpoint on the MMU crossing that applies the slide in passing. Unset: off"),
+    ("ADOPT", "bool", None,
+     "give a plain `b SYM` hardware siblings at its physical and runtime addresses. "
+     "Unset: off"),
+    ("BPFIX", "bool", None,
+     "disable a breakpoint's physical location while the MMU is on (`kearly bpfix`). "
+     "Unset: off"),
+    ("STEPLOCK", "enum", ("off", "on", "auto"),
+     "gdb `scheduler-locking step` while stepping; `auto` only while the MMU is off "
+     "(`kearly steplock`). Unset: off"),
     ("ENTRY_PA", "address", None,
      "physical address of the kernel image base. On x86_64 a stated base suppresses "
      "the decompressor recovery"),
@@ -140,7 +181,7 @@ _DECL = (
     ("X86_KASLR", "bool", None, "recover the decompressor-randomized physical base in `kearly bootbreak`"),
     ("X86_DECOMP_PA", "address", None,
      "where a direct boot loads the bzImage decompressor; selects the direct-boot "
-     "recovery. Unset: the EFI-stub recovery"),
+     "recovery. Unset: 0x100000 when `BOOT` is `direct`, else the EFI-stub recovery"),
     ("X86_DECOMP_VMLINUX", "file", None, "`arch/x86/boot/compressed/vmlinux`, read by the x86 base recovery"),
     ("BINUTIL_NM", "program", None, "`nm` for the x86 decompressor parse. Unset: `nm` on `$PATH`"),
     ("BINUTIL_OBJDUMP", "program", None, "`objdump` for the same parse. Unset: `objdump` on `$PATH`"),
@@ -196,6 +237,15 @@ def parse(name, raw, label=None):
                 if c.lower() == s:
                     return c
             raise ValueError
+        if kind == "list":
+            expect = "a list of words from: " + ", ".join(choices)
+            out = []
+            for w in str(raw).replace(",", " ").lower().split():
+                if w not in choices:
+                    raise ValueError
+                if w not in out:
+                    out.append(w)
+            return tuple(out)
         if kind == "custom":
             check = (_PROVIDED.get(name) or (None, None))[1]
             return check(raw) if check else raw
@@ -207,12 +257,70 @@ def parse(name, raw, label=None):
         raise ConfigError("%s is set to %r, which is not %s" % (label, raw, expect))
 
 
+# Values stated with `kearly set`.  A key mapped to None was stated unset, which
+# hides the environment's value.  The bootstrap binds a dict kept on the gdb
+# module, so the values survive re-sourcing the package.
+_SESSION = {}
+
+
+def bind_session(store):
+    global _SESSION
+    _SESSION = store
+
+
+def key(name):
+    """`shadow`, `SHADOW` or `GDBTOOLS_SHADOW` -> `SHADOW`; KeyError if unknown."""
+    n = str(name).strip().upper()
+    if n.startswith(PREFIX):
+        n = n[len(PREFIX):]
+    if n not in _BY_NAME:
+        raise KeyError(name)
+    return n
+
+
+def raw(name):
+    """(text, origin): origin is "session", "env" or None when nothing is stated."""
+    if name in _SESSION:
+        return _SESSION[name], "session"
+    v = os.environ.get(PREFIX + name)
+    if v is None or v == "":
+        return None, None
+    return v, "env"
+
+
 def get(name):
     """The stated value of GDBTOOLS_<name>, parsed; None when unset or empty."""
-    raw = os.environ.get(PREFIX + name)
-    if raw is None or raw == "":
+    v, origin = raw(name)
+    if v is None or v == "":
         return None
-    return parse(name, raw)
+    return parse(name, v, label=(PREFIX + name + " (kearly set)") if origin == "session" else None)
+
+
+def set_session(name, text):
+    """State `name` for this session; "-" states it unset.  A bad value raises
+    ConfigError and changes nothing.  Returns the canonical key."""
+    n = key(name)
+    if str(text).strip() == "-":
+        _SESSION[n] = None
+        return n
+    parse(n, text, label=PREFIX + n + " (kearly set)")
+    _SESSION[n] = str(text).strip()
+    return n
+
+
+def unset_session(name):
+    """Forget the session's value, so the environment's applies again."""
+    n = key(name)
+    _SESSION.pop(n, None)
+    return n
+
+
+def names():
+    return [d[0] for d in _DECL]
+
+
+def meaning(name):
+    return _BY_NAME[name][3]
 
 
 def validate_all():
@@ -289,6 +397,8 @@ _PROFILE_EXPECT = {"ranges": "a lo:hi range or a list of them",
 def _type_label(kind, choices):
     if kind == "enum":
         return " \\| ".join("`%s`" % c for c in choices) if choices else "preset name"
+    if kind == "list":
+        return "words of " + ", ".join("`%s`" % c for c in choices)
     return {"custom": "key [subject]"}.get(kind, kind)
 
 

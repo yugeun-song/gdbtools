@@ -177,7 +177,7 @@ def context_flow(*args, **kwargs):
 class _SafeProbe:
     def __init__(self):
         self.installed = False
-        self.mode = "auto"          # auto | on | off
+        self.mode = "off"           # auto | on | off; GDBTOOLS_SAFEMEM, off unless stated
         self._orig = None
         self._mod = None
         self._cache = {}            # page -> True/False (mapped)

@@ -16,6 +16,18 @@ from .dtb import *
 # was handed in and does not load is an error that every use re-raises, so nothing
 # quietly runs on arch defaults while the operator believes their board is in effect.
 # ----------------------------------------------------------------------------
+# The default machine: QEMU's own boards (hw/arm/virt.c, hw/riscv/virt.c,
+# hw/i386/pc_piix.c and pc_q35.c).  Applied only once QEMU confirms the machine
+# type, and only for RAM the guest has not described itself.  Nothing here is a
+# kernel or boot fact: the load address and the breakpoint kind depend on both and
+# are never preset.
+QEMU_PRESETS = {
+    "arm64": {"family": ("virt",), "ram_base": 0x40000000},
+    "riscv64": {"family": ("virt",), "ram_base": 0x80000000},
+    "x86_64": {"family": ("pc-i440fx", "pc-q35"), "ram_base": 0x0},
+}
+
+
 class Target:
     def __init__(self):
         self._prof = None          # validated profile fields (config.parse_profile)
@@ -23,10 +35,10 @@ class Target:
         self._loaded = False
         self._errors = {}          # "PROFILE"/"DTB" -> ConfigError from the environment
         self._dtb_probe = None     # (pc, pointer) of the last guest-DTB miss
+        self.qemu_preset = None    # QEMU_PRESETS entry, once QEMU confirmed the machine
 
-    @safe()
-    def load(self):
-        """Read the machine description that was handed in, once."""
+    def load_stated(self):
+        """Read the machine description that was handed in, once; never raises."""
         if not self._loaded:
             self._loaded = True
             for name, setter in (("PROFILE", self.set_profile), ("DTB", self.set_dtb)):
@@ -36,9 +48,34 @@ class Target:
                         setter(path, label="%s%s=%s" % (config.PREFIX, name, path))
                 except ConfigError as e:
                     self._errors[name] = e
+
+    @safe()
+    def load(self):
+        """The handed-in description, or its error at every use."""
+        self.load_stated()
         for name in ("PROFILE", "DTB"):
             if name in self._errors:
                 raise self._errors[name]
+
+    @safe()
+    def reload(self, name):
+        """After GDBTOOLS_PROFILE or GDBTOOLS_DTB changed: drop what was loaded for
+        it and load what is stated now.  A stated file that does not load is the
+        same error at every use as one handed in at startup."""
+        self.load_stated()
+        if name == "PROFILE":
+            self._prof = None
+        else:
+            self._dtb = None
+        self._errors.pop(name, None)
+        path = config.get(name)
+        if path:
+            try:
+                (self.set_profile if name == "PROFILE" else self.set_dtb)(
+                    path, label="%s%s=%s" % (config.PREFIX, name, path))
+            except ConfigError as e:
+                self._errors[name] = e
+                raise
 
     @safe(default=False)
     def set_profile(self, path, quiet=False, label=None):
@@ -114,6 +151,11 @@ class Target:
             out.append((rb, self._p("ram_size") or 0))
         if self._dtb:
             out.extend(self._dtb.get("memory", []))
+        # Only while translation is off: the preset names PHYSICAL RAM, and with the
+        # MMU on a read of that number would go through the live page tables.
+        if not out and self.qemu_preset is not None and arch is not None \
+                and arch.mmu_translation_on() is False:
+            out.append((self.qemu_preset["ram_base"], 0))
         return out
 
     def scan_ranges(self):
@@ -159,6 +201,8 @@ class Target:
         if self._dtb:
             bits.append("dtb(mem=%s)" %
                         ",".join(fmt(b) for b, _ in self._dtb.get("memory", [])))
+        if not bits and self.qemu_preset is not None:
+            bits.append("qemu preset(ram=%s while the MMU is off)" % fmt(self.qemu_preset["ram_base"]))
         return " ".join(bits) if bits else "(arch defaults)"
 
 
@@ -167,4 +211,4 @@ TARGET = Target()
 
 # Underscore-prefixed helpers are part of this module's public surface for the
 # rest of the package (`from .target import *`), which would otherwise skip them.
-__all__ = ['Target', 'TARGET']
+__all__ = ['Target', 'TARGET', 'QEMU_PRESETS']

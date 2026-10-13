@@ -675,11 +675,11 @@ class X86_64(X86_64Common, KernelArch):
         cv = sess._compressed_vmlinux()
         if cv is None:
             return None
-        # Which walk applies is the launcher's to state: $GDBTOOLS_X86_DECOMP_PA is
-        # where a DIRECT boot's decompressor is loaded, and only a direct boot has
-        # one.  It cannot be decided by looking -- at the reset vector the address is
-        # legitimately empty.  An invalid value raises rather than picking a walk.
-        load = config.get("X86_DECOMP_PA")
+        # Which walk applies is the launcher's to state: $GDBTOOLS_BOOT=direct (or an
+        # explicit $GDBTOOLS_X86_DECOMP_PA) says a DIRECT boot loaded a decompressor,
+        # and only a direct boot has one.  It cannot be decided by looking -- at the
+        # reset vector the address is legitimately empty.
+        load = sess.x86_decomp_pa()
         if load is None:
             return self.recover_kaslr_base_efi(sess)
         offs = _x86_decomp_offsets(cv)

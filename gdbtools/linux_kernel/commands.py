@@ -21,16 +21,23 @@ class KEarly(gdb.Command):
     """kearly: early-boot symbolization control.
 
 Everyday: `kearly on`, `kearly bootbreak`, `kearly calibrate` -- or set
-$GDBTOOLS_AUTO=1 before gdb starts and all three happen on attach.
-The rest are HAND CONTROLS -- every automatic decision is overridable mid-session.
+$GDBTOOLS_AUTO=1 before gdb starts and the session arms on attach.
+Everything that changes gdb, pwndbg or the symbol table is a GDBTOOLS_* key and
+is off until stated, by the launcher's environment or here with `kearly set`;
+a value stated here outranks the environment and stays until changed.
 
 Subcommands:
+  kearly config [KEY]      every GDBTOOLS_* key: value, and whether it came from
+                           `kearly set` or the environment
+  kearly set KEY VALUE     state a key for this session ('-' states it unset,
+                           hiding the environment's value); takes effect at once
+  kearly unset KEY         forget the session's value; the environment's applies
   kearly safemem [on|off|auto|status]   guard pwndbg's memory-map probing: ask QEMU
                            whether a page is RAM before reading it, so a probe that would
                            reach a device model fails normally instead of crashing the VM.
-                           Default auto: armed on a kernel target wherever the QEMU monitor
-                           answers, in EVERY regime -- a debug read of the GIC kills qemu
-                           with the MMU off exactly as it does with it on
+                           GDBTOOLS_SAFEMEM, off unless stated; auto arms it wherever the
+                           QEMU monitor answers, in EVERY regime -- a debug read of the GIC
+                           kills qemu with the MMU off exactly as it does with it on
   kearly where             ONE-LINER ORIENTATION: regime badge, pc + symbol + its phys/virt
                            twin, offset, KASLR slide, boot phase, and the command that most
                            likely moves you forward.  Read-only -- never resumes the CPU.
@@ -39,7 +46,7 @@ Subcommands:
                            as symbol+offset, link VA and PA.  'walk' arms all of them so plain
                            `continue` steps through the transition; 'stop NAME' runs to one.
   kearly status            arch / offset / map / MMU / preset / anchor / target / vmlinux
-  kearly on | off          enable/disable the auto stop hook + shadow symbols
+  kearly on | off          enable/disable the session (stop hook, and what is stated on)
   kearly bootbreak [arm]   run past QEMU reset/firmware to the kernel entry, calibrate.
                            'arm' only arms the entry breakpoint and does NOT resume, for a
                            front end (VS Code) that has to issue the continue itself
@@ -77,8 +84,8 @@ Subcommands:
                            (kills the "thread 1 PC keeps jumping" noise); auto-off on MMU
   kearly log [N]           show the internal degrade/diagnostic log
   kearly saferender <warn|on|off|auto>   pwndbg emulated-disasm crash guard on arm64
-                           (default 'auto' = 'set emulate off' on arm64, restored on 'kearly off';
-                            'off' restores emulation now, 'warn' only prints a heads-up)
+                           (GDBTOOLS_SAFERENDER, off unless stated; 'auto' = 'set emulate off'
+                            on arm64, restored on 'kearly off'; 'warn' only prints a heads-up)
   kearly bpfix <on|off>    optional cleanup for dual native(VA)+shadow(PA) breakpoints: the
                            virtual location is ALWAYS kept enabled (it is the one that fires
                            for MMU-on code such as start_kernel); only the dormant physical
@@ -111,7 +118,13 @@ Subcommands:
     def invoke(self, arg, from_tty):
         args = (arg or "").split()
         sub = args[0].lower() if args else "status"
-        if sub == "on":
+        if sub in ("config", "keys"):
+            self._config(args[1] if len(args) > 1 else None)
+        elif sub == "set":
+            self._set(args[1:])
+        elif sub == "unset":
+            self._unset(args[1:])
+        elif sub == "on":
             SESSION.enable()
             print("[%s] enabled" % NAME)
         elif sub == "off":
@@ -148,24 +161,41 @@ Subcommands:
                     print("usage: kearly entry <image-base PA | auto>   ('%s' did not evaluate)"
                           % args[1])
                     return
+                config.set_session("ENTRY_PA", "0x%x" % v)
                 SESSION.entry_pa = v
                 # A stated entry is an answer: the x86 guards stand down for it the
                 # same way they do for $GDBTOOLS_ENTRY_PA.
                 SESSION._entry_pinned = True
                 print("[%s] entry (image-base) PA = %s" % (NAME, fmt(SESSION.entry_pa)))
             else:
+                # 'auto' asks for discovery, so the environment's value is hidden too.
+                config.set_session("ENTRY_PA", "-")
                 SESSION.entry_pa = None
                 SESSION._entry_pinned = False
                 print("[%s] entry PA = auto (will re-scan)" % NAME)
         elif sub == "anchor":
-            SESSION.anchor = (args[1] if len(args) > 1 and
-                              args[1].lower() not in ("-", "none", "auto") else None)
+            # '-' states no anchor, hiding the environment's too: the preset, the
+            # profile or the arch decides again.  Bare only reports.
+            if len(args) > 1:
+                config.set_session("ANCHOR", "-" if args[1].lower() in ("-", "none", "auto")
+                                   else args[1])
+            SESSION.load_overrides()
             print("[%s] anchor = %s" % (NAME, SESSION.current_anchor() or "?"))
         elif sub in ("break", "bp", "breakkind"):
-            SESSION.break_kind = args[1] if (len(args) > 1 and args[1] in ("sw", "hw")) else None
+            if len(args) > 1:
+                if args[1] in ("sw", "hw", "-", "auto"):
+                    config.set_session("BREAK_KIND", "-" if args[1] == "auto" else args[1])
+                else:
+                    print("usage: kearly break <sw|hw|->")
+                    return
+            SESSION.load_overrides()
             print("[%s] break kind = %s" % (NAME, SESSION.current_break_kind()))
         elif sub == "shadow":
-            SESSION.set_shadow(len(args) > 1 and args[1].lower() in ("on", "1", "true"))
+            if len(args) > 1:
+                SESSION.set_shadow(args[1].lower() in ("on", "1", "true"))
+            else:
+                print("[%s] shadow=%s  loaded=%s" % (NAME, "on" if SESSION._flag("SHADOW") else "off",
+                      fmt(SESSION.shadow_addr) if SESSION.shadow_addr is not None else "no"))
         elif sub == "arch":
             SESSION.force_arch(args[1] if len(args) > 1 else "auto")
         elif sub == "verbose":
@@ -179,7 +209,11 @@ Subcommands:
         elif sub in ("census", "regs"):
             SESSION.set_census(args[1] if len(args) > 1 else "compact")
         elif sub in ("msysreg", "sysreg", "bits", "kbits"):
-            SESSION.set_msysreg(args[1] if len(args) > 1 else "compact")
+            if len(args) > 1:
+                SESSION.set_msysreg(args[1])
+            else:
+                print("[%s] msysreg panel = %s" % (NAME, SESSION.msysreg_mode
+                      if "msysreg" in SESSION.panels() else "off"))
         elif sub in ("chaindepth", "chain", "depth", "telescope", "hops"):
             if len(args) > 1:
                 SESSION.set_chain_hops(args[1])
@@ -187,15 +221,23 @@ Subcommands:
                 print("[%s] telescope depth = %d hops  (kearly chaindepth <N>)"
                       % (NAME, SESSION.chain_hops))
         elif sub in ("steplock", "lock"):
-            SESSION.set_steplock(args[1] if len(args) > 1 else "auto")
+            if len(args) > 1:
+                SESSION.set_steplock(args[1])
+            else:
+                print("[%s] steplock=%s" % (NAME, SESSION.steplock))
         elif sub in ("saferender", "safe", "emulate", "emu"):
             SESSION.set_saferender(args[1] if len(args) > 1 else "status")
         elif sub in ("bpfix", "regimebp"):
-            SESSION.set_bpfix(args[1] if len(args) > 1 else "on")
+            if len(args) > 1:
+                SESSION.set_bpfix(args[1])
+            else:
+                print("[%s] bpfix=%s" % (NAME, "on" if SESSION.bpfix else "off"))
         elif sub == "adopt":
-            SESSION.adopt = not (len(args) > 1 and args[1].lower() in ("off", "0", "false", "no"))
+            if len(args) > 1:
+                off = args[1].lower() in ("off", "0", "false", "no")
+                config.set_session("ADOPT", "off" if off else "on")
             print("[%s] adopt=%s  (plain `b SYM` auto-gains PA(S)+IMG(S) regime-aware siblings)"
-                  % (NAME, SESSION.adopt))
+                  % (NAME, "on" if SESSION.adopt else "off"))
         elif sub in ("kaslr", "slide"):
             SESSION.set_kaslr(args[1] if len(args) > 1 else "")
         elif sub in ("overmmu", "mmuon", "over", "crossmmu"):
@@ -203,6 +245,7 @@ Subcommands:
         elif sub in ("safemem", "safeprobe"):
             m = (args[1].lower() if len(args) > 1 else "status")
             if m in ("on", "off", "auto"):
+                config.set_session("SAFEMEM", m)
                 SAFEPROBE.mode = m
                 if m != "off":
                     SAFEPROBE.install()
@@ -237,7 +280,7 @@ Subcommands:
         print("[%s] arch=%s  enabled=%s  offset(PA-VA)=%s\n"
               "      map=%s  MMU=%s [%s]  steplock=%s  census=%s  chaindepth=%d\n"
               "      preset=%s  anchor=%s  break=%s\n"
-              "      target=%s\n"
+              "      target=%s  platform=%s\n"
               "      vmlinux=%s  shadow=%s" % (
                   NAME, a.key if a else "?", SESSION.enabled,
                   fmt(SESSION.offset) if SESSION.offset is not None else "(uncalibrated)",
@@ -245,9 +288,92 @@ Subcommands:
                   SESSION.chain_hops,
                   SESSION.preset or "(default)",
                   SESSION.current_anchor() or "?", SESSION.current_break_kind(),
-                  TARGET.describe(),
+                  TARGET.describe(), self._platform(),
                   SESSION.vmlinux_path(),
                   fmt(SESSION.shadow_addr) if SESSION.shadow_addr is not None else "off"))
+
+    @staticmethod
+    def _platform():
+        p = SESSION.platform
+        if p is None:
+            return "(not checked)"
+        if not p.get("qemu"):
+            return "no QEMU monitor"
+        return "qemu %s%s" % (p.get("machine"), "" if p.get("ok") else " (no preset)")
+
+    @safe()
+    def _config(self, only=None):
+        names = config.names()
+        if only:
+            try:
+                names = [config.key(only)]
+            except KeyError:
+                print("[%s] no GDBTOOLS_* key '%s' (kearly config lists them)" % (NAME, only))
+                return
+        width = max(len(n) for n in names)
+        for n in names:
+            raw, origin = config.raw(n)
+            if origin is None:
+                val, where = "-", ""
+            elif raw is None:
+                val, where = "(unset)", "kearly set"
+            else:
+                val, where = raw, "kearly set" if origin == "session" else "environment"
+            print(("  %-*s  %-24s %s" % (width, n, val, where)).rstrip())
+        if only:
+            print("  " + config.meaning(names[0]))
+
+    @safe()
+    def _set(self, args):
+        if len(args) < 2:
+            print("usage: kearly set KEY VALUE   ('-' states it unset; `kearly config` lists keys)")
+            return
+        try:
+            name, value = config.key(args[0]), " ".join(args[1:])
+        except KeyError:
+            print("[%s] no GDBTOOLS_* key '%s' (kearly config lists them)" % (NAME, args[0]))
+            return
+        try:
+            if name in ("PROFILE", "DTB") and value.strip() != "-":
+                # A description that does not load is refused before it is stated,
+                # so nothing broken is left for a re-source to trip over.
+                TARGET.load_stated()
+                (TARGET.set_profile if name == "PROFILE" else TARGET.set_dtb)(value.strip())
+            config.set_session(name, value)
+        except ConfigError as e:
+            print("[%s] %s" % (NAME, e))
+            return
+        self._apply(name, loaded=name in ("PROFILE", "DTB"))
+
+    @safe()
+    def _unset(self, args):
+        if not args:
+            print("usage: kearly unset KEY")
+            return
+        try:
+            name = config.unset_session(args[0])
+        except KeyError:
+            print("[%s] no GDBTOOLS_* key '%s' (kearly config lists them)" % (NAME, args[0]))
+            return
+        self._apply(name)
+
+    @safe()
+    def _apply(self, name, loaded=False):
+        if name in ("ANCHOR", "BREAK_KIND", "PRESET"):
+            SESSION.load_overrides()
+        elif name == "ENTRY_PA":
+            SESSION.entry_pa = None
+            SESSION._entry_pinned = config.get("ENTRY_PA") is not None
+        elif name in ("PROFILE", "DTB"):
+            if not (loaded and config.get(name)):
+                TARGET.reload(name)
+            SESSION.entry_pa = None
+            SESSION.load_overrides()
+        else:
+            SESSION.apply_settings(name)
+        raw, origin = config.raw(name)
+        print("[%s] %s = %s%s" % (NAME, name, "(unset)" if raw is None else raw,
+                                  "" if origin else " (nothing stated)"))
 
     @safe()
     def _mmu(self):
@@ -273,7 +399,9 @@ Subcommands:
             line += "  cr0.PG=%s" % ("?" if v is None else ((v >> 31) & 1))
         print(line)
         if st == "off":
-            print("      pre-MMU: $pc/pointers are PHYSICAL; shadow symbols active.")
+            print("      pre-MMU: $pc/pointers are PHYSICAL; %s." % (
+                "shadow symbols active" if SESSION.shadow_addr is not None
+                else "no shadow symbols (GDBTOOLS_SHADOW, or kearly shadow on)"))
         elif st == "on":
             print("      MMU on: kernel VAs resolve natively; kp2v/kv2p translate either way.")
 
@@ -282,7 +410,9 @@ Subcommands:
         if arg == "show":
             self._show_target()
             return
+        TARGET.load_stated()
         if TARGET.set_profile(arg):
+            config.set_session("PROFILE", arg)
             SESSION.entry_pa = None          # force re-resolve with the new descriptor
             SESSION.load_overrides()
 
@@ -297,7 +427,9 @@ Subcommands:
             SESSION.entry_pa = None          # a freshly-read DTB can change the scan
             self._show_target()
         else:
+            TARGET.load_stated()
             if TARGET.set_dtb(arg):
+                config.set_session("DTB", arg)
                 SESSION.entry_pa = None
                 self._show_target()
 
