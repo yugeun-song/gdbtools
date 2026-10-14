@@ -22,21 +22,69 @@ bad()  { printf '  %s%s%s %s\n' "$R" "$NOM" "$N" "$*"; }
 opt()  { printf '  %s-%s %s\n' "$D" "$N" "$*"; }
 die()  { printf '%sgdbtools:%s %s\n' "$R$B" "$N" "$*" >&2; exit 1; }
 
+# Every command once: NAME|ARGS|WHAT IT DOES, and its options as
+# COMMAND|OPTION|WHAT IT DOES.  usage, `COMMAND --help` and the shell completions
+# (`gdbtools __complete`) all read these, so none can drift from the others.
+CMDS=(
+    "gdb|[GDB ARGS...]|gdb with gdbtools loaded (\$GDB picks the gdb)"
+    "path||print the loader, for a tool that sources it"
+    "config||every GDBTOOLS_* setting and its value here"
+    "doctor||check gdb, its Python, pwndbg and the install"
+    "install|[--global]|record this checkout for kbuildlab and nvim"
+    "uninstall||undo install"
+    "version||print this checkout's version"
+    "help|[COMMAND]|this list, or one command's options"
+)
+OPTS=(
+    "install|--global|also write the loader line into the gdb init file gdb reads, so every gdb loads gdbtools"
+)
+
+_wrap() {   # _wrap COLUMN TEXT: TEXT from the cursor, wrapped at 80 with COLUMN of indent
+    local col="$1" line="" w
+    for w in $2; do
+        if [[ -n "$line" && $(( col + ${#line} + 1 + ${#w} )) -gt 80 ]]; then
+            printf '%s\n%*s' "$line" "$col" ""; line="$w"
+        else line="${line:+$line }$w"; fi
+    done
+    printf '%s\n' "$line"
+}
+_row() {   # _row LABEL PLAIN-WIDTH TEXT [COLUMN]: LABEL, padded to COLUMN (32), then TEXT
+    local col="${4:-32}"
+    printf '  %s' "$1"
+    if (( $2 > col - 4 )); then printf '\n%*s' "$col" ""; else printf '%*s' $((col - 2 - $2)) ""; fi
+    _wrap "$col" "$3"
+}
+
 usage() {
-    cat <<USAGE
-${B}gdbtools${N} -- gdb extensions for control flow, symbols and early-boot Linux kernels
+    local r n a w
+    printf '%sgdbtools%s -- gdb extensions for control flow, symbols and early-boot Linux kernels\n\n' "$B" "$N"
+    for r in "${CMDS[@]}"; do
+        IFS='|' read -r n a w <<<"$r"
+        _row "${C}gdbtools $n${N}${a:+ $a}" $(( 9 + ${#n} + ${a:+1} + ${#a} )) "$w"
+    done
+    printf '\nInside gdb: `kearly config` and `kearly set KEY VALUE` change the same settings.\n'
+    printf '`gdbtools COMMAND --help` shows one command; Tab completes them once install.sh\n'
+    printf 'has put the bash and zsh completions in place.\n'
+}
 
-  ${C}gdbtools gdb${N} [GDB ARGS...]    start gdb with gdbtools loaded (\$GDB picks the gdb)
-  ${C}gdbtools path${N}                 print the loader, for a tool that sources it
-  ${C}gdbtools config${N}               every GDBTOOLS_* setting and its value here
-  ${C}gdbtools doctor${N}               check gdb, its Python, pwndbg and the install
-  ${C}gdbtools install${N} [--global]   record this checkout for kbuildlab and nvim;
-                                --global also loads it in every gdb
-  ${C}gdbtools uninstall${N}            undo install
-  ${C}gdbtools version${N}
-
-Inside gdb: \`kearly config\` and \`kearly set KEY VALUE\` change the same settings.
-USAGE
+cmd_help() {
+    local r n a w found=0
+    [[ $# -gt 0 ]] || { usage; return 0; }
+    for r in "${CMDS[@]}"; do
+        IFS='|' read -r n a w <<<"$r"
+        [[ "$n" == "$1" ]] || continue
+        found=1
+        printf '%sgdbtools %s%s%s\n  ' "$B" "$n" "$N" "${a:+ $a}"
+        _wrap 2 "$w"
+    done
+    (( found )) || die "no command '$1' (gdbtools help lists them)"
+    local first=1
+    for r in "${OPTS[@]}"; do
+        IFS='|' read -r n a w <<<"$r"
+        [[ "$n" == "$1" ]] || continue
+        (( first )) && printf '\n' && first=0
+        _row "$a" ${#a} "$w" $(( ${#a} + 6 ))
+    done
 }
 
 _family() {
@@ -109,7 +157,28 @@ print("\n  %sSet them in the environment before gdb starts, or in gdb with `kear
 EOF
 }
 
+# Completion lines are TAG<TAB>VALUE<TAB>DESCRIPTION, or @gdb: complete as gdb.
+_complete() {   # _complete WORD...: the words after `gdbtools`, the last being completed
+    local r n a w used
+    if [[ $# -le 1 || ( "$1" == help && $# -eq 2 ) ]]; then
+        for r in "${CMDS[@]}"; do IFS='|' read -r n a w <<<"$r"; printf 'command\t%s\t%s\n' "$n" "$w"; done
+        return 0
+    fi
+    [[ "$1" == gdb ]] && { printf '@gdb\n'; return 0; }
+    used=" ${*:2:$#-2} "
+    for r in "${OPTS[@]}"; do
+        IFS='|' read -r n a w <<<"$r"
+        [[ "$n" == "$1" && "$used" != *" $a "* ]] && printf 'option\t%s\t%s\n' "$a" "$w"
+    done
+    return 0
+}
+
 sub="${1:-help}"; shift || true
+# -h or --help after any command but gdb (whose arguments are gdb's) asks for it.
+case "$sub" in
+    gdb|help|-h|--help|__complete) ;;
+    *) for a in "$@"; do [[ "$a" == -h || "$a" == --help ]] && { cmd_help "$sub"; exit; }; done ;;
+esac
 case "$sub" in
     gdb)       exec "${GDB:-gdb}" -ex "source $LOADER" "$@" ;;
     path)      printf '%s\n' "$LOADER" ;;
@@ -119,6 +188,7 @@ case "$sub" in
     uninstall) exec "$ROOT/setup.sh" --uninstall ;;
     version)   git -C "$ROOT" describe --tags --always --dirty 2>/dev/null \
                    || sed -n 's/^__version__ = "\(.*\)"/\1/p' "$ROOT/gdbtools/__init__.py" ;;
-    help|-h|--help) usage ;;
+    help|-h|--help) cmd_help "$@" ;;
+    __complete) _complete "$@" ;;
     *) usage >&2; die "unknown command '$sub'" ;;
 esac

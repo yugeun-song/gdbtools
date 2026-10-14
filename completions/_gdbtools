@@ -1,0 +1,34 @@
+#compdef gdbtools
+# zsh completion for gdbtools.  It asks gdbtools itself (`gdbtools __complete`)
+# what may come next; after `gdbtools gdb` it completes as gdb does.
+
+_gdbtools() {
+    local -a reply cmds opts
+    local line tag rest value desc
+    reply=("${(@f)$("${words[1]}" __complete "${(@)words[2,CURRENT]}" 2>/dev/null)}")
+    for line in $reply; do
+        tag=${line%%$'\t'*}
+        rest=${line#*$'\t'}
+        if [[ $tag == @gdb ]]; then
+            words=("${GDB:-gdb}" "${(@)words[3,-1]}")
+            (( CURRENT -= 1 ))
+            _normal
+            return
+        fi
+        [[ -n $tag ]] || continue
+        value=${${rest%%$'\t'*}//:/\\:}
+        desc=${rest#*$'\t'}
+        [[ -n $desc ]] && value+=":$desc"
+        case $tag in
+            command) cmds+=("$value") ;;
+            *) opts+=("$value") ;;
+        esac
+    done
+    local ret=1
+    (( $#cmds )) && _describe -t commands 'command' cmds && ret=0
+    (( $#opts )) && _describe -t options 'option' opts && ret=0
+    (( ret )) && _message -r 'no more arguments'
+    return ret
+}
+
+_gdbtools "$@"
