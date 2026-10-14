@@ -45,23 +45,30 @@ gdbtools doctor
 ```
 
 `install.sh` links the `gdbtools` command into a directory on `PATH` (it says how
-to add one that is missing; shell files are never edited) and runs `setup.sh`,
-which records the checkout in `${XDG_CONFIG_HOME:-~/.config}/gdbtools/root`.
-kbuildlab's `attach` and the nvim adapter find `gdbtools.py` there and source it
-themselves; a plain `gdb` stays stock. Run as yourself, `--system` asks sudo (else
-doas or run0; `--sudo CMD` names another) for the link into `/usr/local/bin` alone
-and records the checkout as you; another user can follow that link only if they
-can enter the checkout. `setup.sh --global` also writes a `source` line into the
-init file gdb reads, so every gdb loads it. `--check` reports, `--uninstall`
-removes what was added.
+to add one that is missing; shell files are never edited), puts its bash and zsh
+completions where bash-completion and zsh look, and runs `setup.sh`, which records
+the checkout in `${XDG_CONFIG_HOME:-~/.config}/gdbtools/root`. kbuildlab's
+`attach` and the nvim adapter find `gdbtools.py` there and source it themselves; a
+plain `gdb` stays stock. Run as yourself, `--system` asks sudo (else doas or run0;
+`--sudo CMD` names another) for the links under `/usr/local` alone and records the
+checkout as you; another user can follow those links only if they can enter the
+checkout. `setup.sh --global` also writes a `source` line into the init file gdb
+reads, so every gdb loads it. zsh reads a user's completions from
+`~/.local/share/zsh/site-functions` only once that is on `$fpath`, and
+`install.sh` says how when it is not. `--check` reports, `--uninstall` removes
+what was added.
 
 ```
 gdbtools gdb [GDB ARGS]     gdb with gdbtools loaded ($GDB picks the gdb)
 gdbtools path               the loader, for a tool that sources it
 gdbtools config             every GDBTOOLS_* setting and its value here
 gdbtools doctor             gdb, its Python, pwndbg and the install
+gdbtools help [COMMAND]     every command, or one with its options (COMMAND --help)
 (gdb) source /path/to/gdbtools/gdbtools.py      by hand; re-sourcing picks up edits
 ```
+
+Tab completes the commands and their options, and after `gdbtools gdb` it
+completes as gdb does.
 
 ### Command names
 
@@ -222,6 +229,30 @@ no QEMU monitor, is said once, and then only what the guest reports, or
 
 `GDBTOOLS_PATH` is not in the table: kbuildlab and the nvim adapter read it to find
 `gdbtools.py` before gdb starts, and the package itself never does.
+
+## Layout
+
+```
+gdbtools.py                   the loader; re-sourcing it reloads every module
+gdbtools/bootstrap.py         registers the commands, once per name
+gdbtools/common/              the target-independent commands, the GDBTOOLS_* contract
+                              (config.py) and the runtime they share (runtime.py)
+gdbtools/linux_kernel/
+  session.py                  the session: settings, hooks, enable and disable, the
+                              platform check, what happens at every stop
+  addressing.py               phys<->virt translation, symbolization, the MMU regime
+  boot.py                     entry resolution, calibration, bootbreak, shadow symbols
+  kaslr.py                    the slide: its evidence, detection, the crossing catcher
+  breakpoints.py              kb and kw, adopted plain breakpoints, bpfix
+  views.py                    regimes, page-table walks and dumps, mmview
+  panels.py                   the pwndbg context sections and register twins
+  commands.py                 kearly, the k* commands and mmview (kdtb is in fdt.py,
+                              kmemblock in memblock.py)
+  target.py, presets.py       the machine description and the boot presets
+  pwndbg_glue.py              the pwndbg guards and the safemem probe
+  arch/                       one class per architecture
+bin/gdbtools                  the CLI; completions/ holds its bash and zsh completion
+```
 
 ## Dependencies
 
