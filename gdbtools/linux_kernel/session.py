@@ -217,9 +217,6 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
                 pass
             self._kaslr_pending = None
             self._catch_wanted = not self.kaslr_slide
-        old_probe = getattr(live.__class__.on_stop, "__globals__", {}).get("SAFEPROBE")
-        if old_probe is not None and old_probe is not SAFEPROBE:
-            SAFEPROBE.mode = getattr(old_probe, "mode", SAFEPROBE.mode)
         if was_enabled:
             self.enable()
 
