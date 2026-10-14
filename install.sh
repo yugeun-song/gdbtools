@@ -117,7 +117,16 @@ ask_root() {   # ask_root DEST...: elevate when any of them cannot be written
     fi
     command -v "${ELEVATE[0]}" >/dev/null 2>&1 || { bad "--sudo: ${ELEVATE[0]} is not installed"; exit 1; }
     say root "cannot write $d; asking ${ELEVATE[0]##*/} for the links only"
-    if [[ "${ELEVATE[0]}" == sudo ]]; then
+    # sudo and doas ask on the controlling terminal; with none (an editor, a pipe)
+    # only a cached or password-free grant can work, so say what to do instead.
+    case "${ELEVATE[0]##*/}" in
+        sudo|doas)
+            if ! { : </dev/tty; } 2>/dev/null && ! "${ELEVATE[@]}" -n true 2>/dev/null; then
+                bad "${ELEVATE[0]##*/} needs a password and there is no terminal to ask on; run this in a terminal"
+                exit 1
+            fi ;;
+    esac
+    if [[ "${ELEVATE[0]##*/}" == sudo ]]; then
         "${ELEVATE[@]}" -v || { bad "sudo did not authenticate; nothing was changed"; exit 1; }
     fi
 }
