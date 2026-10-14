@@ -36,13 +36,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]]; then
-    G=$'\e[32m' R=$'\e[31m' C=$'\e[36m' D=$'\e[2m' N=$'\e[0m'
-else G="" R="" C="" D="" N=""; fi
+    G=$'\e[32m' R=$'\e[31m' Y=$'\e[33m' C=$'\e[36m' D=$'\e[2m' N=$'\e[0m'
+else G="" R="" Y="" C="" D="" N=""; fi
 case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
     *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) OKM="✓" NOM="✗" ;; *) OKM="+" NOM="x" ;;
 esac
 ok()  { printf '  %s%s%s %s\n' "$G" "$OKM" "$N" "$*"; }
 bad() { printf '  %s%s%s %s\n' "$R" "$NOM" "$N" "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 say() { printf '  %s%-12s%s %s\n' "$C" "$1" "$N" "${*:2}"; }
 
 case "$WHERE" in
@@ -57,7 +58,7 @@ on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; esac; return 1; }
 
 path_hint() {
     on_path "$BIN" && return 0
-    bad "$BIN is not on PATH; add it in your shell's startup file:"
+    warn "$BIN is not on PATH; add it in your shell's startup file:"
     printf '      bash, zsh:  export PATH="%s:$PATH"\n' "$BIN"
     printf '      fish:       fish_add_path %s\n' "$BIN"
 }
@@ -109,7 +110,7 @@ reach_block() {
 reach_warn() {
     local blk
     [[ "$WHERE" != user ]] && blk="$(reach_block)" || return 0
-    bad "other users cannot enter $blk ($(stat -c %A "$blk")), so the link works only for $(stat -c %U "$REPO")"
+    warn "other users cannot enter $blk ($(stat -c %A "$blk")), so the link works only for $(stat -c %U "$REPO")"
 }
 
 case "$MODE" in
