@@ -40,7 +40,7 @@ Clone it anywhere; nothing depends on the location.
 
 ```sh
 git clone https://github.com/yugeun-song/gdbtools
-./gdbtools/install.sh            # ~/.local/bin/gdbtools; --system: /usr/local/bin (sudo)
+./gdbtools/install.sh            # ~/.local/bin/gdbtools; --system: /usr/local/bin
 gdbtools doctor
 ```
 
@@ -48,9 +48,12 @@ gdbtools doctor
 to add one that is missing; shell files are never edited) and runs `setup.sh`,
 which records the checkout in `${XDG_CONFIG_HOME:-~/.config}/gdbtools/root`.
 kbuildlab's `attach` and the nvim adapter find `gdbtools.py` there and source it
-themselves; a plain `gdb` stays stock. `setup.sh --global` also writes a `source`
-line into the init file gdb reads, so every gdb loads it. `--check` reports,
-`--uninstall` removes what was added.
+themselves; a plain `gdb` stays stock. Run as yourself, `--system` asks sudo (else
+doas or run0; `--sudo CMD` names another) for the link into `/usr/local/bin` alone
+and records the checkout as you; another user can follow that link only if they
+can enter the checkout. `setup.sh --global` also writes a `source` line into the
+init file gdb reads, so every gdb loads it. `--check` reports, `--uninstall`
+removes what was added.
 
 ```
 gdbtools gdb [GDB ARGS]     gdb with gdbtools loaded ($GDB picks the gdb)
