@@ -68,12 +68,12 @@ class Riscv64(Riscv64Common, KernelArch):
         # so slide = virt_addr - linkVA(_start).  Read virt_addr's VALUE at its
         # INVARIANT physical address (kernel_map is .data: PA = linkVA + offset),
         # via `monitor xp` -- non-circular.  The field offset comes from DWARF,
-        # because it is NOT a constant: this workspace's own builds disagree.
-        #   v6.12-riscv64  asm-offsets.s:  ->KERNEL_MAP_VIRT_ADDR 8
-        #   upstream       asm-offsets.s:  ->KERNEL_MAP_VIRT_ADDR 0
+        # because it is NOT a constant: kernel versions disagree.
+        #   6.12            asm-offsets.s:  ->KERNEL_MAP_VIRT_ADDR 8
+        #   6.18, mainline  asm-offsets.s:  ->KERNEL_MAP_VIRT_ADDR 0
         # The old `fallback = 8` was therefore right for 6.12 and silently wrong
-        # for mainline -- it would read `size` instead of `virt_addr` and return a
-        # slide that is plausible and false.  With no DWARF the offset can be
+        # for 6.18 and mainline -- it would read `size` instead of `virt_addr` and
+        # return a slide that is plausible and false.  With no DWARF the offset can be
         # injected; with neither, the answer is that it is unknown.
         km = symval("kernel_map")
         link_start = sess.link_entry_va()        # robust image-base link VA (ET_DYN/PIE-safe)
