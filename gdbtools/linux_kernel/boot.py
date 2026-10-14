@@ -276,6 +276,10 @@ class BootMixin:
             print("[%s] already past MMU enable ($pc is virtual) -- calibrating for "
                   "VA mode; native kernel symbolization is live." % NAME)
             return self.calibrate()
+        armed = getattr(self, "_armed_entry_pa", None)
+        if pc is not None and armed is not None and (pc & MASK) == armed:
+            print("[%s] already at the kernel entry %s -- calibrating." % (NAME, fmt(armed)))
+            return self.calibrate()
         # x86_64 cold-frozen KASLR: the bzImage decompressor relocates the kernel to a
         # RANDOM physical base, so the nominal entry PA is wrong.  Recover the real base
         # from the decompressor (arm64/riscv return None -- fixed physical load) and pin

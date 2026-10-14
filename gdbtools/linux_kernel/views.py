@@ -259,6 +259,14 @@ class ViewMixin:
                 print("[%s] regimes: no regime '%s'  (have: %s)"
                       % (NAME, name, ", ".join(x["id"] for x in rows)))
                 return
+            pc = reg("pc")
+            if r["phys"]:
+                here = r["pa"]
+            else:
+                here = (r["link"] + self.kaslr_slide) & MASK if r["link"] is not None else None
+            if pc is not None and here is not None and pc == here:
+                print("[%s] already at '%s' (%s)" % (NAME, r["id"], r["label"]))
+                return
             self.kb("%s (%s)" % (r["id"], r["label"]), link=r["link"],
                     sides=("pa" if r["phys"] else "img"))
             print("[%s] running to '%s' (%s)..." % (NAME, r["id"], r["label"]))
