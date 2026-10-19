@@ -469,7 +469,12 @@ class BootMixin:
     def _shadow_unload(self):
         if self.shadow_addr is None:
             return
-        exec_confirmless("remove-symbol-file -a 0x%x" % (self.shadow_addr & MASK))
+        # By file name: riscv u-boot is linked where the kernel runs, so with its symbols
+        # loaded the address named u-boot's file first, and removing that one aborted
+        # gdb 18.1 over a breakpoint location still inside it.
+        vm = self.vmlinux_path()
+        exec_confirmless("remove-symbol-file %s" % vm if vm else
+                         "remove-symbol-file -a 0x%x" % (self.shadow_addr & MASK))
         LOG.add("shadow removed (was text@%s)" % fmt(self.shadow_addr))
         self.shadow_addr = None
 
