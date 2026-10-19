@@ -251,6 +251,26 @@ class BootMixin:
         return pa is not None and lo <= pa <= hi
 
     @safe(default=False)
+    def _firmware_at_entry(self, pc):
+        """True when the CPU stands at the armed entry PA while the kernel image
+        is not there yet: a loader running from the address it later copies the
+        kernel to.  U-Boot on riscv64 virt is one: QEMU places it at RAM base +
+        text_offset, and its booti moves every image to that same address."""
+        a = self.ensure_arch()
+        armed = getattr(self, "_armed_entry_pa", None)
+        if a is None or pc is None or armed is None or (pc & MASK) != armed:
+            return False
+        return a.image_at(self.resolve_entry()) is False
+
+    @safe()
+    def _rearm_entry(self):
+        armed = self._armed_entry_pa
+        cmd = "tbreak" if self.current_break_kind() == "sw" else "thbreak"
+        execstr("%s *0x%x" % (cmd, armed))
+        print("[%s] firmware is running at the kernel entry PA %s (no kernel image there "
+              "yet); entry break re-armed -- continue to reach the kernel." % (NAME, fmt(armed)))
+
+    @safe(default=False)
     def bootbreak(self, arm_only=False):
         """Run past the QEMU reset vector / firmware to the kernel entry, then
         calibrate.  At connect time $pc is in QEMU's boot stub / OpenSBI / real
@@ -371,9 +391,19 @@ class BootMixin:
             return True
         print("[%s] running to %s PA %s via %s-bp (past QEMU reset/firmware)..."
               % (NAME, anchor or "entry", fmt(break_pa), kind))
-        execstr("%s *0x%x" % (cmd, break_pa))
-        execstr("continue")
-        pc = reg("pc")
+        self._driving_entry = True
+        try:
+            execstr("%s *0x%x" % (cmd, break_pa))
+            execstr("continue")
+            pc = reg("pc")
+            while self._firmware_at_entry(pc):
+                print("[%s] firmware is running at the kernel entry PA %s (no kernel image "
+                      "there yet); continuing to the kernel." % (NAME, fmt(break_pa)))
+                execstr("%s *0x%x" % (cmd, break_pa))
+                execstr("continue")
+                pc = reg("pc")
+        finally:
+            self._driving_entry = False
         if pc is not None and not a._is_va(pc) and pc != break_pa:
             # did not land (e.g. hw bp unsupported): try the other breakpoint kind
             alt = "thbreak" if cmd == "tbreak" else "tbreak"

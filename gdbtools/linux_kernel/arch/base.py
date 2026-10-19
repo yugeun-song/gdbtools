@@ -139,6 +139,18 @@ class KernelArch:
         # Nothing in the target answered.  Say so; do not invent a plausible one.
         return None
 
+    def image_at(self, base):
+        """Whether this kernel's Image header sits at physical `base`: the arch's
+        magic word at its offset.  None when the arch has no magic or the read
+        failed, which is an unknown and not a no."""
+        if self.entry_magic is None or base is None:
+            return None
+        word, off = self.entry_magic
+        b = read_guest_bytes(base + off, 4)
+        if not b or len(b) != 4:
+            return None
+        return struct.unpack("<I", b)[0] == word
+
     # --- translation state ------------------------------------------------
     # Whether address translation is ON is an architectural fact with an
     # architectural answer, and it is the precondition for every page-table

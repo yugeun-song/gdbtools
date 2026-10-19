@@ -72,6 +72,7 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         self._in_adopt = False      # hard reentrancy guard around sibling creation
         self._in_advance = False     # inside _advance_to_crossing: suppress on_stop auto-apply
         self._armed_entry_pa = None  # where bootbreak last armed the entry break
+        self._driving_entry = False  # bootbreak itself is resuming to the entry
         self._program = None         # main symbol file the cached state was derived from
         self._objfile_hooked = False
         self._autostart_pending = False  # $GDBTOOLS_AUTO stated before a kernel was loaded
@@ -338,7 +339,13 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
             # would be wrong.  Use `kearly bootbreak` to reach the entry first.
             pc = reg("pc")
             if pc is not None and pc in (self.entry_cpu_pa(), self._armed_entry_pa):
-                self.calibrate(quiet=True)
+                if self._firmware_at_entry(pc):
+                    # A breakpoint created inside a stop event crashes gdb 18.1, so a
+                    # resume the user drives gets the entry break re-armed afterwards.
+                    if not self._driving_entry:
+                        gdb.post_event(self._rearm_entry)
+                else:
+                    self.calibrate(quiet=True)
         elif self.offset is None and m in ("virtual", "idmap"):
             # Running kernel (post-MMU): resolve_entry's physical Image-magic scan
             # + entry_symbol yields PA-VA in any regime, so calibrate here too --
