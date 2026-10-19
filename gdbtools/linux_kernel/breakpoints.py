@@ -293,6 +293,57 @@ class BreakpointMixin:
                 locs.append((m.group(1), int(m.group(3), 16), m.group(2) == "y"))
         return locs
 
+    _FN_SPEC = re.compile(r"(?:-function\s+)?(?:[^\s:]+:)?([A-Za-z_][\w.]*)")
+
+    @safe(default=(None, None))
+    def _minsym_at(self, addr):
+        """(ELF symbol, offset) covering addr, as `info symbol` names it."""
+        s = re.match(r"(\S+)(?: \+ (\d+))? in section ", execstr("info symbol 0x%x" % addr) or "")
+        return (s.group(1), int(s.group(2) or 0)) if s else (None, None)
+
+    @safe(default=frozenset())
+    def _entry_duplicates(self, num, locs):
+        """Locations of a function breakpoint that repeat another one in the same
+        function instance and regime.  When DWARF starts a function after its ELF
+        symbol (riscv's patchable ftrace entry), gdb resolves `b fn` once from each,
+        and one call stopped twice.  The location furthest into the function stays."""
+        bp = next((b for b in gdb.breakpoints() if b.number == num), None)
+        m = self._FN_SPEC.fullmatch((getattr(bp, "location", None) or "").strip())
+        if m is None or len(locs) < 2:
+            return frozenset()
+        fn = m.group(1)
+        minsym = self._minsym_at
+        groups, bare = {}, []
+        for locstr, addr, _ in locs:
+            blk = gdb.block_for_pc(addr)
+            while blk is not None and (blk.function is None or blk.function.name != fn):
+                blk = blk.superblock
+            if blk is None:
+                bare.append((locstr, addr))
+            else:
+                groups.setdefault((self._addr_regime(addr), blk.start), []).append((locstr, addr))
+        # A location outside every block of fn counts only when it is fn's ELF symbol
+        # and the nearest instance after it starts inside that same symbol.
+        for locstr, addr in bare:
+            if minsym(addr) != (fn, 0):
+                continue
+            reg = self._addr_regime(addr)
+            after = sorted(s for r, s in groups if r == reg and s > addr)
+            if after and minsym(after[0]) == (fn, after[0] - addr):
+                groups[(reg, after[0])].append((locstr, addr))
+        dup = set()
+        for members in groups.values():
+            keep = max(a for _, a in members)
+            dup.update(l for l, a in members if a != keep)
+        return frozenset(dup)
+
+    @safe()
+    def _drop_entry_duplicates(self, num):
+        locs = self._bp_locations(num) or []
+        for locstr in self._entry_duplicates(num, locs):
+            if any(l == locstr and en for l, _, en in locs):
+                execstr("disable %s" % locstr)
+
     @safe()
     def _apply_bpfix(self, num=None):
         if not self.bpfix or self.arch is None:
@@ -304,7 +355,12 @@ class BreakpointMixin:
             if len(locs) < 2 or not ({"virtual", "physical"} <= regs):
                 continue
             self._managed_bps.add(n)
+            dup = self._entry_duplicates(n, locs)
             for locstr, addr, en in locs:
+                if locstr in dup:
+                    if en:
+                        execstr("disable %s" % locstr)
+                    continue
                 if self._addr_regime(addr) != "physical":
                     if not en:
                         execstr("enable %s" % locstr)
@@ -319,6 +375,9 @@ class BreakpointMixin:
         n = getattr(bp, "number", None)
         if n is None:
             return
+        if self._FN_SPEC.fullmatch((getattr(bp, "location", None) or "").strip()):
+            self._fn_bps.add(n)
+            self._drop_entry_duplicates(n)
         self._apply_bpfix(n)
         self._adopt_plain_bp(bp, n)
         self._maybe_catch_for(bp, n)
@@ -356,8 +415,12 @@ class BreakpointMixin:
         locs = self._bp_locations(n) or []
         if not locs:
             return
+        # A split entry leaves a regime's locations at different offsets of one call:
+        # follow a location that stays, and take any location in the same function
+        # and regime as already there, or a sibling adds a second stop to the call.
+        dup = self._entry_duplicates(n, locs)
         a = self.arch
-        link = self._link_va(locs[0][1])
+        link = self._link_va(next((addr for l, addr, _ in locs if l not in dup), locs[0][1]))
         if link is None or a is None or not a._is_va(link):
             return
         pa = (link + self.offset) & MASK
@@ -379,6 +442,11 @@ class BreakpointMixin:
             for cand in (pa, img):
                 if cand in have:
                     continue
+                if dup:
+                    fn_c = self._minsym_at(cand)[0]
+                    if fn_c is not None and any(self._addr_regime(h) == self._addr_regime(cand)
+                                                and self._minsym_at(h)[0] == fn_c for h in have):
+                        continue
                 out = exec_confirmless("hbreak *0x%x" % cand)
                 mm = re.search(r"[Bb]reakpoint\s+(\d+)", out or "")
                 if mm:
@@ -433,6 +501,7 @@ class BreakpointMixin:
     def _on_bp_deleted(self, bp):
         num = getattr(bp, "number", -1)
         self._managed_bps.discard(num)
+        self._fn_bps.discard(num)
         self._kb_bp_nums.discard(num)
         self._adopted.discard(num)
         self._kw_bp_nums.discard(num)

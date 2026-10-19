@@ -579,6 +579,13 @@ tool adds those three sections to pwndbg; with `EXPLORE_PAGES=off` and
 > keeps the virtual location on and drops only the dormant physical one; it never
 > turns the virtual location off.
 
+> **Split function entries (riscv).** A patchable ftrace entry makes DWARF start a
+> function after its ELF symbol, and gdb resolves `b fn` from both, so one call
+> stopped twice. For a breakpoint on a function name, the tool keeps, per function
+> instance and regime, only the location furthest into the function and disables
+> the others, again after a symbol file reload re-resolves them; an adopted sibling
+> is not added where the function already has a location in that regime.
+
 ---
 
 ## 11. `kw` — regime-aware watchpoint

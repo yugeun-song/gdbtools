@@ -56,6 +56,8 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         self._saferender_warned = False
         self._bp_hooked = False
         self._managed_bps = set()
+        self._fn_bps = set()        # breakpoints on a function name, checked for split entries
+        self._entries_stale = False  # a symbol file came or went: gdb re-resolved every location
         self.kaslr_slide = 0
         self._kb_groups = []        # regime-aware breakpoints: {loc,link,pa,pa_bp,img_addr,img_bp,img_slide}
         self._kb_bp_nums = set()    # gdb bp numbers I created (kb + adopted siblings) -- reentrancy guard
@@ -179,6 +181,7 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
 
     @safe(boundary="hook")
     def _on_new_objfile(self, _evt):
+        self._entries_stale = True
         # $GDBTOOLS_AUTO stated before gdb loaded the program (an init-file install
         # runs before command-line files are read): arm once the kernel appears.
         if self._autostart_pending and not self.enabled and self.try_autostart():
@@ -384,6 +387,12 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         if self._kw_groups and m == "virtual" and self.offset is not None \
                 and not self._in_advance:
             self._rearm_kw()
+        # A reloaded symbol file (shadow, KASLR) gives every breakpoint new locations,
+        # and an entry split disabled at creation comes back enabled.
+        if self._entries_stale:
+            self._entries_stale = False
+            for n in list(self._fn_bps):
+                self._drop_entry_duplicates(n)
         # When the pwndbg context section is installed it renders the badge+sysregs
         # itself, so skip the standalone line to avoid duplication.
         if self.show_sysregs and not self._section_installed:
