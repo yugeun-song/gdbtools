@@ -29,6 +29,7 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         self._entry_pinned = False     # entry_pa was stated by hand (`kearly entry <pa>`)
                                        # (already the ELF entry PA, not the image base)
         self.shadow_addr = None     # PA where the shadow's text is loaded
+        self._shadow_link = None    # link VA of the shadow's anchor symbol (see _shadow_load)
         self.vmlinux = None
         self.enabled = False
         self._hooked = False
@@ -157,6 +158,7 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
             return
         self.arch = None
         self.vmlinux = None
+        self._shadow_link = None
         if self.offset is not None or self.kaslr_slide or self.entry_pa is not None:
             self.offset, self.kaslr_slide, self.entry_pa = None, 0, None
             self._entry_recovered = self._entry_pinned = False

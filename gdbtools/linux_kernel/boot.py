@@ -439,8 +439,18 @@ class BootMixin:
         a = self.ensure_arch()
         if not vm or self.offset is None or a is None:
             return
-        anchor_va = symval(a.entry_symbol) or symval("_text") or 0
-        text_pa = self.v2p(anchor_va)
+        # The anchor's link address is read while vmlinux is the only symbol file and
+        # kept: once the shadow is loaded, a lookup made at a physical PC resolves the
+        # name in the shadow (the objfile covering the PC) and returns its PA, which
+        # then misplaced the shadow and made its removal miss, so copies piled up.
+        if self._shadow_link is None and self.shadow_addr is None:
+            v = symval(a.entry_symbol) or symval("_text")
+            if v is not None and a._is_va(v):
+                self._shadow_link = (v - self.kaslr_slide) & MASK
+        if self._shadow_link is None:
+            LOG.add("shadow: no link address for %s; shadow left as it is" % a.entry_symbol)
+            return
+        text_pa = self.v2p((self._shadow_link + self.kaslr_slide) & MASK)
         if self.shadow_addr is not None:
             if self.shadow_addr == text_pa:
                 return                        # already loaded correctly
