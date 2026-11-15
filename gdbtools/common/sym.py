@@ -1,4 +1,5 @@
 """`addr2sym` -- what is at this address."""
+
 import gdb
 
 from .runtime import *
@@ -8,9 +9,9 @@ from .symbolize import resolve
 class Sym(gdb.Command):
     """addr2sym ADDR : name the symbol at ADDR.
 
-With a calibrated kernel session ADDR may be physical or virtual and the answer
-says which, translating a physical address to its kernel virtual one first.
-Otherwise the address is looked up as given."""
+    With a calibrated kernel session ADDR may be physical or virtual and the answer
+    says which, translating a physical address to its kernel virtual one first.
+    Otherwise the address is looked up as given."""
 
     def __init__(self, name="addr2sym"):
         super(Sym, self).__init__(name, gdb.COMMAND_USER)

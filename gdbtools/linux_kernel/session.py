@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import gdb
 import os
 import re
@@ -23,64 +24,64 @@ from .panels import PanelMixin
 class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin, PanelMixin):
     def __init__(self):
         self.arch = None
-        self.offset = None          # PA - VA (mod 2^64)
-        self.entry_pa = None        # resolved kernel entry physical address (cached)
+        self.offset = None  # PA - VA (mod 2^64)
+        self.entry_pa = None  # resolved kernel entry physical address (cached)
         self._entry_recovered = False  # entry_pa came from x86 decompressor recovery
-        self._entry_pinned = False     # entry_pa was stated by hand (`kearly entry <pa>`)
-                                       # (already the ELF entry PA, not the image base)
-        self.shadow_addr = None     # PA where the shadow's text is loaded
-        self._shadow_link = None    # link VA of the shadow's anchor symbol (see _shadow_load)
+        self._entry_pinned = False  # entry_pa was stated by hand (`kearly entry <pa>`)
+        # (already the ELF entry PA, not the image base)
+        self.shadow_addr = None  # PA where the shadow's text is loaded
+        self._shadow_link = None  # link VA of the shadow's anchor symbol (see _shadow_load)
         self.vmlinux = None
         self.enabled = False
         self._hooked = False
         self.last_map = None
-        self.verbose = False        # per-stop pc annotation (off by default)
-        self.show_sysregs = True    # per-stop compact MMU + key-sysreg line (on)
+        self.verbose = False  # per-stop pc annotation (off by default)
+        self.show_sysregs = True  # per-stop compact MMU + key-sysreg line (on)
         self._section_installed = False  # pwndbg 'kgdb' context section registered?
         self._kdisasm_installed = False  # pwndbg 'arrows' (cfgdis) context section?
         self._msysreg_installed = False  # pwndbg 'msysreg' context section registered?
-        self.kdis_before = 6        # context 'arrows': instrs shown before $pc
-        self.kdis_after = 12        #                    and after $pc
-        self.preset = None          # active preset name
-        self.anchor = None          # override break/calibration anchor symbol
-        self.break_kind = None      # override "sw"/"hw"
-        self.steplock = "off"       # early-boot scheduler-locking: auto|on|off
-                                    # (default OFF: never touch gdb's scheduler-locking;
-                                    #  opt in with `kearly steplock on` for SMP stepping)
-        self._early_quiet = False   # early-boot quiet/steplock currently applied?
-        self._saved_params = {}     # gdb/pwndbg params we changed, for restore
-        self.census_mode = "off"    # per-stop census in the panel: off|compact|full
+        self.kdis_before = 6  # context 'arrows': instrs shown before $pc
+        self.kdis_after = 12  #                    and after $pc
+        self.preset = None  # active preset name
+        self.anchor = None  # override break/calibration anchor symbol
+        self.break_kind = None  # override "sw"/"hw"
+        self.steplock = "off"  # early-boot scheduler-locking: auto|on|off
+        # (default OFF: never touch gdb's scheduler-locking;
+        #  opt in with `kearly steplock on` for SMP stepping)
+        self._early_quiet = False  # early-boot quiet/steplock currently applied?
+        self._saved_params = {}  # gdb/pwndbg params we changed, for restore
+        self.census_mode = "off"  # per-stop census in the panel: off|compact|full
         self.msysreg_mode = "compact"  # sysreg+bitfield panel: off|compact|full
-        self._census_dead = set()   # census regs the stub cannot expose (skip, fast)
-        self.chain_hops = 8         # safe_chain telescope depth (kearly chaindepth N)
+        self._census_dead = set()  # census regs the stub cannot expose (skip, fast)
+        self.chain_hops = 8  # safe_chain telescope depth (kearly chaindepth N)
         self._saferender_warned = False
         self._bp_hooked = False
         self._managed_bps = set()
-        self._fn_bps = set()        # breakpoints on a function name, checked for split entries
+        self._fn_bps = set()  # breakpoints on a function name, checked for split entries
         self._entries_stale = False  # a symbol file came or went: gdb re-resolved every location
         self.kaslr_slide = 0
-        self._kb_groups = []        # regime-aware breakpoints: {loc,link,pa,pa_bp,img_addr,img_bp,img_slide}
-        self._kb_bp_nums = set()    # gdb bp numbers I created (kb + adopted siblings) -- reentrancy guard
-        self._in_catcher = False    # guard: arming the catcher must not recurse into adopt/kb
+        self._kb_groups = []  # regime-aware breakpoints: {loc,link,pa,pa_bp,img_addr,img_bp,img_slide}
+        self._kb_bp_nums = set()  # gdb bp numbers I created (kb + adopted siblings) -- reentrancy guard
+        self._in_catcher = False  # guard: arming the catcher must not recurse into adopt/kb
         self._catch_wanted = False  # a catcher is needed but could not be armed safely yet
-        self._catcher_obj = None    # the internal gdb.Breakpoint backing the catcher
+        self._catcher_obj = None  # the internal gdb.Breakpoint backing the catcher
         self._cont_hooked = False
         self._prompt_hooked = False
         self._kaslr_pending = None  # persistent crossing catcher: {pa,bp,cr} -- applies the
-                                    # slide whenever execution finally reaches the crossing
-        self._kw_groups = []        # regime-aware watchpoints: same shape + {kind,size}
-        self._kw_bp_nums = set()    # gdb watchpoint numbers I created
-        self._adopted = set()       # user bp numbers already adopted into regime-aware candidates
-        self._pending_del = set()   # sibling bps orphaned by `delete`, dropped at the next safe point
-        self._in_adopt = False      # hard reentrancy guard around sibling creation
-        self._in_advance = False     # inside _advance_to_crossing: suppress on_stop auto-apply
+        # slide whenever execution finally reaches the crossing
+        self._kw_groups = []  # regime-aware watchpoints: same shape + {kind,size}
+        self._kw_bp_nums = set()  # gdb watchpoint numbers I created
+        self._adopted = set()  # user bp numbers already adopted into regime-aware candidates
+        self._pending_del = set()  # sibling bps orphaned by `delete`, dropped at the next safe point
+        self._in_adopt = False  # hard reentrancy guard around sibling creation
+        self._in_advance = False  # inside _advance_to_crossing: suppress on_stop auto-apply
         self._armed_entry_pa = None  # where bootbreak last armed the entry break
         self._driving_entry = False  # bootbreak itself is resuming to the entry
-        self._program = None         # main symbol file the cached state was derived from
+        self._program = None  # main symbol file the cached state was derived from
         self._objfile_hooked = False
         self._autostart_pending = False  # $GDBTOOLS_AUTO stated before a kernel was loaded
-        self.loaded_banner = None    # set by bootstrap; printed when AUTO arms late
-        self.platform = None         # what the QEMU monitor says this machine is
+        self.loaded_banner = None  # set by bootstrap; printed when AUTO arms late
+        self.platform = None  # what the QEMU monitor says this machine is
 
     @property
     def x86_kaslr(self):
@@ -156,7 +157,7 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         prev, self._program = self._program, main
         self.platform = None
         if prev is None:
-            self.arch = None                   # may have come from gdb's default arch
+            self.arch = None  # may have come from gdb's default arch
             return
         self.arch = None
         self.vmlinux = None
@@ -165,8 +166,7 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
             self.offset, self.kaslr_slide, self.entry_pa = None, 0, None
             self._entry_recovered = self._entry_pinned = False
             self._kaslr_pending = None
-            print("[%s] gdb now debugs %s; the calibration made for %s is cleared"
-                  % (NAME, main, prev))
+            print("[%s] gdb now debugs %s; the calibration made for %s is cleared" % (NAME, main, prev))
 
     def try_autostart(self):
         """Arm the session if a kernel image is loaded; False when there is none yet."""
@@ -188,11 +188,26 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
             if self.loaded_banner:
                 print(self.loaded_banner)
 
-    _EVENTS = (("stop", "on_stop"), ("breakpoint_created", "_on_bp_created"),
-               ("breakpoint_deleted", "_on_bp_deleted"), ("before_prompt", "_on_prompt"),
-               ("cont", "_on_cont"), ("new_objfile", "_on_new_objfile"))
-    _NOT_CARRIED = frozenset(("arch", "enabled", "_hooked", "_bp_hooked", "_prompt_hooked",
-                              "_cont_hooked", "_objfile_hooked", "_catcher_obj"))
+    _EVENTS = (
+        ("stop", "on_stop"),
+        ("breakpoint_created", "_on_bp_created"),
+        ("breakpoint_deleted", "_on_bp_deleted"),
+        ("before_prompt", "_on_prompt"),
+        ("cont", "_on_cont"),
+        ("new_objfile", "_on_new_objfile"),
+    )
+    _NOT_CARRIED = frozenset(
+        (
+            "arch",
+            "enabled",
+            "_hooked",
+            "_bp_hooked",
+            "_prompt_hooked",
+            "_cont_hooked",
+            "_objfile_hooked",
+            "_catcher_obj",
+        )
+    )
 
     def _adopt(self, prevs):
         """Take over from sessions an earlier load left connected: detach every
@@ -260,14 +275,21 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
             return False
         a = self.ensure_arch()
         if a is not None and p["arch"] != a.key:
-            print("[%s] note: preset '%s' is for %s, target is %s"
-                  % (NAME, name, p["arch"], a.key))
+            print("[%s] note: preset '%s' is for %s, target is %s" % (NAME, name, p["arch"], a.key))
         config.set_session("PRESET", name)
         self.preset = name
         self.load_overrides()
-        print("[%s] preset '%s'%s: anchor=%s break=%s -- %s" %
-              (NAME, name, "" if p["verified"] else " (designed, not lab-verified)",
-               self.current_anchor() or "<image-base>", self.current_break_kind(), p["desc"]))
+        print(
+            "[%s] preset '%s'%s: anchor=%s break=%s -- %s"
+            % (
+                NAME,
+                name,
+                "" if p["verified"] else " (designed, not lab-verified)",
+                self.current_anchor() or "<image-base>",
+                self.current_break_kind(),
+                p["desc"],
+            )
+        )
         return True
 
     def current_anchor(self):
@@ -290,9 +312,8 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
     def force_arch(self, key):
         if key in ("auto", "-", "reset"):
             self.arch = None
-            self.ensure_arch()               # re-detect NOW so status/shadow stay correct
-            print("[%s] arch detection reset to auto (-> %s)" %
-                  (NAME, self.arch.key if self.arch else "?"))
+            self.ensure_arch()  # re-detect NOW so status/shadow stay correct
+            print("[%s] arch detection reset to auto (-> %s)" % (NAME, self.arch.key if self.arch else "?"))
             return True
         for cls in ARCHES:
             if cls.key == key or key in cls.aliases:
@@ -374,18 +395,21 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         # readable, auto-apply it -- so symbols / `b` / `kb` target the running
         # kernel with no manual `kearly kaslr auto`.  One-shot (guarded on
         # kaslr_slide == 0); apply_kaslr re-arms kb groups itself.
-        if m == "virtual" and self.kaslr_slide == 0 and self.offset is not None \
-                and not self._in_advance and self._opt("KASLR_APPLY") == "auto":
+        if (
+            m == "virtual"
+            and self.kaslr_slide == 0
+            and self.offset is not None
+            and not self._in_advance
+            and self._opt("KASLR_APPLY") == "auto"
+        ):
             _s = self.detect_kaslr_slide() or self._slide_via_pc_pa()
             if _s:
                 self.apply_kaslr(_s)
         # Otherwise, once relocated, still correct any kb IMG armed before the slide.
         # (Suppressed while _advance_to_crossing drives its own controlled stops.)
-        if self._kb_groups and m == "virtual" and self.offset is not None \
-                and not self._in_advance:
+        if self._kb_groups and m == "virtual" and self.offset is not None and not self._in_advance:
             self._rearm_kb()
-        if self._kw_groups and m == "virtual" and self.offset is not None \
-                and not self._in_advance:
+        if self._kw_groups and m == "virtual" and self.offset is not None and not self._in_advance:
             self._rearm_kw()
         # A reloaded symbol file (shadow, KASLR) gives every breakpoint new locations,
         # and an entry split disabled at creation comes back enabled.
@@ -414,7 +438,7 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
             return
         st, _ = self.mmu_state()
         if st != "on":
-            return                       # MMU off: a physical pc reads fine
+            return  # MMU off: a physical pc reads fine
         # Ask the question the user's own command asks.  The target can still serve
         # these bytes -- gdb's Python read_memory returns them -- but `x` translates
         # through the live tables and refuses when the address is not mapped there,
@@ -422,13 +446,15 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         # VA==PA, so `x` works and this stays silent.
         probe = execstr("x/1xb $pc")
         if probe and "Cannot access" not in probe:
-            return                       # `x` works here -- nothing to say
+            return  # `x` works here -- nothing to say
         if probe is None:
             # execstr swallows the MemoryError and hands back None, which IS the
             # failure signal; treat it the same as the printed message.
             pass
-        print("[%s] note: $pc %s is physical and translation is on, so `x` cannot read "
-              "it.  Use `kx/16xb $pc` (physical examine) or `cfgdis` here." % (NAME, fmt(pc)))
+        print(
+            "[%s] note: $pc %s is physical and translation is on, so `x` cannot read "
+            "it.  Use `kx/16xb $pc` (physical examine) or `cfgdis` here." % (NAME, fmt(pc))
+        )
 
     @safe()
     def _sysreg_line(self):
@@ -470,14 +496,27 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         pc = reg("pc")
         st, src = self.mmu_state()
         if prev == "physical" and now == "virtual":
-            print("[%s] >>> MMU ON: $pc now VIRTUAL %s -- native kernel symbolization "
-                  "active%s. kp2v/kv2p still valid."
-                  % (NAME, fmt(pc), "; shadow kept for residual physical pointers (page "
-                     "tables/DMA)" if self.shadow_addr is not None else ""))
+            print(
+                "[%s] >>> MMU ON: $pc now VIRTUAL %s -- native kernel symbolization "
+                "active%s. kp2v/kv2p still valid."
+                % (
+                    NAME,
+                    fmt(pc),
+                    "; shadow kept for residual physical pointers (page tables/DMA)"
+                    if self.shadow_addr is not None
+                    else "",
+                )
+            )
         elif prev == "virtual" and now == "physical":
-            print("[%s] <<< back to PHYSICAL %s (MMU %s) -- %s."
-                  % (NAME, fmt(pc), st, "shadow symbolization in use" if self.shadow_addr
-                     is not None else "no shadow symbols loaded"))
+            print(
+                "[%s] <<< back to PHYSICAL %s (MMU %s) -- %s."
+                % (
+                    NAME,
+                    fmt(pc),
+                    st,
+                    "shadow symbolization in use" if self.shadow_addr is not None else "no shadow symbols loaded",
+                )
+            )
         else:
             self._annotate(now, prefix="transition")
 
@@ -491,11 +530,11 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         head = "[%s%s]" % (NAME, "/" + prefix if prefix else "")
         if m == "physical":
             st, _src = self.mmu_state()
-            tag = ("MMU off" if st == "off"
-                   else "idmap/low-map" if st == "on" else "MMU state unknown")
-            print("%s pc=%s PHYS -> va=%s %s (%s)" %
-                  (head, fmt(pc), fmt(self.p2v(pc)) if self.offset else "?",
-                   sym or "<no sym>", tag))
+            tag = "MMU off" if st == "off" else "idmap/low-map" if st == "on" else "MMU state unknown"
+            print(
+                "%s pc=%s PHYS -> va=%s %s (%s)"
+                % (head, fmt(pc), fmt(self.p2v(pc)) if self.offset else "?", sym or "<no sym>", tag)
+            )
         else:
             print("%s pc=%s VA  %s (kernel map, MMU on)" % (head, fmt(pc), sym or "<no sym>"))
 
@@ -565,22 +604,29 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
             out = execstr("monitor qom-get /machine type") or ""
             m = re.search(r'"([A-Za-z0-9_.+-]+?)-machine"', out)
             machine = m.group(1) if m else None
-            self.platform = {"machine": machine, "conn": conn, "qemu": machine is not None,
-                             "family": re.sub(r"-\d+(\.\d+)*$", "", machine) if machine else None}
+            self.platform = {
+                "machine": machine,
+                "conn": conn,
+                "qemu": machine is not None,
+                "family": re.sub(r"-\d+(\.\d+)*$", "", machine) if machine else None,
+            }
             LOG.add("platform: %r" % (self.platform,))
             ok = preset is not None and self.platform["family"] in preset["family"]
             if not ok and not (self._opt("PROFILE") or self._opt("DTB")):
                 if self.platform["qemu"]:
-                    print("[%s] QEMU machine '%s' is not the default (%s), so its preset is not "
-                          "applied; only what the guest reports describes it.  State "
-                          "GDBTOOLS_PROFILE or GDBTOOLS_DTB for this board."
-                          % (NAME, machine,
-                             "/".join(preset["family"]) if preset else "none for " + a.key))
+                    print(
+                        "[%s] QEMU machine '%s' is not the default (%s), so its preset is not "
+                        "applied; only what the guest reports describes it.  State "
+                        "GDBTOOLS_PROFILE or GDBTOOLS_DTB for this board."
+                        % (NAME, machine, "/".join(preset["family"]) if preset else "none for " + a.key)
+                    )
                 else:
-                    print("[%s] the target does not answer `monitor qom-get /machine type`, so "
-                          "the default QEMU machine is not assumed%s.  State GDBTOOLS_PROFILE "
-                          "or GDBTOOLS_DTB to describe the board."
-                          % (NAME, "" if SAFEPROBE.mode == "off" else " and safemem cannot judge reads"))
+                    print(
+                        "[%s] the target does not answer `monitor qom-get /machine type`, so "
+                        "the default QEMU machine is not assumed%s.  State GDBTOOLS_PROFILE "
+                        "or GDBTOOLS_DTB to describe the board."
+                        % (NAME, "" if SAFEPROBE.mode == "off" else " and safemem cannot judge reads")
+                    )
         self.platform["ok"] = preset is not None and self.platform["family"] in preset["family"]
         TARGET.qemu_preset = preset if self.platform["ok"] else None
         return self.platform
@@ -614,9 +660,10 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
         if name in (None, "PANELS"):
             want = self.panels()
             for key, add, drop in (
-                    ("kgdb", self._install_pwndbg_section, self._remove_pwndbg_section),
-                    ("flow", self._install_kdisasm_section, self._remove_kdisasm_section),
-                    ("msysreg", self._install_msysreg_section, self._remove_msysreg_section)):
+                ("kgdb", self._install_pwndbg_section, self._remove_pwndbg_section),
+                ("flow", self._install_kdisasm_section, self._remove_kdisasm_section),
+                ("msysreg", self._install_msysreg_section, self._remove_msysreg_section),
+            ):
                 (add if key in want else drop)()
         if name in (None, "EXPLORE_PAGES"):
             if self._opt("EXPLORE_PAGES") == "off":
@@ -664,8 +711,10 @@ class Session(AddressingMixin, BootMixin, KaslrMixin, BreakpointMixin, ViewMixin
                 pass
             self._hooked = False
         if self._bp_hooked:
-            for _ev, _cb in ((gdb.events.breakpoint_created, self._on_bp_created),
-                             (gdb.events.breakpoint_deleted, self._on_bp_deleted)):
+            for _ev, _cb in (
+                (gdb.events.breakpoint_created, self._on_bp_created),
+                (gdb.events.breakpoint_deleted, self._on_bp_deleted),
+            ):
                 try:
                     _ev.disconnect(_cb)
                 except Exception:
@@ -705,10 +754,10 @@ def _previous_sessions():
     if prev is not None:
         return [prev]
     if getattr(gdb, "_gdbtools_command_names", None) is None:
-        return []                              # the first load in this gdb
-    import gc                                  # a load that predates the attribute
-    return [o for o in gc.get_objects()
-            if type(o).__name__ == "Session" and type(o).__module__ == __name__]
+        return []  # the first load in this gdb
+    import gc  # a load that predates the attribute
+
+    return [o for o in gc.get_objects() if type(o).__name__ == "Session" and type(o).__module__ == __name__]
 
 
 # Re-sourcing builds this module afresh; the previous Session's handlers are

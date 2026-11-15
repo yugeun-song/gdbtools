@@ -1,4 +1,5 @@
 """`stackscan` -- read the stack word by word and name what looks like a pointer."""
+
 import gdb
 
 from .runtime import *
@@ -8,11 +9,11 @@ from .symbolize import resolve
 
 class StackScan(gdb.Command):
     """stackscan [N] : read N machine words from $sp and name every value that
-resolves to a symbol.
+    resolves to a symbol.
 
-This is a scan of stack memory, not a frame unwind -- it is what is left when
-`backtrace` cannot work, which in a kernel means early assembly before a frame
-pointer exists, and in userspace means a corrupted or missing frame chain."""
+    This is a scan of stack memory, not a frame unwind -- it is what is left when
+    `backtrace` cannot work, which in a kernel means early assembly before a frame
+    pointer exists, and in userspace means a corrupted or missing frame chain."""
 
     def __init__(self, name="stackscan"):
         super(StackScan, self).__init__(name, gdb.COMMAND_USER)

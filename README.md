@@ -273,6 +273,11 @@ bin/gdbtools                  the CLI; completions/ holds its bash and zsh compl
 - QEMU, or any other gdbstub, for the kernel half. Booting one is not this
   project's job.
 
+To work on gdbtools: `shfmt` lays out the shell and `ruff` the Python, by
+`.editorconfig` and `ruff.toml`. `shfmt -w .` and `ruff format .` format the
+checkout, and kbuildlab's `tests/style.py DIR` fails while either would change a
+file.
+
 **Depended on by**
 
 - [nvim-config](https://github.com/yugeun-song/nvim-config) — its control-flow

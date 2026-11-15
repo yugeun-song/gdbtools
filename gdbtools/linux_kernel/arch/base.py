@@ -4,6 +4,7 @@ calibration, KASLR, system registers and page-table walking.
 Mixed into the concrete arch classes alongside the generic half from
 `gdbtools.common.arch`.
 """
+
 import os
 import json
 import struct
@@ -18,15 +19,15 @@ from ..target import TARGET
 
 
 class KernelArch:
-    entry_symbol = None          # symbol whose PA == $pc at the first frozen stop
-    image_base_symbol = None     # what an image-base PA (ENTRY_PA, info roms) locates;
-                                 # None: the entry symbol itself
-    entry_break_kind = "hw"      # "sw": entry not overwritten -> sw bp ok; "hw":
-                                 # entry gets relocated over, so a sw bp is clobbered
-    entry_magic = None           # (word, offset_from_text): scan RAM for the Image
-    dtb_pointer_reg = None       # reg holding the DTB PA at entry (arm64 x0/riscv a1)
-    return_reg = None            # reg holding a just-called fn's return addr (lr/ra)
-    post_mmu_symbols = ()        # virtual landing(s) reached just after the MMU is on
+    entry_symbol = None  # symbol whose PA == $pc at the first frozen stop
+    image_base_symbol = None  # what an image-base PA (ENTRY_PA, info roms) locates;
+    # None: the entry symbol itself
+    entry_break_kind = "hw"  # "sw": entry not overwritten -> sw bp ok; "hw":
+    # entry gets relocated over, so a sw bp is clobbered
+    entry_magic = None  # (word, offset_from_text): scan RAM for the Image
+    dtb_pointer_reg = None  # reg holding the DTB PA at entry (arm64 x0/riscv a1)
+    return_reg = None  # reg holding a just-called fn's return addr (lr/ra)
+    post_mmu_symbols = ()  # virtual landing(s) reached just after the MMU is on
 
     def stack_setup_hint(self):
         """Where this architecture's head code first establishes a stack, or None.
@@ -35,7 +36,6 @@ class KernelArch:
         answer there is not "nothing found" but "nothing exists yet, and here is
         where it starts existing"."""
         return None
-
 
     # --- address space ---
     def _is_va(self, addr):
@@ -104,8 +104,11 @@ class KernelArch:
         if not out:
             return None
         for line in out.splitlines():
-            m = re.search(r"addr=([0-9a-fA-F]+)\s+size=(0x[0-9a-fA-F]+)\s+"
-                          r"mem=ram\s+name=\"([^\"]*)\"", line)
+            m = re.search(
+                r"addr=([0-9a-fA-F]+)\s+size=(0x[0-9a-fA-F]+)\s+"
+                r"mem=ram\s+name=\"([^\"]*)\"",
+                line,
+            )
             if not m:
                 continue
             addr, name = int(m.group(1), 16) & MASK, m.group(3)
@@ -197,8 +200,7 @@ class KernelArch:
         """Per-architecture.  (state, source, regime, evidence) with state in
         {"on", "off", "unknown"}.  `evidence` names the register and the bit, so
         a caller can print WHY rather than asserting."""
-        return ("unknown", "none", None,
-                "no translation probe for %s" % getattr(self, "key", "?"))
+        return ("unknown", "none", None, "no translation probe for %s" % getattr(self, "key", "?"))
 
     @safe(default=None)
     def translation_state(self):
@@ -215,10 +217,12 @@ class KernelArch:
                 if v is not None:
                     bit = int(h.get("bit", 0))
                     on = bool((v >> bit) & 1)
-                    return {"state": "on" if on else "off",
-                            "source": "profile:mmu via %s" % src, "regime": regime,
-                            "evidence": "%s=0x%x -> bit %d = %d"
-                                        % (h["reg"], v, bit, int(on))}
+                    return {
+                        "state": "on" if on else "off",
+                        "source": "profile:mmu via %s" % src,
+                        "regime": regime,
+                        "evidence": "%s=0x%x -> bit %d = %d" % (h["reg"], v, bit, int(on)),
+                    }
 
         if state == "unknown":
             # The one inference the architecture licenses.  A pc in the kernel's
@@ -227,12 +231,14 @@ class KernelArch:
             # with translation on, so a physical pc never concludes "off".
             pc = reg("pc")
             if pc is not None and self._is_va(pc):
-                return {"state": "on", "source": "pc=VA", "regime": regime,
-                        "evidence": "pc 0x%x is in the kernel's high half, which "
-                                    "no physical address reaches" % pc}
+                return {
+                    "state": "on",
+                    "source": "pc=VA",
+                    "regime": regime,
+                    "evidence": "pc 0x%x is in the kernel's high half, which no physical address reaches" % pc,
+                }
 
-        return {"state": state, "source": source, "regime": regime,
-                "evidence": evidence}
+        return {"state": state, "source": source, "regime": regime, "evidence": evidence}
 
     def mmu_translation_on(self):
         """bool | None view of translation_state(), for callers that only need
@@ -308,8 +314,9 @@ class KernelArch:
         return None
 
     # --- key system/control registers to surface in early boot ---
-    ctx_sysregs = ()             # full set dumped by `ksregs`
-    ctx_inline_sysregs = ()      # compact set shown in the per-stop context badge
+    ctx_sysregs = ()  # full set dumped by `ksregs`
+    ctx_inline_sysregs = ()  # compact set shown in the per-stop context badge
+
     def context_summary(self, sess):
         """One compact line: MMU state + the registers that actually change or
         gate behaviour in head.S.  Default empty; each arch fills it in."""
@@ -475,7 +482,7 @@ class KernelArch:
             return full
         vb, ts = c.get("va_bits"), c.get("top_shift")
         if vb is None or ts is None or vb <= ts:
-            return full                     # not known: read a page, as before
+            return full  # not known: read a page, as before
         return min(1 << (vb - ts), full)
 
     def pt_config_probe_for(self, va):
@@ -528,8 +535,7 @@ class KernelArch:
             idx, shift = self.pt_index(va, i)
             ent_pa = (tbl + idx * self.pt_entry_size) & MASK
             desc = read_phys_u64(ent_pa)
-            rec = {"name": names[i], "index": idx, "entry_pa": ent_pa,
-                   "desc": desc, "shift": shift}
+            rec = {"name": names[i], "index": idx, "entry_pa": ent_pa, "desc": desc, "shift": shift}
             if desc is None:
                 rec["kind"] = "unreadable"
                 levels.append(rec)
@@ -543,8 +549,14 @@ class KernelArch:
             if kind in ("block", "page") and leaf_base is not None:
                 leaf_pa = (leaf_base | (va & ((1 << shift) - 1))) & MASK
             break
-        return {"regime": regime, "va": va & MASK, "base": base,
-                "levels": levels, "leaf_pa": leaf_pa, "config": self.pt_config_desc()}
+        return {
+            "regime": regime,
+            "va": va & MASK,
+            "base": base,
+            "levels": levels,
+            "leaf_pa": leaf_pa,
+            "config": self.pt_config_desc(),
+        }
 
     # --- memory-map (ptdump) enumeration, for mmview/memlayout ------------
     # Landmark symbols to always resolve (VA + PA) so the layout is meaningful
@@ -614,10 +626,10 @@ class KernelArch:
                 if kind == "table" and next_pa is not None and level + 1 < nlevels:
                     rec(next_pa, level + 1, acc2)
                 elif kind in ("block", "page") and leaf_base is not None:
-                    leaves.append((self.pt_make_va(acc2, prefix), leaf_base,
-                                   1 << shift, attrs, kind))
+                    leaves.append((self.pt_make_va(acc2, prefix), leaf_base, 1 << shift, attrs, kind))
                     if len(leaves) >= cap_leaves:
                         return
+
         rec(base, 0, 0)
         leaves.sort(key=lambda r: r[0])
         return leaves

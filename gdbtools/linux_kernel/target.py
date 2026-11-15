@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import gdb
 import re
 import struct
@@ -30,12 +31,12 @@ QEMU_PRESETS = {
 
 class Target:
     def __init__(self):
-        self._prof = None          # validated profile fields (config.parse_profile)
-        self._dtb = None           # parsed DTB dict {'memory':[(base,size)],...}
+        self._prof = None  # validated profile fields (config.parse_profile)
+        self._dtb = None  # parsed DTB dict {'memory':[(base,size)],...}
         self._loaded = False
-        self._errors = {}          # "PROFILE"/"DTB" -> ConfigError from the environment
-        self._dtb_probe = None     # (pc, pointer) of the last guest-DTB miss
-        self.qemu_preset = None    # QEMU_PRESETS entry, once QEMU confirmed the machine
+        self._errors = {}  # "PROFILE"/"DTB" -> ConfigError from the environment
+        self._dtb_probe = None  # (pc, pointer) of the last guest-DTB miss
+        self.qemu_preset = None  # QEMU_PRESETS entry, once QEMU confirmed the machine
 
     def load_stated(self):
         """Read the machine description that was handed in, once; never raises."""
@@ -72,7 +73,8 @@ class Target:
         if path:
             try:
                 (self.set_profile if name == "PROFILE" else self.set_dtb)(
-                    path, label="%s%s=%s" % (config.PREFIX, name, path))
+                    path, label="%s%s=%s" % (config.PREFIX, name, path)
+                )
             except ConfigError as e:
                 self._errors[name] = e
                 raise
@@ -107,8 +109,10 @@ class Target:
         self._errors.pop("DTB", None)
         LOG.add("dtb loaded: %s (%d mem regions)" % (path, len(d.get("memory", []))))
         if not quiet:
-            print("[%s] dtb loaded: %s -> memory=%s" %
-                  (NAME, path, ", ".join("%s+%s" % (fmt(b), fmt(s)) for b, s in d.get("memory", [])) or "(none)"))
+            print(
+                "[%s] dtb loaded: %s -> memory=%s"
+                % (NAME, path, ", ".join("%s+%s" % (fmt(b), fmt(s)) for b, s in d.get("memory", [])) or "(none)")
+            )
         return True
 
     @safe()
@@ -153,8 +157,7 @@ class Target:
             out.extend(self._dtb.get("memory", []))
         # Only while translation is off: the preset names PHYSICAL RAM, and with the
         # MMU on a read of that number would go through the live page tables.
-        if not out and self.qemu_preset is not None and arch is not None \
-                and arch.mmu_translation_on() is False:
+        if not out and self.qemu_preset is not None and arch is not None and arch.mmu_translation_on() is False:
             out.append((self.qemu_preset["ram_base"], 0))
         return out
 
@@ -199,8 +202,7 @@ class Target:
         if self._prof:
             bits.append("profile(%d keys)" % len(self._prof))
         if self._dtb:
-            bits.append("dtb(mem=%s)" %
-                        ",".join(fmt(b) for b, _ in self._dtb.get("memory", [])))
+            bits.append("dtb(mem=%s)" % ",".join(fmt(b) for b, _ in self._dtb.get("memory", [])))
         if not bits and self.qemu_preset is not None:
             bits.append("qemu preset(ram=%s while the MMU is off)" % fmt(self.qemu_preset["ram_base"]))
         return " ".join(bits) if bits else "(arch defaults)"
@@ -211,4 +213,4 @@ TARGET = Target()
 
 # Underscore-prefixed helpers are part of this module's public surface for the
 # rest of the package (`from .target import *`), which would otherwise skip them.
-__all__ = ['Target', 'TARGET', 'QEMU_PRESETS']
+__all__ = ["Target", "TARGET", "QEMU_PRESETS"]

@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import gdb
 import os
 import re
@@ -24,9 +25,10 @@ def _memory_regs(props, addr_cells, size_cells):
     stride = ab + sb
     if not stride:
         return []
-    return [(int.from_bytes(val[i:i + ab], "big") & MASK,
-             int.from_bytes(val[i + ab:i + stride], "big") & MASK)
-            for i in range(0, len(val) - stride + 1, stride)]
+    return [
+        (int.from_bytes(val[i : i + ab], "big") & MASK, int.from_bytes(val[i + ab : i + stride], "big") & MASK)
+        for i in range(0, len(val) - stride + 1, stride)
+    ]
 
 
 @safe(default=None)
@@ -37,7 +39,7 @@ def parse_dtb(data):
     if magic != 0xD00DFEED:
         return None
     size_strings, size_struct = struct.unpack_from(">II", data, 32)
-    strings = data[off_strings: off_strings + size_strings] if size_strings else data[off_strings:]
+    strings = data[off_strings : off_strings + size_strings] if size_strings else data[off_strings:]
     end_struct = off_struct + size_struct if size_struct else len(data)
     p = off_struct
     depth = 0
@@ -53,13 +55,13 @@ def parse_dtb(data):
         guard += 1
         (tok,) = struct.unpack_from(">I", data, p)
         p += 4
-        if tok == 1:                       # FDT_BEGIN_NODE
+        if tok == 1:  # FDT_BEGIN_NODE
             end = data.index(b"\0", p)
             name = data[p:end].decode("latin1", "replace")
             p = (end + 1 + 3) & ~3
             nodes.append((name, {}))
             depth += 1
-        elif tok == 2:                     # FDT_END_NODE
+        elif tok == 2:  # FDT_END_NODE
             if nodes:
                 name, props = nodes.pop()
                 if depth == 2:
@@ -67,10 +69,10 @@ def parse_dtb(data):
                     if name == "chosen" and "bootargs" in props:
                         bootargs = props["bootargs"].split(b"\0", 1)[0].decode("latin1", "replace")
             depth -= 1
-        elif tok == 3:                     # FDT_PROP
+        elif tok == 3:  # FDT_PROP
             plen, nameoff = struct.unpack_from(">II", data, p)
             p += 8
-            val = data[p:p + plen]
+            val = data[p : p + plen]
             p = (p + plen + 3) & ~3
             try:
                 pend = strings.index(b"\0", nameoff)
@@ -83,9 +85,9 @@ def parse_dtb(data):
                 size_cells = struct.unpack(">I", val[:4])[0]
             if nodes and pname in ("reg", "device_type", "bootargs"):
                 nodes[-1][1][pname] = val
-        elif tok == 4:                     # FDT_NOP
+        elif tok == 4:  # FDT_NOP
             continue
-        elif tok == 9:                     # FDT_END
+        elif tok == 9:  # FDT_END
             break
         else:
             break
@@ -112,4 +114,4 @@ def read_guest_dtb(pa):
 
 # Underscore-prefixed helpers are part of this module's public surface for the
 # rest of the package (`from .dtb import *`), which would otherwise skip them.
-__all__ = ['parse_dtb', 'read_guest_dtb']
+__all__ = ["parse_dtb", "read_guest_dtb"]

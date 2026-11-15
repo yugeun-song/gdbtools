@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import json
 import struct
 import gdb
@@ -29,7 +30,7 @@ class _Ring:
     def add(self, msg):
         self.buf.append(msg)
         if len(self.buf) > self.cap:
-            self.buf = self.buf[-self.cap:]
+            self.buf = self.buf[-self.cap :]
 
     def dump(self, n=40):
         return "\n".join(self.buf[-n:]) if self.buf else "(empty)"
@@ -41,7 +42,7 @@ LOG = _Ring()
 try:
     _DEBUG = bool(config.get("DEBUG"))
 except config.ConfigError:
-    _DEBUG = False                      # reported by bootstrap's validate pass
+    _DEBUG = False  # reported by bootstrap's validate pass
 _BUG_TYPES = (NameError, AttributeError, TypeError)
 _REPORTED = set()
 _CONFIG_REPORTED = set()
@@ -81,6 +82,7 @@ def safe(default=None, boundary=None):
     ConfigError (an invalid injected value) is never swallowed on the way up: it
     passes through to the boundary, where boundary="command" turns it into the
     command's gdb error and boundary="hook" reports it once and returns `default`."""
+
     def deco(fn):
         def wrap(*a, **k):
             try:
@@ -95,14 +97,15 @@ def safe(default=None, boundary=None):
             except gdb.GdbError:
                 if boundary == "hook":
                     return default
-                raise                              # a command's own usage error
-            except Exception as e:                      # deliberately catch-all
-                LOG.add("[%s] %s: %s" % (getattr(fn, "__name__", "?"),
-                                         type(e).__name__, e))
+                raise  # a command's own usage error
+            except Exception as e:  # deliberately catch-all
+                LOG.add("[%s] %s: %s" % (getattr(fn, "__name__", "?"), type(e).__name__, e))
                 _report(getattr(fn, "__name__", "?"), e)
                 return default
+
         wrap.__name__ = getattr(fn, "__name__", "wrapped")
         return wrap
+
     return deco
 
 
@@ -210,5 +213,24 @@ def monitor_reg(name):
 
 # Underscore-prefixed helpers are part of this module's public surface for the
 # rest of the package (`from .runtime import *`), which would otherwise skip them.
-__all__ = ['MASK', 'NAME', '_Ring', 'LOG', 'safe', 'ev', 'evi', 'execstr', 'exec_confirmless', 'reg', 'word', 'symval', 'fmt', '_h', 'read_guest_bytes', 'monitor_reg', 'config', 'ConfigError',
-           'report_config_error']
+__all__ = [
+    "MASK",
+    "NAME",
+    "_Ring",
+    "LOG",
+    "safe",
+    "ev",
+    "evi",
+    "execstr",
+    "exec_confirmless",
+    "reg",
+    "word",
+    "symval",
+    "fmt",
+    "_h",
+    "read_guest_bytes",
+    "monitor_reg",
+    "config",
+    "ConfigError",
+    "report_config_error",
+]

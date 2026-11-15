@@ -1,4 +1,5 @@
 """arm64: the target-independent half."""
+
 import re
 
 from .base import ArchCommon

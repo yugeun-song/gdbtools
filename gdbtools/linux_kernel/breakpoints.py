@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import gdb
 import re
 from ..common.runtime import *
@@ -64,8 +65,9 @@ class BreakpointMixin:
         if link is None:
             resolved = self._loc_resolve(loc)
             if resolved is None:
-                print("[%s] kb: cannot resolve '%s'  (kb SYMBOL | kb *ADDR | kb FILE:LINE)"
-                      % (NAME, (loc or "").strip()))
+                print(
+                    "[%s] kb: cannot resolve '%s'  (kb SYMBOL | kb *ADDR | kb FILE:LINE)" % (NAME, (loc or "").strip())
+                )
                 return
             link = self._link_va(resolved)
         if link is None or self.offset is None:
@@ -87,18 +89,27 @@ class BreakpointMixin:
         pa_bp = _arm(pa) if sides in ("both", "pa") else None
         img_bp = _arm(img) if (sides in ("both", "img") and img != pa) else None
         self._kb_bp_nums.update(int(x) for x in (pa_bp, img_bp) if x)
-        self._kb_groups.append({"loc": (loc or "").strip(), "link": link,
-                                "pa": pa, "pa_bp": pa_bp,
-                                "img_addr": img, "img_bp": img_bp,
-                                "img_slide": self.kaslr_slide, "sides": sides})
+        self._kb_groups.append(
+            {
+                "loc": (loc or "").strip(),
+                "link": link,
+                "pa": pa,
+                "pa_bp": pa_bp,
+                "img_addr": img,
+                "img_bp": img_bp,
+                "img_slide": self.kaslr_slide,
+                "sides": sides,
+            }
+        )
         if self.kaslr_slide == 0 and a._is_va(link):
             self._ensure_crossing_catcher("kb '%s'" % (loc or "").strip())
         print("[%s] kb '%s'  linkVA=%s" % (NAME, (loc or "").strip(), fmt(link)))
-        print("        HW bp @ %s  PA  MMU-off/idmap  (head.S, pi/, secondary, cpu_resume)%s"
-              % (fmt(pa), ("  [bp %s]" % pa_bp) if pa_bp else ""))
+        print(
+            "        HW bp @ %s  PA  MMU-off/idmap  (head.S, pi/, secondary, cpu_resume)%s"
+            % (fmt(pa), ("  [bp %s]" % pa_bp) if pa_bp else "")
+        )
         if img_bp:
-            print("        HW bp @ %s  IMG high kernel map (start_kernel & steady state)  [bp %s]"
-                  % (fmt(img), img_bp))
+            print("        HW bp @ %s  IMG high kernel map (start_kernel & steady state)  [bp %s]" % (fmt(img), img_bp))
         if self.kaslr_slide == 0:
             print("        (IMG auto-re-arms to linkVA+slide the moment the KASLR slide is known)")
 
@@ -141,8 +152,7 @@ class BreakpointMixin:
             g["img_slide"] = slide
             LOG.add("kb re-arm: '%s' IMG -> %s (slide %s)" % (g["loc"], fmt(new_img), fmt(slide)))
 
-    _KW_CTYPE = {1: "unsigned char", 2: "unsigned short",
-                 4: "unsigned int", 8: "unsigned long long"}
+    _KW_CTYPE = {1: "unsigned char", 2: "unsigned short", 4: "unsigned int", 8: "unsigned long long"}
 
     @safe()
     def kw(self, spec):
@@ -159,8 +169,7 @@ class BreakpointMixin:
         kind = "watch"
         while toks and toks[0] in ("-r", "-a", "-w", "r", "a", "w", "read", "access", "write"):
             t = toks.pop(0).lstrip("-")
-            kind = {"r": "rwatch", "read": "rwatch",
-                    "a": "awatch", "access": "awatch"}.get(t, "watch")
+            kind = {"r": "rwatch", "read": "rwatch", "a": "awatch", "access": "awatch"}.get(t, "watch")
         loc = " ".join(toks).strip()
         a = self.ensure_arch()
         if a is None:
@@ -188,7 +197,7 @@ class BreakpointMixin:
         if size is None:
             size = evi("sizeof(%s)" % loc) if not loc.startswith("*") else None
             if size not in (1, 2, 4, 8):
-                size = 8            # unknown/aggregate: watch the first machine word
+                size = 8  # unknown/aggregate: watch the first machine word
         ctype = self._KW_CTYPE[size]
         pa = (link + self.offset) & MASK
         img = (link + self.kaslr_slide) & MASK
@@ -203,21 +212,35 @@ class BreakpointMixin:
         pa_bp = _arm(pa)
         img_bp = _arm(img) if img != pa else None
         self._kw_bp_nums.update(int(x) for x in (pa_bp, img_bp) if x)
-        self._kw_groups.append({"loc": loc, "link": link, "kind": kind, "size": size,
-                                "pa": pa, "pa_bp": pa_bp,
-                                "img_addr": img, "img_bp": img_bp,
-                                "img_slide": self.kaslr_slide})
+        self._kw_groups.append(
+            {
+                "loc": loc,
+                "link": link,
+                "kind": kind,
+                "size": size,
+                "pa": pa,
+                "pa_bp": pa_bp,
+                "img_addr": img,
+                "img_bp": img_bp,
+                "img_slide": self.kaslr_slide,
+            }
+        )
         if self.kaslr_slide == 0 and a._is_va(link):
             self._ensure_crossing_catcher("kw '%s'" % loc)
         print("[%s] kw '%s'  linkVA=%s  %s  %d-byte" % (NAME, loc, fmt(link), kind, size))
-        print("        %s @ %s  PA  MMU-off/idmap  (head.S data writes, page tables)%s"
-              % (kind, fmt(pa), ("  [wp %s]" % pa_bp) if pa_bp else ""))
+        print(
+            "        %s @ %s  PA  MMU-off/idmap  (head.S data writes, page tables)%s"
+            % (kind, fmt(pa), ("  [wp %s]" % pa_bp) if pa_bp else "")
+        )
         if img_bp:
-            print("        %s @ %s  IMG high kernel map (start_kernel & steady state)  [wp %s]"
-                  % (kind, fmt(img), img_bp))
+            print(
+                "        %s @ %s  IMG high kernel map (start_kernel & steady state)  [wp %s]" % (kind, fmt(img), img_bp)
+            )
         if not pa_bp and not img_bp:
-            print("        (nothing armed -- the target may be out of hardware watchpoint slots;"
-                  " `delete` some and retry, or watch fewer bytes)")
+            print(
+                "        (nothing armed -- the target may be out of hardware watchpoint slots;"
+                " `delete` some and retry, or watch fewer bytes)"
+            )
         elif self.kaslr_slide == 0:
             print("        (IMG auto-re-arms to linkVA+slide the moment the KASLR slide is known)")
 
@@ -240,8 +263,7 @@ class BreakpointMixin:
             if g.get("img_bp"):
                 self._kw_bp_nums.discard(int(g["img_bp"]))
                 exec_confirmless("delete %s" % g["img_bp"])
-            out = exec_confirmless("%s *(%s *)0x%x"
-                                   % (g["kind"], self._KW_CTYPE[g["size"]], new_img))
+            out = exec_confirmless("%s *(%s *)0x%x" % (g["kind"], self._KW_CTYPE[g["size"]], new_img))
             mm = re.search(r"atchpoint\s+(\d+)", out or "")
             g["img_bp"] = mm.group(1) if mm else None
             if g["img_bp"]:
@@ -263,9 +285,10 @@ class BreakpointMixin:
         # canonical form is the common one and is what this answers -- but say so
         # in the log rather than letting a 52-bit-VA arm64 or a 5-level x86
         # address be classified by a rule that does not apply to it.
-        LOG.add("_addr_regime(%s): no arch; classified by the 48-bit canonical "
-                "rule, which is an assumption" % fmt(addr))
-        return "virtual" if (addr >> 48) == 0xffff else "physical"
+        LOG.add(
+            "_addr_regime(%s): no arch; classified by the 48-bit canonical rule, which is an assumption" % fmt(addr)
+        )
+        return "virtual" if (addr >> 48) == 0xFFFF else "physical"
 
     @safe(default=None)
     def _bp_locations(self, num):
@@ -287,8 +310,7 @@ class BreakpointMixin:
             if m:
                 locs.append((m.group(1), int(m.group(3), 16), m.group(2) == "y"))
                 continue
-            m = re.match(r"\s*(%d)\s+(?:\S+\s+)+?(?:keep|del|dis)\s+(y|n)\s+(0x[0-9a-fA-F]+)"
-                         % num, line)
+            m = re.match(r"\s*(%d)\s+(?:\S+\s+)+?(?:keep|del|dis)\s+(y|n)\s+(0x[0-9a-fA-F]+)" % num, line)
             if m:
                 locs.append((m.group(1), int(m.group(3), 16), m.group(2) == "y"))
         return locs
@@ -348,8 +370,8 @@ class BreakpointMixin:
     def _apply_bpfix(self, num=None):
         if not self.bpfix or self.arch is None:
             return
-        mmu_on = (self.which_map() == "virtual")
-        for n in ([num] if num is not None else list(self._managed_bps)):
+        mmu_on = self.which_map() == "virtual"
+        for n in [num] if num is not None else list(self._managed_bps):
             locs = self._bp_locations(n) or []
             regs = set(self._addr_regime(a) for _, a, _ in locs)
             if len(locs) < 2 or not ({"virtual", "physical"} <= regs):
@@ -391,8 +413,7 @@ class BreakpointMixin:
         """True when `link` is a LINK-time address inside the kernel image, i.e.
         between _text/_stext and _end.  Slide-independent: both ends go through
         _link_va, so it reads the same before and after relocation."""
-        lo = next((self._link_va(symval(s)) for s in ("_text", "_stext", "startup_64")
-                   if symval(s) is not None), None)
+        lo = next((self._link_va(symval(s)) for s in ("_text", "_stext", "startup_64") if symval(s) is not None), None)
         hi = self._link_va(symval("_end"))
         return lo is not None and hi is not None and lo <= link <= hi
 
@@ -444,8 +465,9 @@ class BreakpointMixin:
                     continue
                 if dup:
                     fn_c = self._minsym_at(cand)[0]
-                    if fn_c is not None and any(self._addr_regime(h) == self._addr_regime(cand)
-                                                and self._minsym_at(h)[0] == fn_c for h in have):
+                    if fn_c is not None and any(
+                        self._addr_regime(h) == self._addr_regime(cand) and self._minsym_at(h)[0] == fn_c for h in have
+                    ):
                         continue
                 out = exec_confirmless("hbreak *0x%x" % cand)
                 mm = re.search(r"[Bb]reakpoint\s+(\d+)", out or "")
@@ -458,10 +480,18 @@ class BreakpointMixin:
         if made:
             imgnum = next((str(num) for num, c in made if c == img), None)
             panum = next((str(num) for num, c in made if c == pa), None)
-            self._kb_groups.append({"loc": (getattr(bp, "location", None) or "b#%d" % n),
-                                    "link": link, "pa": pa, "pa_bp": panum,
-                                    "img_addr": img, "img_bp": imgnum,
-                                    "img_slide": self.kaslr_slide, "owner": n})
+            self._kb_groups.append(
+                {
+                    "loc": (getattr(bp, "location", None) or "b#%d" % n),
+                    "link": link,
+                    "pa": pa,
+                    "pa_bp": panum,
+                    "img_addr": img,
+                    "img_bp": imgnum,
+                    "img_slide": self.kaslr_slide,
+                    "owner": n,
+                }
+            )
             LOG.add("adopt b#%d -> +%s" % (n, ",".join(fmt(c) for _, c in made)))
 
     @safe()
@@ -522,8 +552,10 @@ class BreakpointMixin:
         if mode in ("on", "1", "true", ""):
             config.set_session("BPFIX", "on")
             self._apply_bpfix()
-            print("[%s] bpfix=on  (dual native/shadow breakpoints follow the MMU regime: "
-                  "physical while MMU off, virtual once on)" % NAME)
+            print(
+                "[%s] bpfix=on  (dual native/shadow breakpoints follow the MMU regime: "
+                "physical while MMU off, virtual once on)" % NAME
+            )
         elif mode in ("off", "0", "false"):
             config.set_session("BPFIX", "off")
             for n in list(self._managed_bps):

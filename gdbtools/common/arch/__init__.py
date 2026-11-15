@@ -10,6 +10,7 @@ To add an architecture: subclass `ArchCommon` here with its branch regex, then
 (optionally) subclass that plus `KernelArch` on the kernel side and call
 `register()`.
 """
+
 import gdb
 
 from ..runtime import safe, LOG

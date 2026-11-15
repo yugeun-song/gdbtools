@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import gdb
 import re
 from ..common.runtime import *
@@ -17,8 +18,14 @@ class BootMixin:
         """Force the phys<->virt offset (PA-VA) by hand, bypassing calibration."""
         self.offset = val & MASK
         ok = self._sanity()
-        print("[%s] offset(PA-VA) = %s%s" % (NAME, fmt(self.offset),
-              "" if ok else "  [WARNING: maps the image entry outside the expected phys range]"))
+        print(
+            "[%s] offset(PA-VA) = %s%s"
+            % (
+                NAME,
+                fmt(self.offset),
+                "" if ok else "  [WARNING: maps the image entry outside the expected phys range]",
+            )
+        )
         self._refresh_shadow()
         return True
 
@@ -64,8 +71,9 @@ class BootMixin:
             # treat "not resolved yet" as a state to report, and calibration has
             # other routes to the offset.  The one caller that cannot proceed
             # without it -- bootbreak -- says so itself.
-            LOG.add("entry PA unresolved: nothing in the target reported it and "
-                    "$GDBTOOLS_ENTRY_PA/_PROFILE were not set")
+            LOG.add(
+                "entry PA unresolved: nothing in the target reported it and $GDBTOOLS_ENTRY_PA/_PROFILE were not set"
+            )
             return None
         self.entry_pa = pa
         return pa
@@ -112,7 +120,7 @@ class BootMixin:
             if m:
                 nums.append(m.group(1))
         execstr("continue")
-        for n in nums:                      # the one that hit deleted itself
+        for n in nums:  # the one that hit deleted itself
             exec_confirmless("delete %s" % n)
         pc = reg("pc")
         return pc is not None and (pc & MASK) in want
@@ -197,15 +205,17 @@ class BootMixin:
             # Independent of where $pc currently is, so it stays correct even when
             # a preset anchor stopped us at primary_entry / _start_kernel.
             base = self.resolve_entry()
-            evs = self.link_image_base_va()      # the symbol that PA locates (PIE-safe)
+            evs = self.link_image_base_va()  # the symbol that PA locates (PIE-safe)
             if base is not None and evs is not None:
                 off = (base - evs) & MASK
             else:
-                off = a.auto_calibrate(self)     # read from a running kernel, or None
+                off = a.auto_calibrate(self)  # read from a running kernel, or None
         if off is None:
             if not quiet:
-                print("[%s] calibration failed -- are you stopped in early head.S? "
-                      "(try: kearly calibrate <anchor-symbol>)" % NAME)
+                print(
+                    "[%s] calibration failed -- are you stopped in early head.S? "
+                    "(try: kearly calibrate <anchor-symbol>)" % NAME
+                )
             return False
         self.offset = off
         ok = self._sanity()
@@ -229,9 +239,10 @@ class BootMixin:
             elif not self._kaslr_pending and self._flag("CROSSING"):
                 self._ensure_crossing_catcher("calibration", use_python=True)
         if not quiet:
-            print("[%s] arch=%s offset(PA-VA)=%s%s" %
-                  (NAME, a.key, fmt(off),
-                   "" if ok else "  [WARNING: maps entry outside expected phys range]"))
+            print(
+                "[%s] arch=%s offset(PA-VA)=%s%s"
+                % (NAME, a.key, fmt(off), "" if ok else "  [WARNING: maps entry outside expected phys range]")
+            )
         self._refresh_shadow()
         return True
 
@@ -240,7 +251,7 @@ class BootMixin:
         a = self.arch
         if a is None or a.entry_symbol is None:
             return True
-        va = self.link_entry_va()            # ET_DYN/PIE + shadow safe (not raw symval)
+        va = self.link_entry_va()  # ET_DYN/PIE + shadow safe (not raw symval)
         if va is None:
             return True
         pa = self.v2p(va)
@@ -267,8 +278,10 @@ class BootMixin:
         armed = self._armed_entry_pa
         cmd = "tbreak" if self.current_break_kind() == "sw" else "thbreak"
         execstr("%s *0x%x" % (cmd, armed))
-        print("[%s] firmware is running at the kernel entry PA %s (no kernel image there "
-              "yet); entry break re-armed -- continue to reach the kernel." % (NAME, fmt(armed)))
+        print(
+            "[%s] firmware is running at the kernel entry PA %s (no kernel image there "
+            "yet); entry break re-armed -- continue to reach the kernel." % (NAME, fmt(armed))
+        )
 
     @safe(default=False)
     def bootbreak(self, arm_only=False):
@@ -293,8 +306,10 @@ class BootMixin:
         self.load_overrides()
         pc = reg("pc")
         if pc is not None and a._is_va(pc):
-            print("[%s] already past MMU enable ($pc is virtual) -- calibrating for "
-                  "VA mode; native kernel symbolization is live." % NAME)
+            print(
+                "[%s] already past MMU enable ($pc is virtual) -- calibrating for "
+                "VA mode; native kernel symbolization is live." % NAME
+            )
             return self.calibrate()
         armed = getattr(self, "_armed_entry_pa", None)
         if pc is not None and armed is not None and (pc & MASK) == armed:
@@ -317,17 +332,18 @@ class BootMixin:
                 # all of guest memory and takes minutes.
                 _pc = reg("pc")
                 _dpa = self.x86_decomp_pa()
-                _need_x86 = (_pc is not None and _dpa is not None
-                             and (_pc & MASK) < _dpa)
+                _need_x86 = _pc is not None and _dpa is not None and (_pc & MASK) < _dpa
                 if _need_x86:
                     LOG.add("x86: pc=%s below decompressor load -> auto decompressor recovery" % fmt(_pc))
         if _need_x86:
             _b = a.recover_kaslr_base(self)
             _d = self._entry_delta(a) if _b is not None else None
             if _b is not None and _d is None:
-                print("[%s] x86 KASLR: recovered entry %s, but %s/%s are not in the symbol "
-                      "table, so the image base it implies is unknown." % (
-                          NAME, fmt(_b), a.entry_symbol, self._base_symbol(a)))
+                print(
+                    "[%s] x86 KASLR: recovered entry %s, but %s/%s are not in the symbol "
+                    "table, so the image base it implies is unknown."
+                    % (NAME, fmt(_b), a.entry_symbol, self._base_symbol(a))
+                )
                 return False
             if _b is not None:
                 # Everything derived while the decompressor was still running was based on
@@ -346,19 +362,21 @@ class BootMixin:
                 # recover_kaslr_base itself routes on: stated means a direct boot, whose
                 # decompressor is walked; unset means a firmware chain, where the EFI
                 # stub hands the entry over and the decompressor stages never execute.
-                _route = ("the decompressor" if self.x86_decomp_pa() is not None
-                          else "the EFI stub")
-                print("[%s] x86 KASLR: recovered main-kernel phys base %s via %s; "
-                      "breaking there." % (NAME, fmt(_b), _route))
+                _route = "the decompressor" if self.x86_decomp_pa() is not None else "the EFI stub"
+                print(
+                    "[%s] x86 KASLR: recovered main-kernel phys base %s via %s; "
+                    "breaking there." % (NAME, fmt(_b), _route)
+                )
             else:
                 # No route is named here on purpose: the launcher states X86_DECOMP_PA
                 # only when the compressed vmlinux is on disk, so in the branch that
                 # reports that file missing it can say nothing about which walk would
                 # have run.
-                print("[%s] x86 KASLR: base recovery unavailable ($GDBTOOLS_X86_DECOMP_VMLINUX "
-                      "unset or unreadable); trying nominal entry -- set $GDBTOOLS_ENTRY_PA "
-                      "(or `kearly entry PA`) if it misses."
-                      % NAME)
+                print(
+                    "[%s] x86 KASLR: base recovery unavailable ($GDBTOOLS_X86_DECOMP_VMLINUX "
+                    "unset or unreadable); trying nominal entry -- set $GDBTOOLS_ENTRY_PA "
+                    "(or `kearly entry PA`) if it misses." % NAME
+                )
         # resolve_entry() is the IMAGE BASE PA; the CPU enters at the entry symbol,
         # which on newer x86 sits in .init.text well above _text.  Computed here and
         # never written back, so a second bootbreak starts from the same base.
@@ -369,36 +387,45 @@ class BootMixin:
         if entry is not None and anchor and a.entry_symbol and anchor != a.entry_symbol:
             d, e = symval(anchor), symval(a.entry_symbol)
             if d is None or e is None:
-                print("[%s] anchor '%s' is not a symbol in this vmlinux, so there is no break "
-                      "address to compute; fix it ($GDBTOOLS_ANCHOR, the profile, the preset) "
-                      "or clear it with `kearly anchor -`." % (NAME, anchor))
+                print(
+                    "[%s] anchor '%s' is not a symbol in this vmlinux, so there is no break "
+                    "address to compute; fix it ($GDBTOOLS_ANCHOR, the profile, the preset) "
+                    "or clear it with `kearly anchor -`." % (NAME, anchor)
+                )
                 return False
             break_pa = (entry + (d - e)) & MASK
         self._armed_entry_pa = break_pa
         if pc is not None and break_pa is not None and pc == break_pa:
-            return self.calibrate()              # already at the entry
+            return self.calibrate()  # already at the entry
         if break_pa is None:
-            print("[%s] no entry PA for %s; break at a kernel symbol then "
-                  "'kearly calibrate <sym>', or set $GDBTOOLS_ENTRY_PA/_PROFILE/_DTB"
-                  % (NAME, a.key))
+            print(
+                "[%s] no entry PA for %s; break at a kernel symbol then "
+                "'kearly calibrate <sym>', or set $GDBTOOLS_ENTRY_PA/_PROFILE/_DTB" % (NAME, a.key)
+            )
             return False
         kind = self.current_break_kind()
         cmd = "tbreak" if kind == "sw" else "thbreak"
         if arm_only:
             execstr("%s *0x%x" % (cmd, break_pa))
-            print("[%s] armed %s at %s PA %s (%s-bp); continue to reach the kernel entry."
-                  % (NAME, cmd, anchor or "entry", fmt(break_pa), kind))
+            print(
+                "[%s] armed %s at %s PA %s (%s-bp); continue to reach the kernel entry."
+                % (NAME, cmd, anchor or "entry", fmt(break_pa), kind)
+            )
             return True
-        print("[%s] running to %s PA %s via %s-bp (past QEMU reset/firmware)..."
-              % (NAME, anchor or "entry", fmt(break_pa), kind))
+        print(
+            "[%s] running to %s PA %s via %s-bp (past QEMU reset/firmware)..."
+            % (NAME, anchor or "entry", fmt(break_pa), kind)
+        )
         self._driving_entry = True
         try:
             execstr("%s *0x%x" % (cmd, break_pa))
             execstr("continue")
             pc = reg("pc")
             while self._firmware_at_entry(pc):
-                print("[%s] firmware is running at the kernel entry PA %s (no kernel image "
-                      "there yet); continuing to the kernel." % (NAME, fmt(break_pa)))
+                print(
+                    "[%s] firmware is running at the kernel entry PA %s (no kernel image "
+                    "there yet); continuing to the kernel." % (NAME, fmt(break_pa))
+                )
                 execstr("%s *0x%x" % (cmd, break_pa))
                 execstr("continue")
                 pc = reg("pc")
@@ -407,8 +434,7 @@ class BootMixin:
         if pc is not None and not a._is_va(pc) and pc != break_pa:
             # did not land (e.g. hw bp unsupported): try the other breakpoint kind
             alt = "thbreak" if cmd == "tbreak" else "tbreak"
-            LOG.add("bootbreak: %s missed entry (pc=%s); retrying with %s" %
-                    (cmd, fmt(pc), alt))
+            LOG.add("bootbreak: %s missed entry (pc=%s); retrying with %s" % (cmd, fmt(pc), alt))
             execstr("%s *0x%x" % (alt, break_pa))
             execstr("continue")
         # The stop hook calibrates at the landing FIRST -- from the clean link VA,
@@ -453,7 +479,7 @@ class BootMixin:
         text_pa = self.v2p((self._shadow_link + self.kaslr_slide) & MASK)
         if self.shadow_addr is not None:
             if self.shadow_addr == text_pa:
-                return                        # already loaded correctly
+                return  # already loaded correctly
             self._shadow_unload()
         out = exec_confirmless("add-symbol-file %s -o 0x%x" % (vm, self.offset & MASK))
         # Only claim the shadow loaded if add-symbol-file actually succeeded; a gdb
@@ -473,8 +499,9 @@ class BootMixin:
         # loaded the address named u-boot's file first, and removing that one aborted
         # gdb 18.1 over a breakpoint location still inside it.
         vm = self.vmlinux_path()
-        exec_confirmless("remove-symbol-file %s" % vm if vm else
-                         "remove-symbol-file -a 0x%x" % (self.shadow_addr & MASK))
+        exec_confirmless(
+            "remove-symbol-file %s" % vm if vm else "remove-symbol-file -a 0x%x" % (self.shadow_addr & MASK)
+        )
         LOG.add("shadow removed (was text@%s)" % fmt(self.shadow_addr))
         self.shadow_addr = None
 
@@ -495,7 +522,7 @@ class BootMixin:
     # while enabled and RESTORE the user's prior value on `kearly off`.  Telescope,
     # dereference, symbolization -- every actual display feature -- stay at their
     # defaults; the tool only ADDS to those.
-    _PWNDBG_QUIET = ()      # never silence any pwndbg DISPLAY feature
+    _PWNDBG_QUIET = ()  # never silence any pwndbg DISPLAY feature
 
     @safe()
     def _quiet_pagescan(self):
@@ -511,7 +538,7 @@ class BootMixin:
         try:
             cur = gdb.parameter("auto-explore-pages")
         except Exception:
-            return                          # not this pwndbg version -> leave it alone
+            return  # not this pwndbg version -> leave it alone
         if cur == "no":
             return
         self._param_set("auto-explore-pages", "no")
@@ -547,9 +574,11 @@ class BootMixin:
             self._param_set(nm, val)
         self._early_quiet = True
         LOG.add("early-boot scheduler-locking=step ON (no pwndbg feature touched)")
-        print("[%s] early-boot: scheduler-locking=step (siblings frozen while you "
-              "single-step; all cores still run on 'continue'/'kearly overmmu').  "
-              "Toggle with 'kearly steplock off'." % NAME)
+        print(
+            "[%s] early-boot: scheduler-locking=step (siblings frozen while you "
+            "single-step; all cores still run on 'continue'/'kearly overmmu').  "
+            "Toggle with 'kearly steplock off'." % NAME
+        )
 
     @safe()
     def _restore_early_quiet(self, reason=""):
@@ -611,12 +640,12 @@ class BootMixin:
             s = self._advance_to_crossing()
             if s:
                 self.apply_kaslr(s)
-        cands = [sym] if sym else [s for s in getattr(a, "post_mmu_symbols", ())
-                                   if symval(s) is not None]
+        cands = [sym] if sym else [s for s in getattr(a, "post_mmu_symbols", ()) if symval(s) is not None]
         if not cands:
-            print("[%s] no post-MMU landing symbol known for %s. Pass one explicitly: "
-                  "kearly overmmu <symbol>  (e.g. start_kernel / secondary_start_kernel)."
-                  % (NAME, a.key))
+            print(
+                "[%s] no post-MMU landing symbol known for %s. Pass one explicitly: "
+                "kearly overmmu <symbol>  (e.g. start_kernel / secondary_start_kernel)." % (NAME, a.key)
+            )
             return
         try:
             before = set(b.number for b in (gdb.breakpoints() or ()))
@@ -625,7 +654,7 @@ class BootMixin:
         placed = []
         for s in cands:
             out = execstr("thbreak %s" % s)
-            if "reakpoint" not in out:                 # hw bp rejected -> sw temp bp
+            if "reakpoint" not in out:  # hw bp rejected -> sw temp bp
                 execstr("tbreak %s" % s)
             placed.append(s)
         try:
@@ -634,7 +663,7 @@ class BootMixin:
             mine = []
         print("[%s] over_mmu: continue to virtual landing {%s} ..." % (NAME, ", ".join(placed)))
         execstr("continue")
-        for b in mine:                                 # drop any temp bp that did not fire
+        for b in mine:  # drop any temp bp that did not fire
             try:
                 if b.is_valid():
                     b.delete()
@@ -644,5 +673,6 @@ class BootMixin:
         res = self.symbolize(pc) if pc is not None else None
         where = (res[2] if res else None) or "?"
         vp = a.pc_is_virtual()
-        print("[%s] landed pc=%s %s  (MMU %s)" %
-              (NAME, fmt(pc), where, "on" if vp else ("off" if vp is False else "?")))
+        print(
+            "[%s] landed pc=%s %s  (MMU %s)" % (NAME, fmt(pc), where, "on" if vp else ("off" if vp is False else "?"))
+        )

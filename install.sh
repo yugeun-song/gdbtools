@@ -22,19 +22,51 @@
 set -euo pipefail
 REPO="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 NAME=gdbtools
-MODE=install; WHERE=user; PREFIX=""; GLOBAL=0; SUDO_CMD=""
+MODE=install
+WHERE=user
+PREFIX=""
+GLOBAL=0
+SUDO_CMD=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --user) WHERE=user; shift ;;
-        --system) WHERE=system; shift ;;
-        --prefix) WHERE=prefix; PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
-        --global) GLOBAL=1; shift ;;
-        --sudo) SUDO_CMD="${2:?--sudo needs a command}"; shift 2 ;;
-        --check) MODE=check; shift ;;
-        --uninstall) MODE=uninstall; shift ;;
-        -h|--help) awk 'NR > 1 && !/^#/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
-        *) echo "install.sh: unknown option '$1'" >&2; exit 2 ;;
+        --user)
+            WHERE=user
+            shift
+            ;;
+        --system)
+            WHERE=system
+            shift
+            ;;
+        --prefix)
+            WHERE=prefix
+            PREFIX="${2:?--prefix needs a directory}"
+            shift 2
+            ;;
+        --global)
+            GLOBAL=1
+            shift
+            ;;
+        --sudo)
+            SUDO_CMD="${2:?--sudo needs a command}"
+            shift 2
+            ;;
+        --check)
+            MODE=check
+            shift
+            ;;
+        --uninstall)
+            MODE=uninstall
+            shift
+            ;;
+        -h | --help)
+            awk 'NR > 1 && !/^#/ {exit} NR > 1 {sub(/^# ?/, ""); print}' "$0"
+            exit 0
+            ;;
+        *)
+            echo "install.sh: unknown option '$1'" >&2
+            exit 2
+            ;;
     esac
 done
 
@@ -42,28 +74,42 @@ if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]]; then
     G=$'\e[32m' R=$'\e[31m' Y=$'\e[33m' C=$'\e[36m' D=$'\e[2m' N=$'\e[0m'
 else G="" R="" Y="" C="" D="" N=""; fi
 case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
-    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) OKM="✓" NOM="✗" ;; *) OKM="+" NOM="x" ;;
+    *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) OKM="✓" NOM="✗" ;; *) OKM="+" NOM="x" ;;
 esac
-ok()  { printf '  %s%s%s %s\n' "$G" "$OKM" "$N" "$*"; }
+ok() { printf '  %s%s%s %s\n' "$G" "$OKM" "$N" "$*"; }
 bad() { printf '  %s%s%s %s\n' "$R" "$NOM" "$N" "$*"; }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 say() { printf '  %s%-12s%s %s\n' "$C" "$1" "$N" "${*:2}"; }
 
 case "$WHERE" in
-    user)   BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"; SHARE="${XDG_DATA_HOME:-$HOME/.local/share}"
-            BASHC="${BASH_COMPLETION_USER_DIR:-$SHARE/bash-completion}/completions" ;;
-    system) BIN=/usr/local/bin; SHARE=/usr/local/share; BASHC="$SHARE/bash-completion/completions" ;;
-    prefix) BIN="${PREFIX%/}/bin"; SHARE="${PREFIX%/}/share"; BASHC="$SHARE/bash-completion/completions" ;;
+    user)
+        BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+        SHARE="${XDG_DATA_HOME:-$HOME/.local/share}"
+        BASHC="${BASH_COMPLETION_USER_DIR:-$SHARE/bash-completion}/completions"
+        ;;
+    system)
+        BIN=/usr/local/bin
+        SHARE=/usr/local/share
+        BASHC="$SHARE/bash-completion/completions"
+        ;;
+    prefix)
+        BIN="${PREFIX%/}/bin"
+        SHARE="${PREFIX%/}/share"
+        BASHC="$SHARE/bash-completion/completions"
+        ;;
 esac
 ZSHC="$SHARE/zsh/site-functions"
 LINK="$BIN/$NAME"
 TARGET="$REPO/bin/$NAME"
 # What is linked where, as SOURCE DEST pairs: the command, then its completions.
 PAIRS=("$TARGET" "$LINK" "$REPO/completions/gdbtools.bash" "$BASHC/$NAME"
-       "$REPO/completions/_gdbtools" "$ZSHC/_$NAME")
+    "$REPO/completions/_gdbtools" "$ZSHC/_$NAME")
 placed() { [[ -L "$2" && "$(readlink -f "$2")" == "$(readlink -f "$1")" ]]; }
 
-on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; esac; return 1; }
+on_path() {
+    case ":$PATH:" in *":$1:"*) return 0 ;; esac
+    return 1
+}
 
 path_hint() {
     on_path "$BIN" && return 0
@@ -98,36 +144,50 @@ as_user_setup() {
 # --prefix) goes through sudo, asked once before anything changes; the record
 # stays this user's.  Never for ~/.local/bin: a root-owned link there is wrong.
 declare -a ELEVATE=()
-ask_root() {   # ask_root DEST...: elevate when any of them cannot be written
+ask_root() { # ask_root DEST...: elevate when any of them cannot be written
     local d="" p cmd
     [[ "$(id -u)" -ne 0 && "$WHERE" != user ]] || return 0
     for p in "$@"; do
         p="$(dirname "$p")"
         while [[ ! -d "$p" ]]; do p="$(dirname "$p")"; done
-        [[ -w "$p" ]] || { d="$p"; break; }
+        [[ -w "$p" ]] || {
+            d="$p"
+            break
+        }
     done
     [[ -n "$d" ]] || return 0
     if [[ -n "$SUDO_CMD" ]]; then
         read -ra ELEVATE <<<"$SUDO_CMD"
     else
-        for cmd in sudo doas run0; do command -v "$cmd" >/dev/null 2>&1 && { ELEVATE=("$cmd"); break; }; done
+        for cmd in sudo doas run0; do command -v "$cmd" >/dev/null 2>&1 && {
+            ELEVATE=("$cmd")
+            break
+        }; done
     fi
     if [[ ${#ELEVATE[@]} -eq 0 ]]; then
-        bad "cannot write $d, and none of sudo, doas, run0 is installed; --sudo CMD names another"; exit 1
+        bad "cannot write $d, and none of sudo, doas, run0 is installed; --sudo CMD names another"
+        exit 1
     fi
-    command -v "${ELEVATE[0]}" >/dev/null 2>&1 || { bad "--sudo: ${ELEVATE[0]} is not installed"; exit 1; }
+    command -v "${ELEVATE[0]}" >/dev/null 2>&1 || {
+        bad "--sudo: ${ELEVATE[0]} is not installed"
+        exit 1
+    }
     say root "cannot write $d; asking ${ELEVATE[0]##*/} for the links only"
     # sudo and doas ask on the controlling terminal; with none (an editor, a pipe)
     # only a cached or password-free grant can work, so say what to do instead.
     case "${ELEVATE[0]##*/}" in
-        sudo|doas)
+        sudo | doas)
             if ! { : </dev/tty; } 2>/dev/null && ! "${ELEVATE[@]}" -n true 2>/dev/null; then
                 bad "${ELEVATE[0]##*/} needs a password and there is no terminal to ask on; run this in a terminal"
                 exit 1
-            fi ;;
+            fi
+            ;;
     esac
     if [[ "${ELEVATE[0]##*/}" == sudo ]]; then
-        "${ELEVATE[@]}" -v || { bad "sudo did not authenticate; nothing was changed"; exit 1; }
+        "${ELEVATE[@]}" -v || {
+            bad "sudo did not authenticate; nothing was changed"
+            exit 1
+        }
     fi
 }
 as_root() { "${ELEVATE[@]+"${ELEVATE[@]}"}" "$@"; }
@@ -136,7 +196,10 @@ as_root() { "${ELEVATE[@]+"${ELEVATE[@]}"}" "$@"; }
 reach_block() {
     local d="$REPO/bin"
     while [[ "$d" != / && -n "$d" ]]; do
-        [[ "$(stat -c %A "$d" 2>/dev/null)" == *[xt] ]] || { printf '%s\n' "$d"; return 0; }
+        [[ "$(stat -c %A "$d" 2>/dev/null)" == *[xt] ]] || {
+            printf '%s\n' "$d"
+            return 0
+        }
         d="$(dirname "$d")"
     done
     return 1
@@ -150,47 +213,64 @@ reach_warn() {
 case "$MODE" in
     check)
         for ((i = 0; i < ${#PAIRS[@]}; i += 2)); do
-            if placed "${PAIRS[i]}" "${PAIRS[i+1]}"; then ok "${PAIRS[i+1]}"
-            else bad "${PAIRS[i+1]} is not this checkout's"; fi
+            if placed "${PAIRS[i]}" "${PAIRS[i + 1]}"; then
+                ok "${PAIRS[i + 1]}"
+            else bad "${PAIRS[i + 1]} is not this checkout's"; fi
         done
         reach_warn
         path_hint
         [[ "$WHERE" == user ]] && zsh_hint
-        "$REPO/setup.sh" --check ;;
+        "$REPO/setup.sh" --check
+        ;;
     uninstall)
         declare -a gone=()
         for ((i = 0; i < ${#PAIRS[@]}; i += 2)); do
-            if placed "${PAIRS[i]}" "${PAIRS[i+1]}"; then gone+=("${PAIRS[i+1]}")
-            elif [[ -e "${PAIRS[i+1]}" || -L "${PAIRS[i+1]}" ]]; then say kept "${PAIRS[i+1]} (not this checkout's)"; fi
+            if placed "${PAIRS[i]}" "${PAIRS[i + 1]}"; then
+                gone+=("${PAIRS[i + 1]}")
+            elif [[ -e "${PAIRS[i + 1]}" || -L "${PAIRS[i + 1]}" ]]; then say kept "${PAIRS[i + 1]} (not this checkout's)"; fi
         done
         if [[ ${#gone[@]} -gt 0 ]]; then
             ask_root "${gone[@]}"
-            as_root rm -f -- "${gone[@]}" || { bad "could not remove what was installed"; exit 1; }
+            as_root rm -f -- "${gone[@]}" || {
+                bad "could not remove what was installed"
+                exit 1
+            }
             for d in "${gone[@]}"; do ok "removed $d"; done
         fi
-        [[ "$(id -u)" -eq 0 ]] || "$REPO/setup.sh" --uninstall ;;
+        [[ "$(id -u)" -eq 0 ]] || "$REPO/setup.sh" --uninstall
+        ;;
     install)
         if [[ -e "$LINK" && ! -L "$LINK" ]]; then
-            bad "$LINK exists and is not a symlink; remove it first"; exit 1
+            bad "$LINK exists and is not a symlink; remove it first"
+            exit 1
         fi
         if [[ -L "$LINK" && -e "$LINK" && "$(readlink -f "$LINK")" != "$TARGET" ]]; then
-            bad "$LINK points at $(readlink -f "$LINK"), another checkout; remove it first"; exit 1
+            bad "$LINK points at $(readlink -f "$LINK"), another checkout; remove it first"
+            exit 1
         fi
         declare -a todo=() dests=()
         for ((i = 0; i < ${#PAIRS[@]}; i += 2)); do
-            s="${PAIRS[i]}" d="${PAIRS[i+1]}"
-            if placed "$s" "$d"; then ok "$d"; continue; fi
+            s="${PAIRS[i]}" d="${PAIRS[i + 1]}"
+            if placed "$s" "$d"; then
+                ok "$d"
+                continue
+            fi
             if [[ -L "$d" && ! -e "$d" ]]; then
                 say replaced "$d (it pointed at $(readlink "$d"), which is gone)"
             elif [[ -e "$d" || -L "$d" ]]; then
-                bad "$d is not this checkout's; skipped"; continue
+                bad "$d is not this checkout's; skipped"
+                continue
             fi
-            todo+=("$s" "$d"); dests+=("$d")
+            todo+=("$s" "$d")
+            dests+=("$d")
         done
         if [[ ${#todo[@]} -gt 0 ]]; then
             ask_root "${dests[@]}"
             as_root sh -c 'while [ $# -gt 0 ]; do mkdir -p "$(dirname "$2")" && ln -sfn "$1" "$2" || exit; shift 2; done' \
-                sh "${todo[@]}" || { bad "could not install into $BIN and $SHARE"; exit 1; }
+                sh "${todo[@]}" || {
+                bad "could not install into $BIN and $SHARE"
+                exit 1
+            }
             for d in "${dests[@]}"; do ok "$d"; done
         fi
         reach_warn
@@ -199,5 +279,6 @@ case "$MODE" in
             path_hint
             zsh_hint
             printf '  %snext: gdbtools doctor; a new shell completes gdbtools with Tab%s\n' "$D" "$N"
-        fi ;;
+        fi
+        ;;
 esac

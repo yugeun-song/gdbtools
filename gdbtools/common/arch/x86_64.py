@@ -1,4 +1,5 @@
 """x86_64: the target-independent half."""
+
 import re
 
 from .base import ArchCommon
@@ -13,10 +14,30 @@ class X86_64Common(ArchCommon):
     # binutils prints an unconsumed instruction prefix as a leading token, e.g.
     # `data16 jmp 0x... <l>` or `bnd jmp 0x...` (alternatives/retpoline padding).
     # Peel prefixes so the real branch mnemonic reaches BRANCH_RE.
-    _PREFIXES = frozenset((
-        "lock", "bnd", "notrack", "rep", "repe", "repz", "repne", "repnz",
-        "data16", "data32", "addr16", "addr32", "rex", "rex.w",
-        "cs", "ds", "es", "fs", "gs", "ss"))
+    _PREFIXES = frozenset(
+        (
+            "lock",
+            "bnd",
+            "notrack",
+            "rep",
+            "repe",
+            "repz",
+            "repne",
+            "repnz",
+            "data16",
+            "data32",
+            "addr16",
+            "addr32",
+            "rex",
+            "rex.w",
+            "cs",
+            "ds",
+            "es",
+            "fs",
+            "gs",
+            "ss",
+        )
+    )
 
     def split_prefixes(self, mnem, ops):
         while mnem.lower() in self._PREFIXES and ops:

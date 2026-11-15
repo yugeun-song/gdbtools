@@ -1,4 +1,5 @@
 """arm64: the kernel half.  See gdbtools.common.arch.arm64 for the rest."""
+
 import os
 import json
 import struct
@@ -57,22 +58,49 @@ def _txsz_reading(which, v):
 # here would be indistinguishable from a real syndrome.  A code no kernel header
 # names is left out, and then prints as its number with no words after it.
 _ESR_EC = {
-    0x00: "unknown", 0x01: "WFI/WFE", 0x03: "CP15 mcr/mrc", 0x04: "CP15 mcrr/mrrc",
-    0x05: "CP14 mcr/mrc", 0x06: "CP14 ldc/stc", 0x07: "FP/ASIMD access",
-    0x08: "CP10 id", 0x09: "pointer auth failure", 0x0C: "CP14 mcrr/mrrc",
-    0x0D: "branch target exception", 0x0E: "illegal execution state",
-    0x11: "SVC (AArch32)", 0x12: "HVC (AArch32)", 0x13: "SMC (AArch32)",
-    0x15: "SVC (AArch64)", 0x16: "HVC (AArch64)", 0x17: "SMC (AArch64)",
-    0x18: "MSR/MRS/sys insn trap", 0x19: "SVE access", 0x1A: "ERET/ERETAA/ERETAB",
-    0x1C: "FPAC", 0x1D: "SME access", 0x1F: "implementation defined",
-    0x20: "instruction abort, lower EL", 0x21: "instruction abort, same EL",
-    0x22: "PC alignment", 0x24: "data abort, lower EL", 0x25: "data abort, same EL",
-    0x26: "SP alignment", 0x27: "MOPS", 0x28: "FP exception (AArch32)",
-    0x2C: "FP exception (AArch64)", 0x2F: "SError",
-    0x30: "breakpoint, lower EL", 0x31: "breakpoint, same EL",
-    0x32: "software step, lower EL", 0x33: "software step, same EL",
-    0x34: "watchpoint, lower EL", 0x35: "watchpoint, same EL",
-    0x38: "BKPT (AArch32)", 0x3A: "vector catch (AArch32)", 0x3C: "BRK (AArch64)",
+    0x00: "unknown",
+    0x01: "WFI/WFE",
+    0x03: "CP15 mcr/mrc",
+    0x04: "CP15 mcrr/mrrc",
+    0x05: "CP14 mcr/mrc",
+    0x06: "CP14 ldc/stc",
+    0x07: "FP/ASIMD access",
+    0x08: "CP10 id",
+    0x09: "pointer auth failure",
+    0x0C: "CP14 mcrr/mrrc",
+    0x0D: "branch target exception",
+    0x0E: "illegal execution state",
+    0x11: "SVC (AArch32)",
+    0x12: "HVC (AArch32)",
+    0x13: "SMC (AArch32)",
+    0x15: "SVC (AArch64)",
+    0x16: "HVC (AArch64)",
+    0x17: "SMC (AArch64)",
+    0x18: "MSR/MRS/sys insn trap",
+    0x19: "SVE access",
+    0x1A: "ERET/ERETAA/ERETAB",
+    0x1C: "FPAC",
+    0x1D: "SME access",
+    0x1F: "implementation defined",
+    0x20: "instruction abort, lower EL",
+    0x21: "instruction abort, same EL",
+    0x22: "PC alignment",
+    0x24: "data abort, lower EL",
+    0x25: "data abort, same EL",
+    0x26: "SP alignment",
+    0x27: "MOPS",
+    0x28: "FP exception (AArch32)",
+    0x2C: "FP exception (AArch64)",
+    0x2F: "SError",
+    0x30: "breakpoint, lower EL",
+    0x31: "breakpoint, same EL",
+    0x32: "software step, lower EL",
+    0x33: "software step, same EL",
+    0x34: "watchpoint, lower EL",
+    0x35: "watchpoint, same EL",
+    0x38: "BKPT (AArch32)",
+    0x3A: "vector catch (AArch32)",
+    0x3C: "BRK (AArch64)",
 }
 
 
@@ -80,36 +108,41 @@ _ESR_EC = {
 # MT_* indices in asm/memory.h).  A byte that is not listed reads as nothing rather
 # than as a guess.
 _MAIR_ATTR = {
-    0x00: "Device-nGnRnE", 0x04: "Device-nGnRE", 0x08: "Device-nGRE",
-    0x0C: "Device-GRE", 0x44: "Normal NC", 0xBB: "Normal WT",
+    0x00: "Device-nGnRnE",
+    0x04: "Device-nGnRE",
+    0x08: "Device-nGRE",
+    0x0C: "Device-GRE",
+    0x44: "Normal NC",
+    0xBB: "Normal WT",
     0xFF: "Normal WB",
 }
 
 
 class Arm64(Arm64Common, KernelArch):
     entry_symbol = "_text"
-    entry_break_kind = "sw"              # entry executes in place; sw bp is reliable
-    entry_magic = (0x644D5241, 0x38)     # arm64 Image magic "ARM\x64" at _text+0x38
-    dtb_pointer_reg = "x0"               # bootloader leaves the DTB PA in x0 at _text
-    return_reg = "lr"                    # x30; head.S calls via bl, so lr = ret addr
+    entry_break_kind = "sw"  # entry executes in place; sw bp is reliable
+    entry_magic = (0x644D5241, 0x38)  # arm64 Image magic "ARM\x64" at _text+0x38
+    dtb_pointer_reg = "x0"  # bootloader leaves the DTB PA in x0 at _text
+    return_reg = "lr"  # x30; head.S calls via bl, so lr = ret addr
     # first virtual code after __enable_mmu: primary via __primary_switch ->
     # br __primary_switched; secondary via secondary_startup -> br __secondary_switched.
     # (C entries kept as fallbacks in case the LOCAL asm labels are absent.)
-    post_mmu_symbols = ("__primary_switched", "__secondary_switched",
-                        "start_kernel", "secondary_start_kernel")
+    post_mmu_symbols = ("__primary_switched", "__secondary_switched", "start_kernel", "secondary_start_kernel")
 
     # PSTATE (exposed as $pstate/$cpsr) carries fields that the hidden EL1
     # sysregs duplicate.  CurrentEL is literally PSTATE.EL in bits[3:2].
     PSTATE_DERIVED = {
         "currentel": lambda ps: ps & 0xC,
-        "spsel":     lambda ps: ps & 0x1,
-        "daif":      lambda ps: (ps >> 6) & 0xF,
-        "nzcv":      lambda ps: (ps >> 28) & 0xF,
+        "spsel": lambda ps: ps & 0x1,
+        "daif": lambda ps: (ps >> 6) & 0xF,
+        "nzcv": lambda ps: (ps >> 28) & 0xF,
     }
 
     def stack_setup_hint(self):
-        return ("arm64 head.S establishes sp only in __primary_switch\n"
-                "      (`adrp x1, early_init_stack`); before that there is nothing to scan.")
+        return (
+            "arm64 head.S establishes sp only in __primary_switch\n"
+            "      (`adrp x1, early_init_stack`); before that there is nothing to scan."
+        )
 
     def _is_va(self, addr):
         # TTBR1 (kernel) high half for 48-bit AND 52-bit VA: 48-bit -> top 16 bits
@@ -121,8 +154,14 @@ class Arm64(Arm64Common, KernelArch):
     # is the identity map TTBR0 uses across the MMU-enable window; the other two
     # exist only on kernels that have them, and a symbol that is absent simply
     # does not contribute a candidate.
-    pt_root_symbols = ("swapper_pg_dir", "idmap_pg_dir", "tramp_pg_dir",
-                       "reserved_pg_dir", "init_pg_dir", "init_idmap_pg_dir")
+    pt_root_symbols = (
+        "swapper_pg_dir",
+        "idmap_pg_dir",
+        "tramp_pg_dir",
+        "reserved_pg_dir",
+        "init_pg_dir",
+        "init_idmap_pg_dir",
+    )
 
     def _translation_probe(self):
         # SCTLR_EL<n>.M (bit 0) is the enable bit, and n is the EL the CPU is in
@@ -141,17 +180,23 @@ class Arm64(Arm64Common, KernelArch):
         # exactly how a stale EL2 TTBR0 got dumped as if it were live.
         el = self._cur_el()
         if el is None:
-            return ("unknown", "none", None,
-                    "CurrentEL is unreadable, so which SCTLR_EL<n> governs the "
-                    "running regime cannot be determined")
+            return (
+                "unknown",
+                "none",
+                None,
+                "CurrentEL is unreadable, so which SCTLR_EL<n> governs the running regime cannot be determined",
+            )
         name = "SCTLR_EL%d" % el
         v, src = self.read_ctrl(name)
         if v is None:
-            return ("unknown", "none", "EL%d stage-1" % el,
-                    "%s did not answer (no gdb register, no QEMU monitor)" % name)
+            return (
+                "unknown",
+                "none",
+                "EL%d stage-1" % el,
+                "%s did not answer (no gdb register, no QEMU monitor)" % name,
+            )
         on = bool(v & 1)
-        return ("on" if on else "off", src, "EL%d stage-1" % el,
-                "%s=0x%x -> M(bit0)=%d" % (name, v, int(on)))
+        return ("on" if on else "off", src, "EL%d stage-1" % el, "%s=0x%x -> M(bit0)=%d" % (name, v, int(on)))
 
     def auto_calibrate(self, sess):
         # A physical pc does not say where the image starts; refuse (see base).
@@ -175,7 +220,7 @@ class Arm64(Arm64Common, KernelArch):
             return None
         lk = (lk - sess.kaslr_slide) & MASK
         v = read_phys_u64((lk + sess.offset) & MASK)
-        if not v:                       # 0 => not written yet (before __primary_switched sets it)
+        if not v:  # 0 => not written yet (before __primary_switched sets it)
             return None
         return (v + sess.offset) & MASK
 
@@ -201,10 +246,11 @@ class Arm64(Arm64Common, KernelArch):
                 if w is None:
                     break
                 if (w & RT) == MSR_SCTLR_EL1:
-                    return {"pa": (base + 4 * k) & MASK,
-                            "link": (link + 4 * k) & MASK,
-                            "desc": "%s+0x%x: msr sctlr_el1, x%d  (M=1 turns the MMU on)"
-                                    % (fn, 4 * k, w & 0x1F)}
+                    return {
+                        "pa": (base + 4 * k) & MASK,
+                        "link": (link + 4 * k) & MASK,
+                        "desc": "%s+0x%x: msr sctlr_el1, x%d  (M=1 turns the MMU on)" % (fn, 4 * k, w & 0x1F),
+                    }
         return None
 
     def find_crossing(self, sess):
@@ -221,14 +267,13 @@ class Arm64(Arm64Common, KernelArch):
         # per-version address is hard-coded.
         if sess.offset is None:
             return None
-        land = next((s for s in ("__primary_switched", "__mmap_switched")
-                     if symval(s) is not None), None)
+        land = next((s for s in ("__primary_switched", "__mmap_switched") if symval(s) is not None), None)
         if land is None:
             return None
         tl = sess._link_va(symval(land))
         if tl is None:
             return None
-        BR, RET, MASKI = 0xD61F0000, 0xD65F0000, 0xFFFFFC1F   # br / ret opcode masks
+        BR, RET, MASKI = 0xD61F0000, 0xD65F0000, 0xFFFFFC1F  # br / ret opcode masks
         for fn in ("__primary_switch", "__enable_mmu"):
             fva = symval(fn)
             if fva is None:
@@ -237,17 +282,22 @@ class Arm64(Arm64Common, KernelArch):
             if link_fva is None:
                 continue
             base_pa = (link_fva + sess.offset) & MASK
-            for k in range(48):                    # these idmap routines are short
+            for k in range(48):  # these idmap routines are short
                 w = read_phys_u32((base_pa + 4 * k) & MASK)
                 if w is None:
                     break
-                if (w & MASKI) == RET:             # function end reached, no crossing
+                if (w & MASKI) == RET:  # function end reached, no crossing
                     break
-                if (w & MASKI) == BR:              # br xN -- the primary crossing
-                    return {"pa": (base_pa + 4 * k) & MASK,
-                            "reg": "x%d" % ((w >> 5) & 0x1F), "stepi": False,
-                            "target_link": tl, "land": land, "detect_fallback": True,
-                            "desc": "%s: br -> %s" % (fn, land)}
+                if (w & MASKI) == BR:  # br xN -- the primary crossing
+                    return {
+                        "pa": (base_pa + 4 * k) & MASK,
+                        "reg": "x%d" % ((w >> 5) & 0x1F),
+                        "stepi": False,
+                        "target_link": tl,
+                        "land": land,
+                        "detect_fallback": True,
+                        "desc": "%s: br -> %s" % (fn, land),
+                    }
         return None
 
     def sysreg(self, name):
@@ -258,14 +308,27 @@ class Arm64(Arm64Common, KernelArch):
                 ps = reg("cpsr")
             if ps is not None:
                 return self.PSTATE_DERIVED[n](ps)
-        v = evi("$" + name)              # exposed sysreg (rare) ?
+        v = evi("$" + name)  # exposed sysreg (rare) ?
         if v is not None:
             return v
-        return monitor_reg(name)         # QEMU monitor fallback
+        return monitor_reg(name)  # QEMU monitor fallback
 
-    ctx_sysregs = ("CurrentEL", "SCTLR_EL1", "TTBR0_EL1", "TTBR1_EL1", "TCR_EL1",
-                   "MAIR_EL1", "VBAR_EL1", "SP_EL0", "ELR_EL1", "SPSR_EL1",
-                   "ESR_EL1", "FAR_EL1", "DAIF", "NZCV")
+    ctx_sysregs = (
+        "CurrentEL",
+        "SCTLR_EL1",
+        "TTBR0_EL1",
+        "TTBR1_EL1",
+        "TCR_EL1",
+        "MAIR_EL1",
+        "VBAR_EL1",
+        "SP_EL0",
+        "ELR_EL1",
+        "SPSR_EL1",
+        "ESR_EL1",
+        "FAR_EL1",
+        "DAIF",
+        "NZCV",
+    )
     ctx_inline_sysregs = ("CurrentEL", "SCTLR_EL1", "TTBR0_EL1", "TTBR1_EL1", "DAIF")
 
     def _cur_el(self):
@@ -290,9 +353,11 @@ class Arm64(Arm64Common, KernelArch):
         sctlr = self.sysreg("SCTLR_EL%d" % n)
         mmu = "?" if sctlr is None else ("on" if (sctlr & 1) else "off")
         daif = self.sysreg("DAIF")
-        bits = ["MMU=%s %s" % (mmu, eltxt),
-                "SCTLR_EL%d=%s" % (n, _h(sctlr)),
-                "TTBR0_EL%d=%s" % (n, _h(self.sysreg("TTBR0_EL%d" % n)))]
+        bits = [
+            "MMU=%s %s" % (mmu, eltxt),
+            "SCTLR_EL%d=%s" % (n, _h(sctlr)),
+            "TTBR0_EL%d=%s" % (n, _h(self.sysreg("TTBR0_EL%d" % n))),
+        ]
         if n != 3:
             bits.append("TTBR1_EL%d=%s" % (n, _h(self.sysreg("TTBR1_EL%d" % n))))
         bits.append("PSTATE.DAIF=%s" % (_h(daif) if daif is not None else "?"))
@@ -335,7 +400,7 @@ class Arm64(Arm64Common, KernelArch):
         if gshift is None or not (lo <= tsz <= hi):
             return None
         va_bits, per_level = 64 - tsz, gshift - 3
-        levels = -(-(va_bits - gshift) // per_level)      # ceil division
+        levels = -(-(va_bits - gshift) // per_level)  # ceil division
         return max(1, min(levels, 4))
 
     def _pt_step(self, levels):
@@ -352,11 +417,11 @@ class Arm64(Arm64Common, KernelArch):
         def step(desc):
             seen["level"] += 1
             if not (desc & 1):
-                return None                  # invalid: this entry maps nothing
+                return None  # invalid: this entry maps nothing
             if not (desc & 2):
-                return None                  # block: maps memory, has no next table
+                return None  # block: maps memory, has no next table
             if levels is not None and seen["level"] >= levels:
-                return None                  # last level: bit[1] means page, not table
+                return None  # last level: bit[1] means page, not table
             return desc & ((1 << 48) - 1) & ~0xFFF
 
         return step
@@ -408,8 +473,14 @@ class Arm64(Arm64Common, KernelArch):
         if n == "sctlr":
             m = value & 1
             return "M=%d (MMU %s)  C=%d I=%d A=%d SA=%d WXN=%d" % (
-                m, "on" if m else "off", (value >> 2) & 1, (value >> 12) & 1,
-                (value >> 1) & 1, (value >> 3) & 1, (value >> 19) & 1)
+                m,
+                "on" if m else "off",
+                (value >> 2) & 1,
+                (value >> 12) & 1,
+                (value >> 1) & 1,
+                (value >> 3) & 1,
+                (value >> 19) & 1,
+            )
         if n in ("daif", "nzcv"):
             # sysreg() returns the field already shifted to bits[3:0]; a raw
             # register read leaves DAIF at [9:6] / NZCV at [31:28] -> normalise.
@@ -418,8 +489,9 @@ class Arm64(Arm64Common, KernelArch):
                 v = (v >> 6) & 0xF
             if n == "nzcv" and (v & ~0xF):
                 v = (v >> 28) & 0xF
-            order = ((3, "D"), (2, "A"), (1, "I"), (0, "F")) if n == "daif" \
-                else ((3, "N"), (2, "Z"), (1, "C"), (0, "V"))
+            order = (
+                ((3, "D"), (2, "A"), (1, "I"), (0, "F")) if n == "daif" else ((3, "N"), (2, "Z"), (1, "C"), (0, "V"))
+            )
             letters = [ch if (v >> b) & 1 else ch.lower() for b, ch in order]
             if n == "daif":
                 note = "all masked" if v == 0xF else ("none masked" if v == 0 else "partial")
@@ -427,8 +499,7 @@ class Arm64(Arm64Common, KernelArch):
             return "[%s]" % " ".join(letters)
         if n == "tcr":
             t0, t1 = value & 0x3F, (value >> 16) & 0x3F
-            return "T0SZ=%d (%s)  T1SZ=%d (%s)" % (
-                t0, _txsz_reading("TTBR0", t0), t1, _txsz_reading("TTBR1", t1))
+            return "T0SZ=%d (%s)  T1SZ=%d (%s)" % (t0, _txsz_reading("TTBR0", t0), t1, _txsz_reading("TTBR1", t1))
         return None
 
     # --- page-table walk (4KB granule / up to 4 levels, TCR-driven) -------
@@ -454,7 +525,7 @@ class Arm64(Arm64Common, KernelArch):
         call's behind: an explicit `kpgd <PA>` issued after a successful live
         dump would otherwise decode the named table with the shape of a regime it
         has nothing to do with, and print it as if it had been read."""
-        self._ptcfg_invalid = None             # set below only when TCR was read
+        self._ptcfg_invalid = None  # set below only when TCR was read
         el = self._cur_el()
         if el is None:
             self._ptcfg = {}
@@ -475,7 +546,11 @@ class Arm64(Arm64Common, KernelArch):
             # T1SZ=0 with TTBR1 walks disabled); refuse instead of assuming one.
             self._ptcfg = {}
             self._ptcfg_invalid = "TCR_EL%d %s=%d, TG=%d describe no paging shape" % (
-                el, "T1SZ" if is_ttbr1 else "T0SZ", tsz, tg)
+                el,
+                "T1SZ" if is_ttbr1 else "T0SZ",
+                tsz,
+                tg,
+            )
             return False
         self._ptcfg_invalid = None
         stride = page_shift - 3
@@ -488,12 +563,17 @@ class Arm64(Arm64Common, KernelArch):
         _otsz = (tcr & 0x3F) if is_ttbr1 else ((tcr >> 16) & 0x3F)
         _otg = ((tcr >> 14) & 3) if is_ttbr1 else ((tcr >> 30) & 3)
         _ops = (self._TG0_SHIFT if is_ttbr1 else self._TG1_SHIFT).get(_otg)
-        self._ptcfg = {"page_shift": page_shift, "nlevels": nlevels,
-                       "stride": stride,
-                       "top_shift": page_shift + (nlevels - 1) * stride,
-                       "start": 4 - nlevels, "va_bits": va_bits, "probed": True,
-                       "half": "TTBR1" if is_ttbr1 else "TTBR0",
-                       "halves_differ": (_otsz != tsz or _ops != page_shift)}
+        self._ptcfg = {
+            "page_shift": page_shift,
+            "nlevels": nlevels,
+            "stride": stride,
+            "top_shift": page_shift + (nlevels - 1) * stride,
+            "start": 4 - nlevels,
+            "va_bits": va_bits,
+            "probed": True,
+            "half": "TTBR1" if is_ttbr1 else "TTBR0",
+            "halves_differ": (_otsz != tsz or _ops != page_shift),
+        }
         return True
 
     def _ttbr_base(self, ttbr):
@@ -558,25 +638,23 @@ class Arm64(Arm64Common, KernelArch):
         ttbr = self.sysreg(regname)
         if ttbr is None:
             return None
-        base = self._ttbr_base(ttbr)                      # strip ASID + align
+        base = self._ttbr_base(ttbr)  # strip ASID + align
         if base == 0:
             return None
         if not self.pt_config_probe(is_ttbr1):
             if getattr(self, "_ptcfg_invalid", None):
                 LOG.add("arm64 pt_base: refusing -- " + self._ptcfg_invalid)
-                return None                    # TCR read: this half has no shape
+                return None  # TCR read: this half has no shape
             # TCR unreadable while the MMU is on: decode as 4KB/4-level, recorded as
             # assumed so pt_config_desc() says so.
-            self._ptcfg = {"page_shift": 12, "nlevels": 4, "stride": 9,
-                           "top_shift": 39, "start": 0, "probed": False}
+            self._ptcfg = {"page_shift": 12, "nlevels": 4, "stride": 9, "top_shift": 39, "start": 0, "probed": False}
         return (label, base)
 
     def pt_levels(self):
         c = getattr(self, "_ptcfg", None) or {"nlevels": 4, "start": 0, "page_shift": 12}
         if c["page_shift"] != 12:
             return ["Lvl%d" % i for i in range(c["nlevels"])]
-        return [self._ARM_LVL.get(c["start"] + i, "L%d" % (c["start"] + i))
-                for i in range(c["nlevels"])]
+        return [self._ARM_LVL.get(c["start"] + i, "L%d" % (c["start"] + i)) for i in range(c["nlevels"])]
 
     def pt_index(self, va, level):
         c = self._ptcfg
@@ -590,15 +668,22 @@ class Arm64(Arm64Common, KernelArch):
         apn = {0: "RW-", 1: "RWEL0", 2: "RO-", 3: "ROEL0"}[ap]
         shn = {0: "NSh", 1: "?", 2: "OSh", 3: "ISh"}[sh]
         return "AF=%d %s AttrIdx=%d %s%s%s%s%s" % (
-            af, apn, ai, shn, " PXN" if pxn else "", " UXN" if uxn else "",
-            " nG" if ng else "", " Cont" if con else "")
+            af,
+            apn,
+            ai,
+            shn,
+            " PXN" if pxn else "",
+            " UXN" if uxn else "",
+            " nG" if ng else "",
+            " Cont" if con else "",
+        )
 
     def pt_decode(self, desc, level, shift, nlevels):
         if not (desc & 1):
             return ("invalid", None, None, "")
         table_bit = (desc >> 1) & 1
-        last = (level == nlevels - 1)
-        oa = desc & ((1 << 48) - 1) & ~0xFFF               # bits[47:12]
+        last = level == nlevels - 1
+        oa = desc & ((1 << 48) - 1) & ~0xFFF  # bits[47:12]
         if not last and table_bit:
             return ("table", oa, None, "")
         if last and not table_bit:
@@ -622,7 +707,12 @@ class Arm64(Arm64Common, KernelArch):
         if c.get("half") is not None and c.get("halves_differ"):
             tag += "  [read from the %s half; the other half differs]" % c["half"]
         return "%dKB granule, %d-level (L%d..L3), %d-bit index/level%s" % (
-            1 << (c["page_shift"] - 10), c["nlevels"], c["start"], c["stride"], tag)
+            1 << (c["page_shift"] - 10),
+            c["nlevels"],
+            c["start"],
+            c["stride"],
+            tag,
+        )
 
     # --- mmview support -------------------------------------------------
     def _hi_prefix(self):
@@ -664,8 +754,7 @@ class Arm64(Arm64Common, KernelArch):
         # doing nothing but implying a layout.  Without symbols, the prefix alone
         # says exactly what is needed and claims nothing more.
         hi = symval("_text") or self._hi_prefix()
-        return [("kernel  TTBR1_EL%d" % el, hi, self._hi_prefix()),
-                ("idmap   TTBR0_EL%d" % el, 0, 0)]
+        return [("kernel  TTBR1_EL%d" % el, hi, self._hi_prefix()), ("idmap   TTBR0_EL%d" % el, 0, 0)]
 
     va_landmarks = (
         ("_text", "kernel image start (.head.text)"),
@@ -705,17 +794,58 @@ class Arm64(Arm64Common, KernelArch):
     # rather than from what looks interesting.  Registers outside those three files
     # belong in `kcensus`, which covers the whole call chain.
     entry_sysregs = (
-        "SCTLR_EL1", "SCTLR_EL2", "SCTLR_EL12", "TTBR0_EL1", "TTBR1_EL1",
-        "TCR_EL1", "TCR2_EL1", "MAIR_EL1", "PIR_EL1", "PIRE0_EL1",
-        "VBAR_EL1", "VBAR_EL2", "CurrentEL", "DAIF", "SPSR_EL1", "SPSR_EL2",
-        "ELR_EL1", "ELR_EL2", "ESR_EL1", "FAR_EL1", "SP_EL0", "CONTEXTIDR_EL1",
-        "CPACR_EL1", "CPTR_EL2", "HCR_EL2", "HSTR_EL2", "MDCR_EL2", "MDSCR_EL1",
-        "OSLAR_EL1", "OSLSR_EL1", "OSDLR_EL1", "PMCR_EL0", "MIDR_EL1", "MPIDR_EL1",
-        "VMPIDR_EL2", "VPIDR_EL2", "VTTBR_EL2", "CNTHCTL_EL2", "CNTVOFF_EL2",
-        "TPIDR_EL0", "TPIDRRO_EL0", "TFSRE0_EL1", "DISR_EL1", "ICC_PMR_EL1",
-        "ID_AA64MMFR0_EL1", "ID_AA64MMFR1_EL1", "ID_AA64MMFR2_EL1",
-        "ID_AA64MMFR3_EL1", "ID_AA64PFR0_EL1", "ID_AA64DFR0_EL1",
-        "ICC_SRE_EL2", "ICH_HCR_EL2",
+        "SCTLR_EL1",
+        "SCTLR_EL2",
+        "SCTLR_EL12",
+        "TTBR0_EL1",
+        "TTBR1_EL1",
+        "TCR_EL1",
+        "TCR2_EL1",
+        "MAIR_EL1",
+        "PIR_EL1",
+        "PIRE0_EL1",
+        "VBAR_EL1",
+        "VBAR_EL2",
+        "CurrentEL",
+        "DAIF",
+        "SPSR_EL1",
+        "SPSR_EL2",
+        "ELR_EL1",
+        "ELR_EL2",
+        "ESR_EL1",
+        "FAR_EL1",
+        "SP_EL0",
+        "CONTEXTIDR_EL1",
+        "CPACR_EL1",
+        "CPTR_EL2",
+        "HCR_EL2",
+        "HSTR_EL2",
+        "MDCR_EL2",
+        "MDSCR_EL1",
+        "OSLAR_EL1",
+        "OSLSR_EL1",
+        "OSDLR_EL1",
+        "PMCR_EL0",
+        "MIDR_EL1",
+        "MPIDR_EL1",
+        "VMPIDR_EL2",
+        "VPIDR_EL2",
+        "VTTBR_EL2",
+        "CNTHCTL_EL2",
+        "CNTVOFF_EL2",
+        "TPIDR_EL0",
+        "TPIDRRO_EL0",
+        "TFSRE0_EL1",
+        "DISR_EL1",
+        "ICC_PMR_EL1",
+        "ID_AA64MMFR0_EL1",
+        "ID_AA64MMFR1_EL1",
+        "ID_AA64MMFR2_EL1",
+        "ID_AA64MMFR3_EL1",
+        "ID_AA64PFR0_EL1",
+        "ID_AA64DFR0_EL1",
+        "ICC_SRE_EL2",
+        "ICH_HCR_EL2",
     )
 
     # field -> (name, hi, lo, reading).  `reading` turns the extracted value into
@@ -725,33 +855,55 @@ class Arm64(Arm64Common, KernelArch):
     # be worse than a missing one, because it reads as fact.
     _F_ONOFF = {0: "off", 1: "on"}
     sysreg_fields = {
-        "sctlr_el1": (("M", 0, 0, {0: "MMU off", 1: "MMU on"}),
-                      ("A", 1, 1, {0: "align check off", 1: "align check on"}),
-                      ("C", 2, 2, {0: "D-cache off", 1: "D-cache on"}),
-                      ("SA", 3, 3, {0: "SP align check off", 1: "SP align check on"}),
-                      ("SA0", 4, 4, None),
-                      ("I", 12, 12, {0: "I-cache off", 1: "I-cache on"}),
-                      ("WXN", 19, 19, {0: "W does not imply XN", 1: "W implies XN"}),
-                      ("E0E", 24, 24, {0: "EL0 little-endian", 1: "EL0 big-endian"}),
-                      ("EE", 25, 25, {0: "EL1 little-endian", 1: "EL1 big-endian"})),
-        "sctlr_el2": (("M", 0, 0, {0: "MMU off", 1: "MMU on"}),
-                      ("C", 2, 2, {0: "D-cache off", 1: "D-cache on"}),
-                      ("I", 12, 12, {0: "I-cache off", 1: "I-cache on"}),
-                      ("EE", 25, 25, {0: "little-endian", 1: "big-endian"})),
-        "tcr_el1": (("T0SZ", 5, 0, lambda v: _txsz_reading("TTBR0", v)),
-                    ("EPD0", 7, 7, {0: "TTBR0 walks enabled", 1: "TTBR0 walks disabled"}),
-                    ("IRGN0", 9, 8, None), ("ORGN0", 11, 10, None), ("SH0", 13, 12, None),
-                    ("TG0", 15, 14, {0: "4K", 1: "64K", 2: "16K"}),
-                    ("T1SZ", 21, 16, lambda v: _txsz_reading("TTBR1", v)),
-                    ("A1", 22, 22, {0: "ASID from TTBR0", 1: "ASID from TTBR1"}),
-                    ("EPD1", 23, 23, {0: "TTBR1 walks enabled", 1: "TTBR1 walks disabled"}),
-                    ("IRGN1", 25, 24, None), ("ORGN1", 27, 26, None), ("SH1", 29, 28, None),
-                    ("TG1", 31, 30, {1: "16K", 2: "4K", 3: "64K"}),
-                    ("IPS", 34, 32, {0: "32-bit PA", 1: "36-bit PA", 2: "40-bit PA",
-                                     3: "42-bit PA", 4: "44-bit PA", 5: "48-bit PA",
-                                     6: "52-bit PA"}),
-                    ("AS", 36, 36, {0: "8-bit ASID", 1: "16-bit ASID"}),
-                    ("TBI0", 37, 37, None), ("TBI1", 38, 38, None)),
+        "sctlr_el1": (
+            ("M", 0, 0, {0: "MMU off", 1: "MMU on"}),
+            ("A", 1, 1, {0: "align check off", 1: "align check on"}),
+            ("C", 2, 2, {0: "D-cache off", 1: "D-cache on"}),
+            ("SA", 3, 3, {0: "SP align check off", 1: "SP align check on"}),
+            ("SA0", 4, 4, None),
+            ("I", 12, 12, {0: "I-cache off", 1: "I-cache on"}),
+            ("WXN", 19, 19, {0: "W does not imply XN", 1: "W implies XN"}),
+            ("E0E", 24, 24, {0: "EL0 little-endian", 1: "EL0 big-endian"}),
+            ("EE", 25, 25, {0: "EL1 little-endian", 1: "EL1 big-endian"}),
+        ),
+        "sctlr_el2": (
+            ("M", 0, 0, {0: "MMU off", 1: "MMU on"}),
+            ("C", 2, 2, {0: "D-cache off", 1: "D-cache on"}),
+            ("I", 12, 12, {0: "I-cache off", 1: "I-cache on"}),
+            ("EE", 25, 25, {0: "little-endian", 1: "big-endian"}),
+        ),
+        "tcr_el1": (
+            ("T0SZ", 5, 0, lambda v: _txsz_reading("TTBR0", v)),
+            ("EPD0", 7, 7, {0: "TTBR0 walks enabled", 1: "TTBR0 walks disabled"}),
+            ("IRGN0", 9, 8, None),
+            ("ORGN0", 11, 10, None),
+            ("SH0", 13, 12, None),
+            ("TG0", 15, 14, {0: "4K", 1: "64K", 2: "16K"}),
+            ("T1SZ", 21, 16, lambda v: _txsz_reading("TTBR1", v)),
+            ("A1", 22, 22, {0: "ASID from TTBR0", 1: "ASID from TTBR1"}),
+            ("EPD1", 23, 23, {0: "TTBR1 walks enabled", 1: "TTBR1 walks disabled"}),
+            ("IRGN1", 25, 24, None),
+            ("ORGN1", 27, 26, None),
+            ("SH1", 29, 28, None),
+            ("TG1", 31, 30, {1: "16K", 2: "4K", 3: "64K"}),
+            (
+                "IPS",
+                34,
+                32,
+                {
+                    0: "32-bit PA",
+                    1: "36-bit PA",
+                    2: "40-bit PA",
+                    3: "42-bit PA",
+                    4: "44-bit PA",
+                    5: "48-bit PA",
+                    6: "52-bit PA",
+                },
+            ),
+            ("AS", 36, 36, {0: "8-bit ASID", 1: "16-bit ASID"}),
+            ("TBI0", 37, 37, None),
+            ("TBI1", 38, 38, None),
+        ),
         # BADDR is bits[47:1], so extracting it yields HALF the table address -- a
         # number that looks like an address and is not one.  The table base is
         # already shown, and walked, by the sysreg renderer; only the fields that
@@ -759,69 +911,121 @@ class Arm64(Arm64Common, KernelArch):
         "ttbr0_el1": (("CnP", 0, 0, None), ("ASID", 63, 48, None)),
         "ttbr1_el1": (("CnP", 0, 0, None), ("ASID", 63, 48, None)),
         "vttbr_el2": (("VMID", 63, 48, None),),
-        "hcr_el2": (("VM", 0, 0, {0: "stage-2 off", 1: "stage-2 on"}),
-                    ("FMO", 3, 3, None), ("IMO", 4, 4, None), ("AMO", 5, 5, None),
-                    ("TGE", 27, 27, {0: "guest entries to EL1", 1: "all entries to EL2"}),
-                    ("RW", 31, 31, {0: "EL1 is AArch32", 1: "EL1 is AArch64"}),
-                    ("E2H", 34, 34, {0: "non-VHE", 1: "VHE"})),
-        "cpacr_el1": (("ZEN", 17, 16, {0: "SVE trapped", 1: "SVE EL1 only",
-                                       3: "SVE EL0+EL1"}),
-                      ("FPEN", 21, 20, {0: "FP trapped", 1: "FP EL1 only",
-                                        3: "FP EL0+EL1"}),
-                      ("SMEN", 25, 24, {0: "SME trapped", 1: "SME EL1 only",
-                                        3: "SME EL0+EL1"})),
-        "cptr_el2": (("TZ", 8, 8, None), ("TFP", 10, 10, None), ("TTA", 20, 20, None),
-                     ("TCPAC", 31, 31, None)),
-        "esr_el1": (("ISS", 24, 0, None), ("IL", 25, 25, {0: "16-bit insn", 1: "32-bit insn"}),
-                    ("EC", 31, 26, _ESR_EC)),
-        "mdscr_el1": (("SS", 0, 0, {0: "software step off", 1: "software step on"}),
-                      ("KDE", 13, 13, None), ("MDE", 15, 15, None), ("TDA", 21, 21, None)),
+        "hcr_el2": (
+            ("VM", 0, 0, {0: "stage-2 off", 1: "stage-2 on"}),
+            ("FMO", 3, 3, None),
+            ("IMO", 4, 4, None),
+            ("AMO", 5, 5, None),
+            ("TGE", 27, 27, {0: "guest entries to EL1", 1: "all entries to EL2"}),
+            ("RW", 31, 31, {0: "EL1 is AArch32", 1: "EL1 is AArch64"}),
+            ("E2H", 34, 34, {0: "non-VHE", 1: "VHE"}),
+        ),
+        "cpacr_el1": (
+            ("ZEN", 17, 16, {0: "SVE trapped", 1: "SVE EL1 only", 3: "SVE EL0+EL1"}),
+            ("FPEN", 21, 20, {0: "FP trapped", 1: "FP EL1 only", 3: "FP EL0+EL1"}),
+            ("SMEN", 25, 24, {0: "SME trapped", 1: "SME EL1 only", 3: "SME EL0+EL1"}),
+        ),
+        "cptr_el2": (("TZ", 8, 8, None), ("TFP", 10, 10, None), ("TTA", 20, 20, None), ("TCPAC", 31, 31, None)),
+        "esr_el1": (
+            ("ISS", 24, 0, None),
+            ("IL", 25, 25, {0: "16-bit insn", 1: "32-bit insn"}),
+            ("EC", 31, 26, _ESR_EC),
+        ),
+        "mdscr_el1": (
+            ("SS", 0, 0, {0: "software step off", 1: "software step on"}),
+            ("KDE", 13, 13, None),
+            ("MDE", 15, 15, None),
+            ("TDA", 21, 21, None),
+        ),
         "oslsr_el1": (("OSLK", 1, 1, {0: "OS lock unlocked", 1: "OS lock locked"}),),
-        "pmcr_el0": (("E", 0, 0, _F_ONOFF), ("P", 1, 1, None), ("C", 2, 2, None),
-                     ("D", 3, 3, None), ("X", 4, 4, None), ("DP", 5, 5, None),
-                     ("LC", 6, 6, None), ("N", 15, 11, lambda v: "%d counters" % v)),
-        "midr_el1": (("Revision", 3, 0, None), ("PartNum", 15, 4, None),
-                     ("Architecture", 19, 16, None), ("Variant", 23, 20, None),
-                     ("Implementer", 31, 24, {0x41: "ARM", 0x51: "Qualcomm",
-                                              0x4E: "NVIDIA", 0x43: "Cavium",
-                                              0x00: "reserved/emulated"})),
-        "mpidr_el1": (("Aff0", 7, 0, None), ("Aff1", 15, 8, None), ("Aff2", 23, 16, None),
-                      ("MT", 24, 24, None), ("U", 30, 30, {0: "multiprocessor", 1: "uniprocessor"}),
-                      ("Aff3", 39, 32, None)),
-        "id_aa64mmfr0_el1": (("PARange", 3, 0, {0: "32-bit PA", 1: "36-bit PA",
-                                                2: "40-bit PA", 3: "42-bit PA",
-                                                4: "44-bit PA", 5: "48-bit PA",
-                                                6: "52-bit PA"}),
-                             ("ASIDBits", 7, 4, {0: "8-bit ASID", 2: "16-bit ASID"}),
-                             ("BigEnd", 11, 8, None),
-                             ("TGran16", 23, 20, {0: "16K unsupported", 1: "16K supported"}),
-                             ("TGran64", 27, 24, {0: "64K supported", 15: "64K unsupported"}),
-                             ("TGran4", 31, 28, {0: "4K supported", 15: "4K unsupported"})),
-        "id_aa64pfr0_el1": (("EL0", 3, 0, None), ("EL1", 7, 4, None), ("EL2", 11, 8, None),
-                            ("EL3", 15, 12, None),
-                            ("FP", 19, 16, {0: "FP present", 15: "no FP"}),
-                            ("AdvSIMD", 23, 20, {0: "SIMD present", 15: "no SIMD"}),
-                            ("GIC", 27, 24, {0: "no sysreg GIC CPU IF", 1: "GICv3 sysreg CPU IF"})),
-        "icc_sre_el2": (("SRE", 0, 0, {0: "memory-mapped GIC", 1: "sysreg GIC"}),
-                        ("DFB", 1, 1, None), ("DIB", 2, 2, None),
-                        ("Enable", 3, 3, {0: "EL1 SRE trapped", 1: "EL1 SRE allowed"})),
+        "pmcr_el0": (
+            ("E", 0, 0, _F_ONOFF),
+            ("P", 1, 1, None),
+            ("C", 2, 2, None),
+            ("D", 3, 3, None),
+            ("X", 4, 4, None),
+            ("DP", 5, 5, None),
+            ("LC", 6, 6, None),
+            ("N", 15, 11, lambda v: "%d counters" % v),
+        ),
+        "midr_el1": (
+            ("Revision", 3, 0, None),
+            ("PartNum", 15, 4, None),
+            ("Architecture", 19, 16, None),
+            ("Variant", 23, 20, None),
+            (
+                "Implementer",
+                31,
+                24,
+                {0x41: "ARM", 0x51: "Qualcomm", 0x4E: "NVIDIA", 0x43: "Cavium", 0x00: "reserved/emulated"},
+            ),
+        ),
+        "mpidr_el1": (
+            ("Aff0", 7, 0, None),
+            ("Aff1", 15, 8, None),
+            ("Aff2", 23, 16, None),
+            ("MT", 24, 24, None),
+            ("U", 30, 30, {0: "multiprocessor", 1: "uniprocessor"}),
+            ("Aff3", 39, 32, None),
+        ),
+        "id_aa64mmfr0_el1": (
+            (
+                "PARange",
+                3,
+                0,
+                {
+                    0: "32-bit PA",
+                    1: "36-bit PA",
+                    2: "40-bit PA",
+                    3: "42-bit PA",
+                    4: "44-bit PA",
+                    5: "48-bit PA",
+                    6: "52-bit PA",
+                },
+            ),
+            ("ASIDBits", 7, 4, {0: "8-bit ASID", 2: "16-bit ASID"}),
+            ("BigEnd", 11, 8, None),
+            ("TGran16", 23, 20, {0: "16K unsupported", 1: "16K supported"}),
+            ("TGran64", 27, 24, {0: "64K supported", 15: "64K unsupported"}),
+            ("TGran4", 31, 28, {0: "4K supported", 15: "4K unsupported"}),
+        ),
+        "id_aa64pfr0_el1": (
+            ("EL0", 3, 0, None),
+            ("EL1", 7, 4, None),
+            ("EL2", 11, 8, None),
+            ("EL3", 15, 12, None),
+            ("FP", 19, 16, {0: "FP present", 15: "no FP"}),
+            ("AdvSIMD", 23, 20, {0: "SIMD present", 15: "no SIMD"}),
+            ("GIC", 27, 24, {0: "no sysreg GIC CPU IF", 1: "GICv3 sysreg CPU IF"}),
+        ),
+        "icc_sre_el2": (
+            ("SRE", 0, 0, {0: "memory-mapped GIC", 1: "sysreg GIC"}),
+            ("DFB", 1, 1, None),
+            ("DIB", 2, 2, None),
+            ("Enable", 3, 3, {0: "EL1 SRE trapped", 1: "EL1 SRE allowed"}),
+        ),
         "cnthctl_el2": (("EL1PCTEN", 0, 0, None), ("EL1PCEN", 1, 1, None)),
         "currentel": (("EL", 3, 2, lambda v: "EL%d" % v),),
-        "mair_el1": tuple(("Attr%d" % i, i * 8 + 7, i * 8, _MAIR_ATTR)
-                          for i in range(8)),
+        "mair_el1": tuple(("Attr%d" % i, i * 8 + 7, i * 8, _MAIR_ATTR) for i in range(8)),
     }
     flags_reg = "pstate"
-    _PSTATE_FIELDS = (("SP", 0, 0, {0: "SP_EL0", 1: "SP_ELx"}),
-                     ("EL", 3, 2, lambda v: "EL%d" % v),
-                     ("nRW", 4, 4, {0: "AArch64", 1: "AArch32"}),
-                     ("F", 6, 6, {0: "FIQ unmasked", 1: "FIQ masked"}),
-                     ("I", 7, 7, {0: "IRQ unmasked", 1: "IRQ masked"}),
-                     ("A", 8, 8, {0: "SError unmasked", 1: "SError masked"}),
-                     ("D", 9, 9, {0: "debug unmasked", 1: "debug masked"}),
-                     ("IL", 20, 20, None), ("SS", 21, 21, None),
-                     ("PAN", 22, 22, None), ("UAO", 23, 23, None),
-                     ("V", 28, 28, None), ("C", 29, 29, None),
-                     ("Z", 30, 30, None), ("N", 31, 31, None))
+    _PSTATE_FIELDS = (
+        ("SP", 0, 0, {0: "SP_EL0", 1: "SP_ELx"}),
+        ("EL", 3, 2, lambda v: "EL%d" % v),
+        ("nRW", 4, 4, {0: "AArch64", 1: "AArch32"}),
+        ("F", 6, 6, {0: "FIQ unmasked", 1: "FIQ masked"}),
+        ("I", 7, 7, {0: "IRQ unmasked", 1: "IRQ masked"}),
+        ("A", 8, 8, {0: "SError unmasked", 1: "SError masked"}),
+        ("D", 9, 9, {0: "debug unmasked", 1: "debug masked"}),
+        ("IL", 20, 20, None),
+        ("SS", 21, 21, None),
+        ("PAN", 22, 22, None),
+        ("UAO", 23, 23, None),
+        ("V", 28, 28, None),
+        ("C", 29, 29, None),
+        ("Z", 30, 30, None),
+        ("N", 31, 31, None),
+    )
 
     # PSTATE is not named by any msr/mrs -- the asm writes DAIF and NZCV, which are
     # fields inside it -- so it is declared as the flags register and registered
@@ -832,7 +1036,6 @@ class Arm64(Arm64Common, KernelArch):
     # PSTATE is not a register the code msr's as a whole, but every DAIF/NZCV bit the
     # asm sets lives in it, and reading a bit without its owner is how a panel lies by
     # omission.  Rendered as one value with its fields under it, like the rest.
-
 
     # --- early-boot register census (union of 4.6 + 6.12 head.S call chain) ---
     census = (

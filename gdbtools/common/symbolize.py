@@ -1,4 +1,5 @@
 """Address -> symbol, without assuming the target is a kernel."""
+
 from .runtime import MASK, safe, execstr
 from . import state
 

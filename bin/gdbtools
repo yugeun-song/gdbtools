@@ -14,13 +14,16 @@ else
     B="" D="" R="" G="" Y="" C="" N=""
 fi
 case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
-    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) OKM="✓" NOM="✗" ;;
+    *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) OKM="✓" NOM="✗" ;;
     *) OKM="+" NOM="x" ;;
 esac
-ok()   { printf '  %s%s%s %s\n' "$G" "$OKM" "$N" "$*"; }
-bad()  { printf '  %s%s%s %s\n' "$R" "$NOM" "$N" "$*"; }
-opt()  { printf '  %s-%s %s\n' "$D" "$N" "$*"; }
-die()  { printf '%sgdbtools:%s %s\n' "$R$B" "$N" "$*" >&2; exit 1; }
+ok() { printf '  %s%s%s %s\n' "$G" "$OKM" "$N" "$*"; }
+bad() { printf '  %s%s%s %s\n' "$R" "$NOM" "$N" "$*"; }
+opt() { printf '  %s-%s %s\n' "$D" "$N" "$*"; }
+die() {
+    printf '%sgdbtools:%s %s\n' "$R$B" "$N" "$*" >&2
+    exit 1
+}
 
 # Every command once: NAME|ARGS|WHAT IT DOES, and its options as
 # COMMAND|OPTION|WHAT IT DOES.  usage, `COMMAND --help` and the shell completions
@@ -39,19 +42,20 @@ OPTS=(
     "install|--global|also write the loader line into the gdb init file gdb reads, so every gdb loads gdbtools"
 )
 
-_wrap() {   # _wrap COLUMN TEXT: TEXT from the cursor, wrapped at 80 with COLUMN of indent
+_wrap() { # _wrap COLUMN TEXT: TEXT from the cursor, wrapped at 80 with COLUMN of indent
     local col="$1" line="" w
     for w in $2; do
-        if [[ -n "$line" && $(( col + ${#line} + 1 + ${#w} )) -gt 80 ]]; then
-            printf '%s\n%*s' "$line" "$col" ""; line="$w"
+        if [[ -n "$line" && $((col + ${#line} + 1 + ${#w})) -gt 80 ]]; then
+            printf '%s\n%*s' "$line" "$col" ""
+            line="$w"
         else line="${line:+$line }$w"; fi
     done
     printf '%s\n' "$line"
 }
-_row() {   # _row LABEL PLAIN-WIDTH TEXT [COLUMN]: LABEL, padded to COLUMN (32), then TEXT
+_row() { # _row LABEL PLAIN-WIDTH TEXT [COLUMN]: LABEL, padded to COLUMN (32), then TEXT
     local col="${4:-32}"
     printf '  %s' "$1"
-    if (( $2 > col - 4 )); then printf '\n%*s' "$col" ""; else printf '%*s' $((col - 2 - $2)) ""; fi
+    if (($2 > col - 4)); then printf '\n%*s' "$col" ""; else printf '%*s' $((col - 2 - $2)) ""; fi
     _wrap "$col" "$3"
 }
 
@@ -60,7 +64,7 @@ usage() {
     printf '%sgdbtools%s -- gdb extensions for control flow, symbols and early-boot Linux kernels\n\n' "$B" "$N"
     for r in "${CMDS[@]}"; do
         IFS='|' read -r n a w <<<"$r"
-        _row "${C}gdbtools $n${N}${a:+ $a}" $(( 9 + ${#n} + ${a:+1} + ${#a} )) "$w"
+        _row "${C}gdbtools $n${N}${a:+ $a}" $((9 + ${#n} + ${a:+1} + ${#a})) "$w"
     done
     printf '\nInside gdb: `kearly config` and `kearly set KEY VALUE` change the same settings.\n'
     printf '`gdbtools COMMAND --help` shows one command; Tab completes them once install.sh\n'
@@ -69,7 +73,10 @@ usage() {
 
 cmd_help() {
     local r n a w found=0
-    [[ $# -gt 0 ]] || { usage; return 0; }
+    [[ $# -gt 0 ]] || {
+        usage
+        return 0
+    }
     for r in "${CMDS[@]}"; do
         IFS='|' read -r n a w <<<"$r"
         [[ "$n" == "$1" ]] || continue
@@ -77,13 +84,13 @@ cmd_help() {
         printf '%sgdbtools %s%s%s\n  ' "$B" "$n" "$N" "${a:+ $a}"
         _wrap 2 "$w"
     done
-    (( found )) || die "no command '$1' (gdbtools help lists them)"
+    ((found)) || die "no command '$1' (gdbtools help lists them)"
     local first=1
     for r in "${OPTS[@]}"; do
         IFS='|' read -r n a w <<<"$r"
         [[ "$n" == "$1" ]] || continue
-        (( first )) && printf '\n' && first=0
-        _row "$a" ${#a} "$w" $(( ${#a} + 6 ))
+        ((first)) && printf '\n' && first=0
+        _row "$a" ${#a} "$w" $((${#a} + 6))
     done
 }
 
@@ -95,11 +102,26 @@ _family() {
     fi
     for w in $id $like; do
         case "$w" in
-            arch|manjaro|endeavouros|cachyos) echo "pacman -S gdb"; return ;;
-            debian|ubuntu|linuxmint|pop) echo "apt install gdb-multiarch"; return ;;
-            fedora|rhel|centos|rocky|almalinux) echo "dnf install gdb"; return ;;
-            void) echo "xbps-install gdb-multiarch"; return ;;
-            suse|opensuse|opensuse-leap|opensuse-tumbleweed|sles) echo "zypper install gdb"; return ;;
+            arch | manjaro | endeavouros | cachyos)
+                echo "pacman -S gdb"
+                return
+                ;;
+            debian | ubuntu | linuxmint | pop)
+                echo "apt install gdb-multiarch"
+                return
+                ;;
+            fedora | rhel | centos | rocky | almalinux)
+                echo "dnf install gdb"
+                return
+                ;;
+            void)
+                echo "xbps-install gdb-multiarch"
+                return
+                ;;
+            suse | opensuse | opensuse-leap | opensuse-tumbleweed | sles)
+                echo "zypper install gdb"
+                return
+                ;;
         esac
     done
 }
@@ -112,15 +134,17 @@ cmd_doctor() {
         v="$("$gdb" --version 2>/dev/null | head -1)"
         ok "${v:-$gdb}"
         if v="$("$gdb" -nx -batch -ex 'python import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" \
-           && [[ -n "$v" ]]; then
+            && [[ -n "$v" ]]; then
             ok "Python $v inside $gdb"
         else
-            bad "$gdb has no working Python; gdbtools needs it"; rc=1
+            bad "$gdb has no working Python; gdbtools needs it"
+            rc=1
         fi
         if "$gdb" -q -nx -batch -ex "source $LOADER" -ex 'help cmdinfo' >/dev/null 2>&1; then
             ok "the package loads"
         else
-            bad "$gdb -nx -batch -ex 'source $LOADER' fails"; rc=1
+            bad "$gdb -nx -batch -ex 'source $LOADER' fails"
+            rc=1
         fi
         if "$gdb" -q -batch -ex 'python print("pwndbg" in __import__("sys").modules)' 2>/dev/null | grep -qx True; then
             ok "pwndbg is loaded by your gdb init file"
@@ -128,16 +152,24 @@ cmd_doctor() {
             opt "pwndbg is not loaded (optional: the context panels need it)"
         fi
     else
-        local h; h="$(_family)"
-        bad "$gdb is not installed${h:+ -- install: $h}"; rc=1
+        local h
+        h="$(_family)"
+        bad "$gdb is not installed${h:+ -- install: $h}"
+        rc=1
     fi
     if [[ -r "$CONF/root" ]]; then
-        if [[ "$(<"$CONF/root")" == "$ROOT" ]]; then ok "recorded for kbuildlab and nvim ($CONF/root)"
-        else bad "$CONF/root names $(<"$CONF/root"), not this checkout -- gdbtools install"; rc=1; fi
+        if [[ "$(<"$CONF/root")" == "$ROOT" ]]; then
+            ok "recorded for kbuildlab and nvim ($CONF/root)"
+        else
+            bad "$CONF/root names $(<"$CONF/root"), not this checkout -- gdbtools install"
+            rc=1
+        fi
     else
-        bad "not recorded -- gdbtools install"; rc=1
+        bad "not recorded -- gdbtools install"
+        rc=1
     fi
-    if command -v gdbtools >/dev/null 2>&1; then ok "on PATH as $(command -v gdbtools)"
+    if command -v gdbtools >/dev/null 2>&1; then
+        ok "on PATH as $(command -v gdbtools)"
     else opt "not on PATH (./install.sh puts it there)"; fi
     return $rc
 }
@@ -158,13 +190,19 @@ EOF
 }
 
 # Completion lines are TAG<TAB>VALUE<TAB>DESCRIPTION, or @gdb: complete as gdb.
-_complete() {   # _complete WORD...: the words after `gdbtools`, the last being completed
+_complete() { # _complete WORD...: the words after `gdbtools`, the last being completed
     local r n a w used
-    if [[ $# -le 1 || ( "$1" == help && $# -eq 2 ) ]]; then
-        for r in "${CMDS[@]}"; do IFS='|' read -r n a w <<<"$r"; printf 'command\t%s\t%s\n' "$n" "$w"; done
+    if [[ $# -le 1 || ("$1" == help && $# -eq 2) ]]; then
+        for r in "${CMDS[@]}"; do
+            IFS='|' read -r n a w <<<"$r"
+            printf 'command\t%s\t%s\n' "$n" "$w"
+        done
         return 0
     fi
-    [[ "$1" == gdb ]] && { printf '@gdb\n'; return 0; }
+    [[ "$1" == gdb ]] && {
+        printf '@gdb\n'
+        return 0
+    }
     used=" ${*:2:$#-2} "
     for r in "${OPTS[@]}"; do
         IFS='|' read -r n a w <<<"$r"
@@ -173,22 +211,29 @@ _complete() {   # _complete WORD...: the words after `gdbtools`, the last being 
     return 0
 }
 
-sub="${1:-help}"; shift || true
+sub="${1:-help}"
+shift || true
 # -h or --help after any command but gdb (whose arguments are gdb's) asks for it.
 case "$sub" in
-    gdb|help|-h|--help|__complete) ;;
-    *) for a in "$@"; do [[ "$a" == -h || "$a" == --help ]] && { cmd_help "$sub"; exit; }; done ;;
+    gdb | help | -h | --help | __complete) ;;
+    *) for a in "$@"; do [[ "$a" == -h || "$a" == --help ]] && {
+        cmd_help "$sub"
+        exit
+    }; done ;;
 esac
 case "$sub" in
-    gdb)       exec "${GDB:-gdb}" -ex "source $LOADER" "$@" ;;
-    path)      printf '%s\n' "$LOADER" ;;
-    config)    cmd_config ;;
-    doctor)    cmd_doctor ;;
-    install)   exec "$ROOT/setup.sh" "$@" ;;
+    gdb) exec "${GDB:-gdb}" -ex "source $LOADER" "$@" ;;
+    path) printf '%s\n' "$LOADER" ;;
+    config) cmd_config ;;
+    doctor) cmd_doctor ;;
+    install) exec "$ROOT/setup.sh" "$@" ;;
     uninstall) exec "$ROOT/setup.sh" --uninstall ;;
-    version)   git -C "$ROOT" describe --tags --always --dirty 2>/dev/null \
-                   || sed -n 's/^__version__ = "\(.*\)"/\1/p' "$ROOT/gdbtools/__init__.py" ;;
-    help|-h|--help) cmd_help "$@" ;;
+    version) git -C "$ROOT" describe --tags --always --dirty 2>/dev/null \
+        || sed -n 's/^__version__ = "\(.*\)"/\1/p' "$ROOT/gdbtools/__init__.py" ;;
+    help | -h | --help) cmd_help "$@" ;;
     __complete) _complete "$@" ;;
-    *) usage >&2; die "unknown command '$sub'" ;;
+    *)
+        usage >&2
+        die "unknown command '$sub'"
+        ;;
 esac

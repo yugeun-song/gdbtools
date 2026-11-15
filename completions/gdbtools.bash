@@ -15,9 +15,14 @@ _gdbtools() {
     while IFS= read -r line; do
         tag=${line%%$'\t'*} rest=${line#*$'\t'}
         if [[ $tag == @gdb ]]; then
-            if declare -F _comp_command_offset >/dev/null 2>&1; then _comp_command_offset 1
-            elif declare -F _command_offset >/dev/null 2>&1; then _command_offset 1
-            else COMPREPLY=($(compgen -f -- "$cur")); compopt -o filenames 2>/dev/null; fi
+            if declare -F _comp_command_offset >/dev/null 2>&1; then
+                _comp_command_offset 1
+            elif declare -F _command_offset >/dev/null 2>&1; then
+                _command_offset 1
+            else
+                COMPREPLY=($(compgen -f -- "$cur"))
+                compopt -o filenames 2>/dev/null
+            fi
             return 0
         fi
         [[ -n $tag ]] && cands+=("${rest%%$'\t'*}")

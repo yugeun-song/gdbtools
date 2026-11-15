@@ -4,6 +4,7 @@ Target-independent: reads types only, no inferior memory and no running target,
 so it answers the same for a user program, a kernel, any arch, or a remote, and
 cannot crash a session or affect anything else.
 """
+
 import gdb
 
 from .runtime import *
@@ -70,13 +71,13 @@ def _mask_for(t):
 class EnumVals(gdb.Command):
     """enumvals [/x|/d] ENUM : list every value of a C/C++ enum type.
 
-Values are read from this build's debug info, config-dependent enumerators
-included. Base defaults to decimal; `/x` prints hex. ENUM may carry the `enum `
-keyword or be a typedef of an enum. Works for a user program, a kernel, any
-arch and a remote target; no running inferior required.
+    Values are read from this build's debug info, config-dependent enumerators
+    included. Base defaults to decimal; `/x` prints hex. ENUM may carry the `enum `
+    keyword or be a typedef of an enum. Works for a user program, a kernel, any
+    arch and a remote target; no running inferior required.
 
-    enumvals state
-    enumvals /x pud_flags"""
+        enumvals state
+        enumvals /x pud_flags"""
 
     def __init__(self, name="enumvals"):
         super(EnumVals, self).__init__(name, gdb.COMMAND_DATA)

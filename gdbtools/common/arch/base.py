@@ -5,6 +5,7 @@ branches, how gdb spells them, and where a direct branch points.  Everything
 that needs a phys<->virt map, page tables or system registers lives in
 `gdbtools.linux_kernel.arch`.
 """
+
 import re
 
 from ..runtime import MASK
@@ -12,16 +13,16 @@ from ..runtime import MASK
 
 class ArchCommon:
     key = "base"
-    aliases = ()                 # substrings matched against gdb arch name
-    entry_symbol = None          # symbol whose PA == $pc at the first frozen stop
-    entry_break_kind = "hw"      # "sw": entry not overwritten -> sw bp ok (no hw-bp
-                                 # dependency); "hw": entry gets relocated/decompressed
-                                 # over, so a sw bp there would be clobbered
-    entry_magic = None           # (word, offset_from_text): scan RAM for the Image
-    dtb_pointer_reg = None       # reg holding the DTB PA at entry (arm64 x0/riscv a1)
-    return_reg = None            # reg holding a just-called fn's return addr (lr/ra)
-    post_mmu_symbols = ()        # virtual landing(s) reached just after the MMU is
-                                 # enabled; `kearly overmmu` breaks here + continues
+    aliases = ()  # substrings matched against gdb arch name
+    entry_symbol = None  # symbol whose PA == $pc at the first frozen stop
+    entry_break_kind = "hw"  # "sw": entry not overwritten -> sw bp ok (no hw-bp
+    # dependency); "hw": entry gets relocated/decompressed
+    # over, so a sw bp there would be clobbered
+    entry_magic = None  # (word, offset_from_text): scan RAM for the Image
+    dtb_pointer_reg = None  # reg holding the DTB PA at entry (arm64 x0/riscv a1)
+    return_reg = None  # reg holding a just-called fn's return addr (lr/ra)
+    post_mmu_symbols = ()  # virtual landing(s) reached just after the MMU is
+    # enabled; `kearly overmmu` breaks here + continues
 
     @classmethod
     def matches(cls, archname):

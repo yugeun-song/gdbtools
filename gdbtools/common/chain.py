@@ -4,6 +4,7 @@ Target-independent: it follows ordinary pointers through whatever memory gdb can
 read.  The physical mode (`phys=True`) is only reachable when the kernel side is
 loaded, and degrades to nothing when it is not.
 """
+
 import gdb
 
 from .runtime import *
@@ -46,7 +47,7 @@ def safe_chain(addr, phys=False, hops=None, step=None):
         return None
     if hops is None:
         hops = getattr(state.session(), "chain_hops", 6)
-    hops = max(1, min(int(hops), 256))          # hard clamp: always finite
+    hops = max(1, min(int(hops), 256))  # hard clamp: always finite
     if phys:
         rd = _read_phys_u64
         nxtf = step or (lambda v: v & ((1 << 48) - 1) & ~0xFFF)
@@ -80,9 +81,9 @@ def safe_chain(addr, phys=False, hops=None, step=None):
 
 class Chain(gdb.Command):
     """chain [ADDR] [N] : telescope N machine words starting at ADDR (default $sp),
-following each pointer and naming what it lands on.  Bounded and cycle-guarded,
-so it is safe on a value that is not really a pointer chain.  With a kernel
-session loaded the physical/virtual side of each hop is reported too."""
+    following each pointer and naming what it lands on.  Bounded and cycle-guarded,
+    so it is safe on a value that is not really a pointer chain.  With a kernel
+    session loaded the physical/virtual side of each hop is reported too."""
 
     def __init__(self, name="chain"):
         super(Chain, self).__init__(name, gdb.COMMAND_USER)

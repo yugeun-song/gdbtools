@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import bisect
 import json
 import os
@@ -60,13 +61,14 @@ def _read_symtab(fh):
     def shdr(i):
         fh.seek(shoff + i * shentsize)
         return _SHDR64.unpack(fh.read(_SHDR64.size))
-    if shnum == 0:                          # extended numbering: count in section 0
+
+    if shnum == 0:  # extended numbering: count in section 0
         shnum = shdr(0)[5]
     for i in range(shnum):
         sh = shdr(i)
         if sh[1] != _SHT_SYMTAB:
             continue
-        st = shdr(sh[6])                    # sh_link names the string table
+        st = shdr(sh[6])  # sh_link names the string table
         fh.seek(sh[4])
         raw = fh.read(sh[5])
         fh.seek(st[4])
@@ -151,8 +153,7 @@ def _code_end(addr, hi):
 
 def _arch_obj():
     """The gdb Architecture to disassemble with, without requiring a frame."""
-    for get in (lambda: gdb.selected_frame().architecture(),
-                lambda: gdb.selected_inferior().architecture()):
+    for get in (lambda: gdb.selected_frame().architecture(), lambda: gdb.selected_inferior().architecture()):
         try:
             a = get()
             if a is not None:
@@ -243,7 +244,7 @@ def _disassemble_bounds(addr, arch_obj):
     try:
         size = int(arch_obj.disassemble(last)[0]["length"])
     except Exception:
-        size = 1                          # still covers the last row and nothing past it
+        size = 1  # still covers the last row and nothing past it
     return rows[0][0], last + max(size, 1)
 
 
@@ -313,24 +314,50 @@ def _line_of(addr):
 # A call is not a terminator: it returns, so the block continues through it.
 _TERMS = {
     "Arm64": {
-        "ret": ("ret",), "retaa": ("ret",), "retab": ("ret",),
-        "eret": ("eret",), "eretaa": ("eret",), "eretab": ("eret",),
-        "br": ("indirect",), "braa": ("indirect",), "brab": ("indirect",),
-        "braaz": ("indirect",), "brabz": ("indirect",),
-        "svc": ("trap",), "hvc": ("trap",), "smc": ("trap",),
-        "brk": ("trap",), "hlt": ("trap",), "udf": ("undef",),
+        "ret": ("ret",),
+        "retaa": ("ret",),
+        "retab": ("ret",),
+        "eret": ("eret",),
+        "eretaa": ("eret",),
+        "eretab": ("eret",),
+        "br": ("indirect",),
+        "braa": ("indirect",),
+        "brab": ("indirect",),
+        "braaz": ("indirect",),
+        "brabz": ("indirect",),
+        "svc": ("trap",),
+        "hvc": ("trap",),
+        "smc": ("trap",),
+        "brk": ("trap",),
+        "hlt": ("trap",),
+        "udf": ("undef",),
     },
     "X86_64": {
-        "ret": ("ret",), "retq": ("ret",),
-        "iret": ("eret",), "iretq": ("eret",), "sysret": ("eret",),
-        "sysretq": ("eret",), "sysexit": ("eret",),
-        "syscall": ("trap",), "sysenter": ("trap",), "int3": ("trap",),
-        "int": ("trap",), "ud0": ("undef",), "ud1": ("undef",), "ud2": ("undef",),
+        "ret": ("ret",),
+        "retq": ("ret",),
+        "iret": ("eret",),
+        "iretq": ("eret",),
+        "sysret": ("eret",),
+        "sysretq": ("eret",),
+        "sysexit": ("eret",),
+        "syscall": ("trap",),
+        "sysenter": ("trap",),
+        "int3": ("trap",),
+        "int": ("trap",),
+        "ud0": ("undef",),
+        "ud1": ("undef",),
+        "ud2": ("undef",),
     },
     "Riscv64": {
-        "ret": ("ret",), "sret": ("eret",), "mret": ("eret",), "uret": ("eret",),
-        "jr": ("indirect",), "c.jr": ("indirect",),
-        "ecall": ("trap",), "ebreak": ("trap",), "c.ebreak": ("trap",),
+        "ret": ("ret",),
+        "sret": ("eret",),
+        "mret": ("eret",),
+        "uret": ("eret",),
+        "jr": ("indirect",),
+        "c.jr": ("indirect",),
+        "ecall": ("trap",),
+        "ebreak": ("trap",),
+        "c.ebreak": ("trap",),
         "unimp": ("undef",),
     },
 }
@@ -339,7 +366,7 @@ _TERMS = {
 # only at the moment control arrives, so away from the counter it is unresolved.
 _INDIRECT_IF_NOT_IMMEDIATE = {
     "X86_64": ("jmp", "jmpq"),
-    "Riscv64": ("j",),        # jalr/c.jalr link a return address: calls, not exits
+    "Riscv64": ("j",),  # jalr/c.jalr link a return address: calls, not exits
 }
 
 _IMMEDIATE = re.compile(r"^[\$#]?0x[0-9a-fA-F]+$")
@@ -350,7 +377,7 @@ def _terminator(arch, mnem, ops):
     there, its destination is not in the text."""
     if arch is None:
         return None
-    mnem, ops = arch.split_prefixes(mnem, ops)   # `repz ret`, `notrack jmp *%rax`
+    mnem, ops = arch.split_prefixes(mnem, ops)  # `repz ret`, `notrack jmp *%rax`
     key = arch.__class__.__name__
     m = arch.normalize_mnem(mnem)
     fixed = _TERMS.get(key, {}).get(m)
@@ -421,22 +448,25 @@ def _blocks(rows, insns, arch):
         if arch:
             mnem = arch.normalize_mnem(arch.split_prefixes(mnem, rows[end][3])[0])
         conditional = bool(_CONDITIONAL.get(arch.__class__.__name__ if arch else "", re.compile(r"^$")).match(mnem))
-        blocks.append({
-            "id": b, "first": s, "last": end,
-            "start": "0x%x" % rows[s][0], "end": "0x%x" % rows[end][0],
-            "terminator": term,
-        })
+        blocks.append(
+            {
+                "id": b,
+                "first": s,
+                "last": end,
+                "start": "0x%x" % rows[s][0],
+                "end": "0x%x" % rows[end][0],
+                "terminator": term,
+            }
+        )
         if term in _NO_SUCCESSOR:
             continue
         if term == "branch":
             # An unconditional jump never falls through, even when its target is
             # outside this listing (a tail call); a conditional one does.
             if end in targets:
-                edges.append({"from": b, "to": block_of[targets[end]],
-                              "kind": "true" if conditional else "uncond"})
+                edges.append({"from": b, "to": block_of[targets[end]], "kind": "true" if conditional else "uncond"})
             if conditional and end + 1 < n:
-                edges.append({"from": b, "to": block_of[end + 1],
-                              "kind": "false" if end in targets else "fall"})
+                edges.append({"from": b, "to": block_of[end + 1], "kind": "false" if end in targets else "fall"})
         elif end + 1 < n:
             edges.append({"from": b, "to": block_of[end + 1], "kind": "fall"})
     return blocks, edges
@@ -463,12 +493,14 @@ def _dominators(nblocks, pred, entry=0):
     for b in range(nblocks):
         for p in pred[b]:
             succ[p].append(b)
+
     def visit(u):
         seen.add(u)
         for v in succ[u]:
             if v not in seen:
                 visit(v)
         order.append(u)
+
     try:
         visit(entry)
     except RecursionError:
@@ -614,21 +646,26 @@ def _payload_unguarded(addr):
         f, line = _line_of(a)
         if line is None:
             missing += 1
-        insns.append({
-            "addr": "0x%x" % a,
-            "mnemonic": arch.normalize_mnem(mnem) if arch else mnem,
-            "operands": re.sub(r"\s*(?://|;).*$", "", ops),
-            "is_pc": is_pc,
-            "file": f,
-            "line": line,
-            "terminator": _terminator(arch, mnem, ops),
-            "gutter": gutter[i],
-        })
+        insns.append(
+            {
+                "addr": "0x%x" % a,
+                "mnemonic": arch.normalize_mnem(mnem) if arch else mnem,
+                "operands": re.sub(r"\s*(?://|;).*$", "", ops),
+                "is_pc": is_pc,
+                "file": f,
+                "line": line,
+                "terminator": _terminator(arch, mnem, ops),
+                "gutter": gutter[i],
+            }
+        )
 
     why = None
     if missing:
-        why = ("no line table covers %d of %d instructions%s"
-               % (missing, len(insns), (" in section %s" % section) if section else ""))
+        why = "no line table covers %d of %d instructions%s" % (
+            missing,
+            len(insns),
+            (" in section %s" % section) if section else "",
+        )
 
     pc_row = next((i for i, r in enumerate(rows) if r[1]), None)
     blocks, bedges = _blocks(rows, insns, arch)
@@ -693,16 +730,18 @@ def _payload_unguarded(addr):
         "pc_row": pc_row,
         "gutter_width": (ncols + 1) if ncols else 0,
         "line_info": {"missing": missing, "total": len(insns), "why": why},
-        "edges": [{"from": e["top"] if e["dst"] != e["top"] else e["bot"],
-                   "to": e["dst"], "lane": e.get("col", 0)} for e in edges],
+        "edges": [
+            {"from": e["top"] if e["dst"] != e["top"] else e["bot"], "to": e["dst"], "lane": e.get("col", 0)}
+            for e in edges
+        ],
         "insns": insns,
     }
 
 
 class CfgJson(gdb.Command):
     """cfgjson [ADDR] : one JSON object describing the function around ADDR
-(default $pc).  Errors come back as {"error": ...} so a broken query is never
-mistaken for an empty function."""
+    (default $pc).  Errors come back as {"error": ...} so a broken query is never
+    mistaken for an empty function."""
 
     def __init__(self, name="cfgjson"):
         super(CfgJson, self).__init__(name, gdb.COMMAND_USER)

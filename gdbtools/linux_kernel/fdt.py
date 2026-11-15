@@ -7,6 +7,7 @@ window; this module is the opposite trade-off -- it decodes every header field,
 every reservation entry, every node and every property, and reports structural
 anomalies instead of silently stopping.  Nothing here writes to the target.
 """
+
 import os
 import re
 import struct
@@ -25,29 +26,77 @@ FDT_END = 0x9
 FDT_MAX_TOTALSIZE = 8 << 20
 FDT_MAX_TOKENS = 1 << 22
 
-_HDR_FIELDS = ("magic", "totalsize", "off_dt_struct", "off_dt_strings",
-               "off_mem_rsvmap", "version", "last_comp_version",
-               "boot_cpuid_phys", "size_dt_strings", "size_dt_struct")
+_HDR_FIELDS = (
+    "magic",
+    "totalsize",
+    "off_dt_struct",
+    "off_dt_strings",
+    "off_mem_rsvmap",
+    "version",
+    "last_comp_version",
+    "boot_cpuid_phys",
+    "size_dt_strings",
+    "size_dt_struct",
+)
 
 _DEFAULT_ADDRESS_CELLS = 2
 _DEFAULT_SIZE_CELLS = 1
 
-_STRING_PROPS = frozenset((
-    "compatible", "model", "status", "device_type", "bootargs", "stdout-path",
-    "linux,stdout-path", "name", "label", "enable-method", "method",
-    "mmu-type", "riscv,isa", "clock-names", "clock-output-names",
-    "interrupt-names", "reg-names", "dma-names", "reset-names",
-    "pinctrl-names", "gpio-names", "phy-names", "power-domain-names",
-))
+_STRING_PROPS = frozenset(
+    (
+        "compatible",
+        "model",
+        "status",
+        "device_type",
+        "bootargs",
+        "stdout-path",
+        "linux,stdout-path",
+        "name",
+        "label",
+        "enable-method",
+        "method",
+        "mmu-type",
+        "riscv,isa",
+        "clock-names",
+        "clock-output-names",
+        "interrupt-names",
+        "reg-names",
+        "dma-names",
+        "reset-names",
+        "pinctrl-names",
+        "gpio-names",
+        "phy-names",
+        "power-domain-names",
+    )
+)
 
-_CELL_PROPS = frozenset((
-    "#address-cells", "#size-cells", "#interrupt-cells", "#clock-cells",
-    "#gpio-cells", "#dma-cells", "#power-domain-cells", "#phandle-cells",
-    "#reset-cells", "#pwm-cells", "#hwlock-cells", "#mbox-cells",
-    "phandle", "linux,phandle", "ibm,phandle", "interrupt-parent",
-    "interrupts", "interrupts-extended", "clock-frequency",
-    "timebase-frequency", "cpu-release-addr", "riscv,ndev", "cpu",
-))
+_CELL_PROPS = frozenset(
+    (
+        "#address-cells",
+        "#size-cells",
+        "#interrupt-cells",
+        "#clock-cells",
+        "#gpio-cells",
+        "#dma-cells",
+        "#power-domain-cells",
+        "#phandle-cells",
+        "#reset-cells",
+        "#pwm-cells",
+        "#hwlock-cells",
+        "#mbox-cells",
+        "phandle",
+        "linux,phandle",
+        "ibm,phandle",
+        "interrupt-parent",
+        "interrupts",
+        "interrupts-extended",
+        "clock-frequency",
+        "timebase-frequency",
+        "cpu-release-addr",
+        "riscv,ndev",
+        "cpu",
+    )
+)
 
 _ADDR_PROPS = frozenset(("reg", "assigned-addresses"))
 _RANGE_PROPS = frozenset(("ranges", "dma-ranges"))
@@ -93,10 +142,12 @@ def fdt_content_span(hdr):
     bounded = bool(hdr["size_dt_struct"]) and bool(hdr["size_dt_strings"])
     if not bounded:
         return total, False
-    need = max(40,
-               hdr["off_dt_struct"] + hdr["size_dt_struct"],
-               hdr["off_dt_strings"] + hdr["size_dt_strings"],
-               hdr["off_mem_rsvmap"] + 16)
+    need = max(
+        40,
+        hdr["off_dt_struct"] + hdr["size_dt_struct"],
+        hdr["off_dt_strings"] + hdr["size_dt_strings"],
+        hdr["off_mem_rsvmap"] + 16,
+    )
     return min(need, total), True
 
 
@@ -192,10 +243,9 @@ def fdt_walk(data, hdr):
             if ver < 16 and plen >= 8:
                 p = (p + 7) & ~7
             if p + plen > len(data):
-                yield ("error", depth, at,
-                       "property value runs past the blob (len 0x%x at 0x%x)" % (plen, p))
+                yield ("error", depth, at, "property value runs past the blob (len 0x%x at 0x%x)" % (plen, p))
                 return
-            val = bytes(data[p:p + plen])
+            val = bytes(data[p : p + plen])
             p = (p + plen + 3) & ~3
             name = _cstr(data, stroff + nameoff)
             yield ("prop", depth, at, (name, val, nameoff, plen))
@@ -234,8 +284,7 @@ def _fmt_stringlist(val):
 
 def _fmt_cells(val):
     n = len(val) // 4
-    return "<%s>" % " ".join("0x%08x" % struct.unpack_from(">I", val, i * 4)[0]
-                             for i in range(n))
+    return "<%s>" % " ".join("0x%08x" % struct.unpack_from(">I", val, i * 4)[0] for i in range(n))
 
 
 def _fmt_bytes(val):
@@ -243,7 +292,7 @@ def _fmt_bytes(val):
 
 
 def _be(val, off, cells):
-    return int.from_bytes(val[off:off + cells * 4], "big") if cells else 0
+    return int.from_bytes(val[off : off + cells * 4], "big") if cells else 0
 
 
 def _decode_reg(val, ac, sc):
@@ -383,8 +432,7 @@ def fdt_dump_lines(data, hdr, want_hex=False, path=None, grep=None, terse=False)
             yield "%s        %s" % (ind, e)
         if want_hex and val:
             for i in range(0, len(val), 16):
-                yield "%s        %04x  %s" % (
-                    ind, i, " ".join("%02x" % b for b in val[i:i + 16]))
+                yield "%s        %04x  %s" % (ind, i, " ".join("%02x" % b for b in val[i : i + 16]))
 
 
 def fdt_tree_lines(data, hdr):
@@ -432,7 +480,7 @@ def _read_chunk(addr, n, phys):
     if not got:
         return None
     raw = b"".join(struct.pack("<Q", w) for w in got)
-    return raw[addr & 7:][:n]
+    return raw[addr & 7 :][:n]
 
 
 @safe(default=None)
@@ -467,6 +515,7 @@ def _read_blob_bytes(addr, n, phys=False):
 @safe(default=None)
 def _p2v(pa):
     from .session import SESSION
+
     return SESSION.p2v(pa)
 
 
@@ -512,33 +561,33 @@ def fdt_probe(addr, phys):
 class KDtb(gdb.Command):
     """kdtb [OPTIONS] [ADDR] : dump the LIVE flattened device tree, in full.
 
-The kernel keeps the DTB verbatim in memory long after boot, but nothing in gdb
-can read it: `lx-*` has no FDT support, the unflattened `of_*` tree does not
-exist yet during setup_arch, and by the time it does the blob is still the only
-place the raw values live.  kdtb parses the blob straight out of guest memory
-and prints EVERYTHING -- header, memory reservation block, every node, every
-property -- with no truncation and no sampling.  Read-only; it never writes to
-the target.
+    The kernel keeps the DTB verbatim in memory long after boot, but nothing in gdb
+    can read it: `lx-*` has no FDT support, the unflattened `of_*` tree does not
+    exist yet during setup_arch, and by the time it does the blob is still the only
+    place the raw values live.  kdtb parses the blob straight out of guest memory
+    and prints EVERYTHING -- header, memory reservation block, every node, every
+    property -- with no truncation and no sampling.  Read-only; it never writes to
+    the target.
 
-The blob address is found automatically from `initial_boot_params` (set by
-early_init_dt_scan, so it is already valid inside setup_arch), falling back to
-`__fdt_pointer`.  Pass any expression to override:  kdtb $x22,  kdtb 0x40000000.
+    The blob address is found automatically from `initial_boot_params` (set by
+    early_init_dt_scan, so it is already valid inside setup_arch), falling back to
+    `__fdt_pointer`.  Pass any expression to override:  kdtb $x22,  kdtb 0x40000000.
 
-OPTIONS
-  --header, -H     header fields + structural sanity checks only
-  --rsv            memory reservation block only
-  --tree           node names only, no properties
-  --path P         restrict the dump to the subtree at path P  (kdtb --path /soc)
-  --grep RE        print every 'path:prop = value' matching a python regex
-  --hex            add the full raw bytes of every property, 16 per line
-  --terse          drop the decoded reg/ranges annotations
-  --phys           treat the address as PHYSICAL and read via the QEMU monitor
-                   (use while the MMU is still off, or for a raw PA)
-  --save FILE      write the raw blob to FILE, then:  dtc -I dtb -O dts FILE
-  --stats          summary only
+    OPTIONS
+      --header, -H     header fields + structural sanity checks only
+      --rsv            memory reservation block only
+      --tree           node names only, no properties
+      --path P         restrict the dump to the subtree at path P  (kdtb --path /soc)
+      --grep RE        print every 'path:prop = value' matching a python regex
+      --hex            add the full raw bytes of every property, 16 per line
+      --terse          drop the decoded reg/ranges annotations
+      --phys           treat the address as PHYSICAL and read via the QEMU monitor
+                       (use while the MMU is still off, or for a raw PA)
+      --save FILE      write the raw blob to FILE, then:  dtc -I dtb -O dts FILE
+      --stats          summary only
 
-Everything degrades to a message instead of an exception, so a bad address or a
-dead memory-read path can never take the session down."""
+    Everything degrades to a message instead of an exception, so a bad address or a
+    dead memory-read path can never take the session down."""
 
     def __init__(self, name="kdtb"):
         super(KDtb, self).__init__(name, gdb.COMMAND_USER)
@@ -546,8 +595,15 @@ dead memory-read path can never take the session down."""
     @safe(boundary="command")
     def invoke(self, arg, from_tty):
         toks = (arg or "").split()
-        opts = {"header": False, "rsv": False, "tree": False, "hex": False,
-                "terse": False, "phys": False, "stats": False}
+        opts = {
+            "header": False,
+            "rsv": False,
+            "tree": False,
+            "hex": False,
+            "terse": False,
+            "phys": False,
+            "stats": False,
+        }
         path = grep = save = None
         expr_parts = []
         i = 0
@@ -590,40 +646,45 @@ dead memory-read path can never take the session down."""
                 print("[%s] kdtb: cannot evaluate '%s'" % (NAME, expr))
                 return
             a &= MASK
-            cands = [(a, "argument '%s', read as physical" % expr, True)] if opts["phys"] \
-                else [(a, "argument '%s'" % expr, False),
-                      (a, "argument '%s', read as physical" % expr, True)]
+            cands = (
+                [(a, "argument '%s', read as physical" % expr, True)]
+                if opts["phys"]
+                else [(a, "argument '%s'" % expr, False), (a, "argument '%s', read as physical" % expr, True)]
+            )
         else:
             cands = fdt_candidates()
             if opts["phys"]:
                 cands = [(x, h, True) for (x, h, _) in cands]
             if not cands:
-                print("[%s] kdtb: no FDT pointer is set yet.\n"
-                      "        initial_boot_params only becomes valid inside setup_arch "
-                      "(early_init_dt_scan),\n"
-                      "        and __fdt_pointer only after __mmap_switched stores it. "
-                      "Before that the\n"
-                      "        boot protocol still carries the blob's physical address "
-                      "in x0 on arm64:\n"
-                      "            kdtb --phys $x0\n"
-                      "        Or break later -- at unflatten_device_tree both pointers "
-                      "are set." % NAME)
+                print(
+                    "[%s] kdtb: no FDT pointer is set yet.\n"
+                    "        initial_boot_params only becomes valid inside setup_arch "
+                    "(early_init_dt_scan),\n"
+                    "        and __fdt_pointer only after __mmap_switched stores it. "
+                    "Before that the\n"
+                    "        boot protocol still carries the blob's physical address "
+                    "in x0 on arm64:\n"
+                    "            kdtb --phys $x0\n"
+                    "        Or break later -- at unflatten_device_tree both pointers "
+                    "are set." % NAME
+                )
                 return
 
         addr = how = head = None
         phys = False
-        for (a, h, p) in cands:
+        for a, h, p in cands:
             hd = fdt_probe(a, p)
             if hd:
                 addr, how, phys, head = a, h, p, hd
                 break
         if addr is None:
             print("[%s] kdtb: no FDT magic at any candidate:" % NAME)
-            for (a, h, p) in cands:
+            for a, h, p in cands:
                 print("        %s  %s%s" % (fmt(a), h, "  [phys]" if p else ""))
-            print("        The first word must be 0xedfe0dd0. If every read on this target "
-                  "returns\n        zero, the memory path is down -- check with  x/1wx 0x%x."
-                  % (cands[0][0] & MASK))
+            print(
+                "        The first word must be 0xedfe0dd0. If every read on this target "
+                "returns\n        zero, the memory path is down -- check with  x/1wx 0x%x." % (cands[0][0] & MASK)
+            )
             return
 
         try:
@@ -636,13 +697,14 @@ dead memory-read path can never take the session down."""
 
         data = _read_blob_bytes(addr, span, phys)
         if not data:
-            print("[%s] kdtb: header read at %s but the %d-byte body did not.\n"
-                  "        Retry the other transport:  kdtb %s0x%x"
-                  % (NAME, fmt(addr), span, "" if phys else "--phys ", addr & MASK))
+            print(
+                "[%s] kdtb: header read at %s but the %d-byte body did not.\n"
+                "        Retry the other transport:  kdtb %s0x%x"
+                % (NAME, fmt(addr), span, "" if phys else "--phys ", addr & MASK)
+            )
             return
         if len(data) < span:
-            print("[%s] kdtb: SHORT READ -- %d of %d bytes; output below is partial"
-                  % (NAME, len(data), span))
+            print("[%s] kdtb: SHORT READ -- %d of %d bytes; output below is partial" % (NAME, len(data), span))
 
         try:
             hdr = fdt_parse_header(data)
@@ -657,8 +719,10 @@ dead memory-read path can never take the session down."""
                 if full and len(full) >= len(data):
                     blob = full
                 else:
-                    print("[%s] kdtb: could not read the padding past 0x%x; saving the "
-                          "%d content bytes only" % (NAME, span, len(data)))
+                    print(
+                        "[%s] kdtb: could not read the padding past 0x%x; saving the "
+                        "%d content bytes only" % (NAME, span, len(data))
+                    )
             try:
                 p = os.path.expanduser(save)
                 with open(p, "wb") as f:
@@ -669,14 +733,11 @@ dead memory-read path can never take the session down."""
                 print("[%s] kdtb: cannot write %s: %s" % (NAME, save, e))
             return
 
-        print("[%s] FDT at %s  (%s)%s" % (NAME, fmt(addr), how,
-                                          "  [physical read]" if phys else ""))
+        print("[%s] FDT at %s  (%s)%s" % (NAME, fmt(addr), how, "  [physical read]" if phys else ""))
         if span < total:
-            print("        read %d content bytes of totalsize 0x%x; the rest is padding"
-                  % (len(data), total))
+            print("        read %d content bytes of totalsize 0x%x; the rest is padding" % (len(data), total))
         elif not bounded:
-            print("        version %d gives no block sizes, so the full 0x%x bytes were read"
-                  % (hdr["version"], total))
+            print("        version %d gives no block sizes, so the full 0x%x bytes were read" % (hdr["version"], total))
         self._print_header(data, hdr)
         if opts["header"]:
             return
@@ -702,8 +763,7 @@ dead memory-read path can never take the session down."""
             print("/dts-v1/;")
             print("")
         emitted = 0
-        for ln in fdt_dump_lines(data, hdr, want_hex=opts["hex"], path=path,
-                                 grep=grep, terse=opts["terse"]):
+        for ln in fdt_dump_lines(data, hdr, want_hex=opts["hex"], path=path, grep=grep, terse=opts["terse"]):
             print(ln)
             emitted += 1
         if path and emitted == 0:
@@ -739,24 +799,39 @@ dead memory-read path can never take the session down."""
         used = len(stats.name_offsets)
         print("")
         print("  summary")
-        print("    nodes %d   properties %d   max depth %d   NOPs %d"
-              % (stats.nodes, stats.props, stats.max_depth, stats.nops))
+        print(
+            "    nodes %d   properties %d   max depth %d   NOPs %d"
+            % (stats.nodes, stats.props, stats.max_depth, stats.nops)
+        )
         print("    property payload %d bytes   distinct property names %d" % (stats.prop_bytes, used))
         if stats.end_offset is not None:
             consumed = stats.end_offset + 4 - hdr["off_dt_struct"]
-            print("    struct block consumed 0x%x of 0x%x bytes"
-                  % (consumed, hdr["size_dt_struct"] or consumed))
+            print("    struct block consumed 0x%x of 0x%x bytes" % (consumed, hdr["size_dt_struct"] or consumed))
         else:
             print("    ! FDT_END never reached")
-        tail = len(data) - (hdr["off_dt_strings"] + hdr["size_dt_strings"]) \
-            if hdr["size_dt_strings"] else 0
+        tail = len(data) - (hdr["off_dt_strings"] + hdr["size_dt_strings"]) if hdr["size_dt_strings"] else 0
         if tail > 0:
             print("    %d trailing byte(s) after the strings block" % tail)
         for e in stats.errors:
             print("    ! %s" % e)
 
 
-__all__ = ['FDT_MAGIC', 'FDT_BEGIN_NODE', 'FDT_END_NODE', 'FDT_PROP', 'FDT_NOP',
-           'FDT_END', 'FdtError', 'FdtStats', 'fdt_parse_header', 'fdt_header_notes',
-           'fdt_reservations', 'fdt_walk', 'fdt_format_value', 'fdt_dump_lines',
-           'fdt_tree_lines', 'fdt_collect', 'KDtb']
+__all__ = [
+    "FDT_MAGIC",
+    "FDT_BEGIN_NODE",
+    "FDT_END_NODE",
+    "FDT_PROP",
+    "FDT_NOP",
+    "FDT_END",
+    "FdtError",
+    "FdtStats",
+    "fdt_parse_header",
+    "fdt_header_notes",
+    "fdt_reservations",
+    "fdt_walk",
+    "fdt_format_value",
+    "fdt_dump_lines",
+    "fdt_tree_lines",
+    "fdt_collect",
+    "KDtb",
+]

@@ -9,6 +9,7 @@ modules, so a hacking loop is: edit, re-source, run.
 The tool locates its own package as this file's sibling and needs nothing else
 to be true about where the repository lives -- clone it anywhere.
 """
+
 import os
 import sys
 
@@ -31,6 +32,7 @@ for _m in [m for m in list(sys.modules) if m == "gdbtools" or m.startswith("gdbt
 # instead of the package failing halfway on an ImportError about _gdb internals.
 try:
     import gdb as _gdb_pkg
+
     _why = None if hasattr(_gdb_pkg, "execute") else "it has no gdb.execute"
 except ImportError as _e:
     _why = str(_e)
@@ -44,4 +46,5 @@ else:
         "[gdbtools] not loaded: this gdb's Python `gdb` package does not work (%s).\n"
         "[gdbtools] Its data directory belongs to a different gdb version; start it with\n"
         "[gdbtools] --data-directory=<its own data directory>, or use a gdb whose Python\n"
-        "[gdbtools] layer starts (`gdb -nx -batch -ex 'python gdb.VERSION'`).\n" % _why)
+        "[gdbtools] layer starts (`gdb -nx -batch -ex 'python gdb.VERSION'`).\n" % _why
+    )

@@ -1,4 +1,5 @@
 """x86_64: the kernel half.  See gdbtools.common.arch.x86_64 for the rest."""
+
 import json
 import struct
 import gdb
@@ -17,8 +18,6 @@ def _binutil(name):
     return config.get("BINUTIL_" + name.upper()) or name
 
 
-
-
 @safe(default=None)
 def _x86_decomp_offsets(cv):
     """(self_reloc_jmp_off, lea_imm, extract_kernel_off) parsed from the x86 COMPRESSED
@@ -28,7 +27,8 @@ def _x86_decomp_offsets(cv):
     out of %rax at the jmp yields the moved base rbx, and extract_kernel = rbx + off.
     Returns None if the compressed vmlinux or the expected shape is absent."""
     import subprocess
-    nm_prog, objdump_prog = _binutil("nm"), _binutil("objdump")   # outside the try: a bad value must surface
+
+    nm_prog, objdump_prog = _binutil("nm"), _binutil("objdump")  # outside the try: a bad value must surface
     try:
         nm = subprocess.check_output([nm_prog, cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
     except Exception:
@@ -43,8 +43,8 @@ def _x86_decomp_offsets(cv):
         return None
     try:
         dis = subprocess.check_output(
-            [objdump_prog, "-d", "--start-address=0x200", "--stop-address=0x400", cv],
-            stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+            [objdump_prog, "-d", "--start-address=0x200", "--stop-address=0x400", cv], stderr=subprocess.DEVNULL
+        ).decode("utf-8", "replace")
     except Exception:
         return None
     jmp_off = lea_imm = last_lea = None
@@ -56,7 +56,7 @@ def _x86_decomp_offsets(cv):
         if ml:
             last_lea = int(ml.group(1), 16)
             continue
-        if re.search(r"jmp\s+\*%rax", line):     # the self-relocation handoff
+        if re.search(r"jmp\s+\*%rax", line):  # the self-relocation handoff
             jmp_off, lea_imm = int(m.group(1), 16), last_lea
             break
     if jmp_off is None or lea_imm is None:
@@ -94,14 +94,14 @@ _HDRS_OFF = 0x202
 _BOOT_FLAG_OFF = 0x1FE
 _SETUP_SECTS_OFF = 0x1F1
 
-_GPR64 = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
-          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
+_GPR64 = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
 
 
 @safe(default=None)
 def _nm_value(cv, name):
     """Value of one symbol in an ELF, via nm.  None when the file or symbol is absent."""
     import subprocess
+
     prog = _binutil("nm")
     try:
         out = subprocess.check_output([prog, cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
@@ -120,6 +120,7 @@ def _nm_sym(cv, name):
     which is the caller's cue to fall back to a fixed window.  Knowing the size is what
     keeps a scan of one function from running on into the next one."""
     import subprocess
+
     prog = _binutil("nm")
     try:
         out = subprocess.check_output([prog, "-S", cv], stderr=subprocess.DEVNULL).decode("utf-8", "replace")
@@ -127,9 +128,9 @@ def _nm_sym(cv, name):
         return None
     for line in out.splitlines():
         p = line.split()
-        if len(p) >= 4 and p[3] == name:        # value size type name
+        if len(p) >= 4 and p[3] == name:  # value size type name
             return (int(p[0], 16), int(p[1], 16))
-        if len(p) >= 3 and p[2] == name:        # value type name -- no size recorded
+        if len(p) >= 3 and p[2] == name:  # value type name -- no size recorded
             return (int(p[0], 16), 0)
     return None
 
@@ -156,6 +157,7 @@ def _x86_efi_handoff_off(cv):
     The scan is bounded by the symbol's recorded size, so it cannot wander into the
     next function and match its jumps instead."""
     import subprocess
+
     sym = _nm_sym(cv, "efi_stub_entry")
     if sym is None:
         return None
@@ -164,9 +166,8 @@ def _x86_efi_handoff_off(cv):
     prog = _binutil("objdump")
     try:
         dis = subprocess.check_output(
-            [prog, "-d", "--start-address=0x%x" % start,
-             "--stop-address=0x%x" % end, cv],
-            stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+            [prog, "-d", "--start-address=0x%x" % start, "--stop-address=0x%x" % end, cv], stderr=subprocess.DEVNULL
+        ).decode("utf-8", "replace")
     except Exception:
         return None
     # How far back the %rsi write may sit.  It is the same asm statement, so it is
@@ -180,7 +181,7 @@ def _x86_efi_handoff_off(cv):
         if not m:
             continue
         off = int(m.group(1), 16)
-        insn = m.group(3).split("#", 1)[0].strip()      # drop objdump's comment
+        insn = m.group(3).split("#", 1)[0].strip()  # drop objdump's comment
         jm = re.match(r"(?:notrack\s+|bnd\s+)*jmp\s+\*%(r[a-z0-9]+)\s*$", insn)
         if jm:
             near_rsi = any(re.search(r",\s*%rsi$", i) for i in recent)
@@ -195,10 +196,11 @@ def _x86_efi_handoff_off(cv):
         return (pref[0][0], pref[0][1])
     if len(cands) == 1:
         return (cands[0][0], cands[0][1])
-    print("[%s] UEFI: efi_stub_entry has %d register-indirect jumps and %d of them "
-          "load %%rsi first, so the hand-off cannot be told from a jump table here; "
-          "taking the last, and it may be wrong."
-          % (NAME, len(cands), len(pref)))
+    print(
+        "[%s] UEFI: efi_stub_entry has %d register-indirect jumps and %d of them "
+        "load %%rsi first, so the hand-off cannot be told from a jump table here; "
+        "taking the last, and it may be wrong." % (NAME, len(cands), len(pref))
+    )
     return (cands[-1][0], cands[-1][1])
 
 
@@ -208,11 +210,12 @@ def _x86_image_head(cv, n=8):
     vmlinux, for confirming that an address really holds the image before running the
     guest at it.  Read through objdump, which the offset parser above already needs."""
     import subprocess
+
     prog = _binutil("objdump")
     try:
         dis = subprocess.check_output(
-            [prog, "-d", "--start-address=0x0", "--stop-address=0x%x" % (n + 16), cv],
-            stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+            [prog, "-d", "--start-address=0x0", "--stop-address=0x%x" % (n + 16), cv], stderr=subprocess.DEVNULL
+        ).decode("utf-8", "replace")
     except Exception:
         return None
     out = bytearray()
@@ -237,15 +240,13 @@ def _qemu_ram_window():
     for _k in ("SCAN", "PHYS_WINDOW"):
         _r = config.get(_k)
         if _r:
-            LOG.add("UEFI search window from $GDBTOOLS_%s: %s-%s"
-                    % (_k, fmt(_r[0]), fmt(_r[1])))
+            LOG.add("UEFI search window from $GDBTOOLS_%s: %s-%s" % (_k, fmt(_r[0]), fmt(_r[1])))
             return _r
     out = execstr("monitor info mtree -f")
     if not out:
         return None
     best = None
-    for m in re.finditer(r"^\s*([0-9a-f]{16})-([0-9a-f]{16}) \(prio [-\d]+, ram\): (\S+)",
-                         out, re.M):
+    for m in re.finditer(r"^\s*([0-9a-f]{16})-([0-9a-f]{16}) \(prio [-\d]+, ram\): (\S+)", out, re.M):
         name = m.group(3).lower()
         if "ram" not in name or "flash" in name or "rom" in name:
             continue
@@ -270,10 +271,11 @@ def _qemu_stop_reply_gated():
         return True
     if (int(m.group(1)), int(m.group(2))) >= _QEMU_MIN:
         return True
-    print("[%s] UEFI: QEMU %s reports the monitor's stop to gdb as a stop reply and would "
-          "leave gdb out of step, so the guest is not driven through the monitor; use "
-          "QEMU %d.%d or newer, or pin $GDBTOOLS_ENTRY_PA."
-          % (NAME, ver.split()[0], _QEMU_MIN[0], _QEMU_MIN[1]))
+    print(
+        "[%s] UEFI: QEMU %s reports the monitor's stop to gdb as a stop reply and would "
+        "leave gdb out of step, so the guest is not driven through the monitor; use "
+        "QEMU %d.%d or newer, or pin $GDBTOOLS_ENTRY_PA." % (NAME, ver.split()[0], _QEMU_MIN[0], _QEMU_MIN[1])
+    )
     return False
 
 
@@ -288,12 +290,13 @@ def _qemu_advance(ms):
     monitor's stop with a stop reply gdb never asked for, and gdb's next `continue`
     returned on it at once."""
     import time
+
     # execstr is @safe(default=""), so a target with no monitor answers with an EMPTY
     # string rather than raising.  Empty is therefore the only evidence that the
     # command did not land, and it has to be treated as "no monitor", not as "stopped".
     status = (execstr("monitor info status") or "").strip()
     if not status or "unning" in status:
-        return False                                  # no monitor here, or not ours to drive
+        return False  # no monitor here, or not ours to drive
     if not _qemu_stop_reply_gated():
         return False
     out = execstr("monitor cont")
@@ -320,7 +323,7 @@ def _phys_bytes(pa, n):
     for w in words:
         buf += int(w).to_bytes(8, "little")
     off = pa & 7
-    return bytes(buf[off:off + n]) if len(buf) >= off + n else None
+    return bytes(buf[off : off + n]) if len(buf) >= off + n else None
 
 
 def _image_at(page, pa, head, buf=None, off=None):
@@ -331,15 +334,15 @@ def _image_at(page, pa, head, buf=None, off=None):
     the guest when it does not."""
     if len(page) < 0x210 or page[0:2] != b"MZ":
         return None
-    if page[_BOOT_FLAG_OFF:_BOOT_FLAG_OFF + 2] != b"\x55\xaa":
+    if page[_BOOT_FLAG_OFF : _BOOT_FLAG_OFF + 2] != b"\x55\xaa":
         return None
-    if page[_HDRS_OFF:_HDRS_OFF + 4] != b"HdrS":
+    if page[_HDRS_OFF : _HDRS_OFF + 4] != b"HdrS":
         return None
-    setup_size = ((page[_SETUP_SECTS_OFF] or 4) + 1) * 512      # boot.rst: 0 means 4
+    setup_size = ((page[_SETUP_SECTS_OFF] or 4) + 1) * 512  # boot.rst: 0 means 4
     if head:
         there = None
         if buf is not None and off is not None and off + setup_size + len(head) <= len(buf):
-            there = bytes(buf[off + setup_size:off + setup_size + len(head)])
+            there = bytes(buf[off + setup_size : off + setup_size + len(head)])
         if there is None:
             there = _phys_bytes(pa + setup_size, len(head))
         if there != head:
@@ -379,6 +382,7 @@ def _x86_scan_for_image(lo, hi, head):
     starts are examined, because LoadImage allocates pages, and each candidate is
     confirmed by the four things the boot protocol fixes in a bzImage."""
     import tempfile
+
     lo = max(0, lo) & ~0xFFF
     hi &= ~0xFFF
     if hi <= lo:
@@ -395,9 +399,9 @@ def _x86_scan_for_image(lo, hi, head):
             with open(path, "rb") as fh:
                 buf = fh.read()
             for off in range(len(buf) - 0x1000, -1, -0x1000):
-                if buf[off:off + 2] != b"MZ":
+                if buf[off : off + 2] != b"MZ":
                     continue
-                setup_size = _image_at(buf[off:off + 0x1000], bot + off, head, buf, off)
+                setup_size = _image_at(buf[off : off + 0x1000], bot + off, head, buf, off)
                 if setup_size:
                     hits.append((bot + off, setup_size))
             top = bot
@@ -447,15 +451,19 @@ def _x86_find_bzimages(sess):
     contents says which one the firmware will execute.  Returns [] rather than a guess."""
     win = _qemu_ram_window()
     if win is None:
-        print("[%s] UEFI: QEMU did not describe its RAM, so there is no bounded place "
-              "to look for the loaded image." % NAME)
+        print(
+            "[%s] UEFI: QEMU did not describe its RAM, so there is no bounded place "
+            "to look for the loaded image." % NAME
+        )
         return []
     ram_lo, ram_hi = win
     cv = sess._compressed_vmlinux()
     head = _x86_image_head(cv) if cv else None
     if not _qemu_advance(_EFI_SETTLE_MS):
-        print("[%s] UEFI: cannot step the guest -- no usable QEMU monitor behind this target, "
-              "so the loaded image cannot be looked for." % NAME)
+        print(
+            "[%s] UEFI: cannot step the guest -- no usable QEMU monitor behind this target, "
+            "so the loaded image cannot be looked for." % NAME
+        )
         return []
     ms = _EFI_SETTLE_MS
     hits, stable = [], 0
@@ -471,26 +479,27 @@ def _x86_find_bzimages(sess):
             break
         ms += step
     if not hits:
-        print("[%s] UEFI: no loaded bzImage in guest RAM after %d ms of firmware time."
-              % (NAME, ms))
+        print("[%s] UEFI: no loaded bzImage in guest RAM after %d ms of firmware time." % (NAME, ms))
     else:
-        print("[%s] UEFI: bzImage at %s after %d ms of firmware time."
-              % (NAME, ", ".join(fmt(b) for b, _ss in hits), ms))
+        print(
+            "[%s] UEFI: bzImage at %s after %d ms of firmware time." % (NAME, ", ".join(fmt(b) for b, _ss in hits), ms)
+        )
     return hits
 
 
 class X86_64(X86_64Common, KernelArch):
     entry_symbol = "startup_64"
-    image_base_symbol = "_text"         # startup_64 sits in .init.text on newer kernels
+    image_base_symbol = "_text"  # startup_64 sits in .init.text on newer kernels
     # x86 KASLR randomizes the PHYSICAL base, not just the virtual one: the
     # decompressor picks a slot anywhere in usable RAM, and measured boots have
     # landed hundreds of megabytes apart.  Whoever supplies $GDBTOOLS_PHYS_WINDOW
     # for this machine has to allow for that -- a window sized for a fixed base,
     # as arm64 and riscv can use, fails every sanity check here under KASLR.
-    entry_break_kind = "hw"             # the decompressor relocates vmlinux over the entry
-    KBASE = 0xFFFFFFFF80000000          # __START_KERNEL_map (config-stable)
+    entry_break_kind = "hw"  # the decompressor relocates vmlinux over the entry
+    KBASE = 0xFFFFFFFF80000000  # __START_KERNEL_map (config-stable)
+
     def _is_va(self, addr):
-        return (addr >> 63) & 1 == 1     # high half == kernel map
+        return (addr >> 63) & 1 == 1  # high half == kernel map
 
     def detect_kaslr_slide(self, sess):
         # x86_64: physical and virtual KASLR are INDEPENDENT (phys_base = output -
@@ -519,13 +528,13 @@ class X86_64(X86_64Common, KernelArch):
         tbl = cr3 & 0x000FFFFFFFFFF000
         cr4 = evi("$cr4")
         la57 = bool(cr4 is not None and ((cr4 >> 12) & 1))
-        for sh in ((48, 39, 30) if la57 else (39, 30)):   # descend PGD..PUD, stop above PMD
+        for sh in (48, 39, 30) if la57 else (39, 30):  # descend PGD..PUD, stop above PMD
             i = (KBASE >> sh) & 0x1FF
             d = read_phys_u64((tbl + i * 8) & MASK)
             if d is None or not (d & 1) or (d & (1 << 7)):  # absent, or a 1G huge page
                 return None
             tbl = d & 0x000FFFFFFFFFF000
-        words = read_phys_words(tbl, 512)                  # the kernel-text PMD table
+        words = read_phys_words(tbl, 512)  # the kernel-text PMD table
         if not words:
             return None
         # The LINK address, via sess._link_va: once apply_kaslr has relocated the
@@ -533,7 +542,7 @@ class X86_64(X86_64Common, KernelArch):
         # to compute, and subtracting it from itself would answer zero every time.
         _tv = sess._link_va(symval("_text"))
         if _tv is None:
-            return None                       # no vmlinux: refuse rather than assume
+            return None  # no vmlinux: refuse rather than assume
         base_index = ((_tv - KBASE) & MASK) >> 21
         for i0 in range(512):
             if words[i0] and (words[i0] & 1):
@@ -565,9 +574,11 @@ class X86_64(X86_64Common, KernelArch):
                 rex = i > 0 and 0x40 <= blob[i - 1] <= 0x4F
                 at = i - 1 if rex else i
                 gpr = _GPR64[(blob[i + 2] & 7) + (8 if rex and blob[i - 1] & 1 else 0)]
-                return {"pa": (base + at) & MASK, "link": (link + at) & MASK,
-                        "desc": "startup_64+0x%x: mov %%%s,%%cr3  (installs early_top_pgt)"
-                                % (at, gpr)}
+                return {
+                    "pa": (base + at) & MASK,
+                    "link": (link + at) & MASK,
+                    "desc": "startup_64+0x%x: mov %%%s,%%cr3  (installs early_top_pgt)" % (at, gpr),
+                }
         return None
 
     def find_crossing(self, sess):
@@ -610,10 +621,16 @@ class X86_64(X86_64Common, KernelArch):
         land = "common_startup_64"
         lva = symval(land)
         tl = sess._link_va(lva) if lva is not None else None
-        return {"pa": pa, "reg": None, "ptr": ptr,
-                "stepi": tl is not None and ptr is None,
-                "target_link": tl, "land": land, "detect_fallback": True,
-                "desc": "startup_64: jmp *0f -> common_startup_64 (virtual slide)"}
+        return {
+            "pa": pa,
+            "reg": None,
+            "ptr": ptr,
+            "stepi": tl is not None and ptr is None,
+            "target_link": tl,
+            "land": land,
+            "detect_fallback": True,
+            "desc": "startup_64: jmp *0f -> common_startup_64 (virtual slide)",
+        }
 
     def recover_kaslr_base_efi(self, sess):
         """The UEFI counterpart of recover_kaslr_base.  Finds every loaded copy of the
@@ -630,8 +647,10 @@ class X86_64(X86_64Common, KernelArch):
             return None
         ho = _x86_efi_handoff_off(cv)
         if ho is None:
-            print("[%s] UEFI: efi_stub_entry makes no register-indirect jump, so it has "
-                  "no hand-off to break on; this kernel hands over some other way." % NAME)
+            print(
+                "[%s] UEFI: efi_stub_entry makes no register-indirect jump, so it has "
+                "no hand-off to break on; this kernel hands over some other way." % NAME
+            )
             return None
         jmp_off, jmp_reg = ho
         found = _x86_find_bzimages(sess)
@@ -639,20 +658,22 @@ class X86_64(X86_64Common, KernelArch):
             return None
         anchors = sorted((base + setup_size + jmp_off) & MASK for base, setup_size in found)
         if len(anchors) > _EFI_MAX_ANCHORS:
-            print("[%s] UEFI: %d copies of the image but only %d debug registers; "
-                  "breaking on the lowest %d, and the hand-off will be missed if the "
-                  "executed copy is not among them."
-                  % (NAME, len(anchors), _EFI_MAX_ANCHORS, _EFI_MAX_ANCHORS))
+            print(
+                "[%s] UEFI: %d copies of the image but only %d debug registers; "
+                "breaking on the lowest %d, and the hand-off will be missed if the "
+                "executed copy is not among them." % (NAME, len(anchors), _EFI_MAX_ANCHORS, _EFI_MAX_ANCHORS)
+            )
             anchors = anchors[:_EFI_MAX_ANCHORS]
-        print("[%s] UEFI: stub hand-off (jmp *%%%s) at %s; running there ..."
-              % (NAME, jmp_reg, ", ".join(fmt(a) for a in anchors)))
+        print(
+            "[%s] UEFI: stub hand-off (jmp *%%%s) at %s; running there ..."
+            % (NAME, jmp_reg, ", ".join(fmt(a) for a in anchors))
+        )
         if not sess._hbreak_any(anchors):
             print("[%s] UEFI: none of the hand-offs was reached." % NAME)
             return None
         entry = reg(jmp_reg)
         if entry is None:
-            print("[%s] UEFI: stopped at the hand-off but %%%s could not be read."
-                  % (NAME, jmp_reg))
+            print("[%s] UEFI: stopped at the hand-off but %%%s could not be read." % (NAME, jmp_reg))
             return None
         entry &= MASK
         print("[%s] UEFI: kernel entry PA %s, handed over by the EFI stub." % (NAME, fmt(entry)))
@@ -686,19 +707,19 @@ class X86_64(X86_64Common, KernelArch):
         if offs is None:
             return None
         jmp_off, lea_imm, ek_off = offs
-        if not sess._hbreak_to(load):                       # decompressor entry (fixed)
+        if not sess._hbreak_to(load):  # decompressor entry (fixed)
             return None
-        if not sess._hbreak_to((load + jmp_off) & MASK):    # self-relocation jmp *%rax
+        if not sess._hbreak_to((load + jmp_off) & MASK):  # self-relocation jmp *%rax
             return None
         rax = evi("$rax")
         if rax is None:
             return None
-        rbx = (rax - lea_imm) & MASK                        # moved decompressor base
-        if not sess._hbreak_to((rbx + ek_off) & MASK):      # extract_kernel
+        rbx = (rax - lea_imm) & MASK  # moved decompressor base
+        if not sess._hbreak_to((rbx + ek_off) & MASK):  # extract_kernel
             return None
         print("[%s] x86 KASLR: extract_kernel reached; decompressing kernel (finish) ..." % NAME)
         execstr("finish")
-        base = evi("$rax")                                  # main-kernel physical entry
+        base = evi("$rax")  # main-kernel physical entry
         if base is None:
             return None
         base &= MASK
@@ -707,8 +728,7 @@ class X86_64(X86_64Common, KernelArch):
 
     # This kernel's own top-level tables.  early_top_pgt is what head_64.S builds
     # and loads; init_top_pgt is the one the kernel proper runs on.
-    pt_root_symbols = ("early_top_pgt", "init_top_pgt", "early_level4_pgt",
-                       "init_level4_pgt")
+    pt_root_symbols = ("early_top_pgt", "init_top_pgt", "early_level4_pgt", "init_level4_pgt")
 
     def _translation_probe(self):
         # Paging is on when CR0.PG (bit 31) is set.  That it is FOUR- or
@@ -724,28 +744,37 @@ class X86_64(X86_64Common, KernelArch):
         # reported as unknown.
         cr0, src0 = self.read_ctrl("cr0")
         if cr0 is None:
-            return ("unknown", "none", None,
-                    "cr0 did not answer (no gdb register, no QEMU monitor)")
+            return ("unknown", "none", None, "cr0 did not answer (no gdb register, no QEMU monitor)")
         if not ((cr0 >> 31) & 1):
             return ("off", src0, None, "cr0=0x%x -> PG(bit31)=0" % cr0)
         efer, _ = self.read_ctrl("efer")
         cr4, _ = self.read_ctrl("cr4")
         if efer is None or cr4 is None:
             self._ia32e = None
-            return ("on", src0, "CR3 (paging structure unconfirmed)",
-                    "cr0=0x%x -> PG=1, but EFER.LMA / CR4.PAE did not answer, so "
-                    "the paging structure's shape is unconfirmed" % cr0)
+            return (
+                "on",
+                src0,
+                "CR3 (paging structure unconfirmed)",
+                "cr0=0x%x -> PG=1, but EFER.LMA / CR4.PAE did not answer, so "
+                "the paging structure's shape is unconfirmed" % cr0,
+            )
         lma, pae = (efer >> 10) & 1, (cr4 >> 5) & 1
         if not (lma and pae):
             self._ia32e = False
-            return ("on", src0, "CR3 (32-bit or PAE paging)",
-                    "cr0 PG=1 but EFER.LMA=%d CR4.PAE=%d -- not 64-bit paging"
-                    % (lma, pae))
+            return (
+                "on",
+                src0,
+                "CR3 (32-bit or PAE paging)",
+                "cr0 PG=1 but EFER.LMA=%d CR4.PAE=%d -- not 64-bit paging" % (lma, pae),
+            )
         la57 = (cr4 >> 12) & 1
         self._ia32e = True
-        return ("on", src0, "CR3 IA-32e (%d-level)" % (5 if la57 else 4),
-                "cr0=0x%x PG=1, EFER=0x%x LMA=1, CR4=0x%x PAE=1 LA57=%d"
-                % (cr0, efer, cr4, la57))
+        return (
+            "on",
+            src0,
+            "CR3 IA-32e (%d-level)" % (5 if la57 else 4),
+            "cr0=0x%x PG=1, EFER=0x%x LMA=1, CR4=0x%x PAE=1 LA57=%d" % (cr0, efer, cr4, la57),
+        )
 
     def auto_calibrate(self, sess):
         """PA - linkVA for a kernel running from its high map, or None.
@@ -778,8 +807,7 @@ class X86_64(X86_64Common, KernelArch):
     def context_summary(self, sess):
         cr0, cr3, cr4 = evi("$cr0"), evi("$cr3"), evi("$cr4")
         pg = "?" if cr0 is None else ("on" if (cr0 >> 31) & 1 else "off")
-        return "paging=%s  cr0=%s cr3=%s cr4=%s efer=%s" % (
-            pg, _h(cr0), _h(cr3), _h(cr4), _h(evi("$efer")))
+        return "paging=%s  cr0=%s cr3=%s cr4=%s efer=%s" % (pg, _h(cr0), _h(cr3), _h(cr4), _h(evi("$efer")))
 
     # cr3 = page-table base (phys), cr2 = fault addr, *_base = segment bases.
     addr_sysregs = frozenset(("cr2", "cr3", "gs_base", "fs_base"))
@@ -788,17 +816,24 @@ class X86_64(X86_64Common, KernelArch):
         n = name.lower()
         if n == "cr0":
             pg = (value >> 31) & 1
-            return "PG=%d (paging %s)  WP=%d PE=%d" % (
-                pg, "on" if pg else "off", (value >> 16) & 1, value & 1)
+            return "PG=%d (paging %s)  WP=%d PE=%d" % (pg, "on" if pg else "off", (value >> 16) & 1, value & 1)
         if n == "cr4":
             la57 = (value >> 12) & 1
             return "PAE=%d  LA57=%d (%s)  SMEP=%d SMAP=%d" % (
-                (value >> 5) & 1, la57, "5-level" if la57 else "4-level",
-                (value >> 20) & 1, (value >> 21) & 1)
+                (value >> 5) & 1,
+                la57,
+                "5-level" if la57 else "4-level",
+                (value >> 20) & 1,
+                (value >> 21) & 1,
+            )
         if n == "efer":
             lma = (value >> 10) & 1
             return "LME=%d  LMA=%d (long mode %s)  NXE=%d" % (
-                (value >> 8) & 1, lma, "active" if lma else "off", (value >> 11) & 1)
+                (value >> 8) & 1,
+                lma,
+                "active" if lma else "off",
+                (value >> 11) & 1,
+            )
         return None
 
     # --- page-table walk (IA-32e: PML4->PDPT->PD->PT, or 5-level with LA57) ---
@@ -815,8 +850,7 @@ class X86_64(X86_64Common, KernelArch):
             self._ptcfg = {}
             return False
         la57 = bool((cr4 >> 12) & 1)
-        self._ptcfg = {"la57": la57, "nlevels": 5 if la57 else 4,
-                       "top_shift": 48 if la57 else 39, "probed": True}
+        self._ptcfg = {"la57": la57, "nlevels": 5 if la57 else 4, "top_shift": 48 if la57 else 39, "probed": True}
         return True
 
     def pt_base_raw(self, va):
@@ -849,8 +883,9 @@ class X86_64(X86_64Common, KernelArch):
         # were kernel code.  A gate keyed on prose breaks the next time the prose
         # is reworded.
         if getattr(self, "_ia32e", None) is not True:
-            LOG.add("x86 pt_base: refusing -- paging is on but not confirmed IA-32e "
-                    "(regime %r)" % (ts.get("regime") or ""))
+            LOG.add(
+                "x86 pt_base: refusing -- paging is on but not confirmed IA-32e (regime %r)" % (ts.get("regime") or "")
+            )
             return None
         cr3, _ = self.read_ctrl("cr3")
         if cr3 is None:
@@ -860,8 +895,7 @@ class X86_64(X86_64Common, KernelArch):
             # count does not.  Four levels is the overwhelmingly common shape, so
             # it is what gets decoded -- but it is recorded as assumed, and
             # pt_config_desc() says so rather than presenting it as read.
-            self._ptcfg = {"la57": False, "nlevels": 4, "top_shift": 39,
-                           "probed": False}
+            self._ptcfg = {"la57": False, "nlevels": 4, "top_shift": 39, "probed": False}
         base = cr3 & self._PA_MASK
         if base == 0:
             return None
@@ -878,16 +912,21 @@ class X86_64(X86_64Common, KernelArch):
         return ((va >> shift) & 0x1FF, shift)
 
     def pt_decode(self, desc, level, shift, nlevels):
-        if not (desc & 1):                                # P=0
+        if not (desc & 1):  # P=0
             return ("invalid", None, None, "")
         rw, us, a, d = (desc >> 1) & 1, (desc >> 2) & 1, (desc >> 5) & 1, (desc >> 6) & 1
         g, nx = (desc >> 8) & 1, (desc >> 63) & 1
         ps = (desc >> 7) & 1
-        last = (level == nlevels - 1)
-        huge = ps and not last                            # 1G at PDPT / 2M at PD
-        attrs = "%s %s%s%s%s%s" % ("W" if rw else "R", "U" if us else "S",
-                                   " A" if a else "", " D" if d else "",
-                                   " G" if g else "", " NX" if nx else "")
+        last = level == nlevels - 1
+        huge = ps and not last  # 1G at PDPT / 2M at PD
+        attrs = "%s %s%s%s%s%s" % (
+            "W" if rw else "R",
+            "U" if us else "S",
+            " A" if a else "",
+            " D" if d else "",
+            " G" if g else "",
+            " NX" if nx else "",
+        )
         if not last and not huge:
             return ("table", desc & self._PA_MASK, None, "")
         leaf_base = desc & self._PA_MASK & ~((1 << shift) - 1)
@@ -898,8 +937,7 @@ class X86_64(X86_64Common, KernelArch):
         if not c:
             return "paging shape not probed (CR4 unread)"
         tag = "" if c.get("probed") else "  [ASSUMED -- CR4 unreadable]"
-        return "%d-level paging (%s)%s" % (
-            c["nlevels"], "LA57 5-level" if c["la57"] else "4-level", tag)
+        return "%d-level paging (%s)%s" % (c["nlevels"], "LA57 5-level" if c["la57"] else "4-level", tag)
 
     # --- mmview support (single CR3 root; VA is sign-extended, not prefixed) ---
     def pt_make_va(self, low, prefix):
@@ -933,10 +971,22 @@ class X86_64(X86_64Common, KernelArch):
 
     # Map census names to a cheap gdb register where one exists; MSRs by number
     # are not gdb registers -> None (shown '?'; kcensus can try the monitor).
-    _CENSUS_REG = {"CR0": "cr0", "CR2": "cr2", "CR3": "cr3", "CR4": "cr4",
-                   "MSR_EFER": "efer", "RFLAGS": "eflags", "CS": "cs", "DS": "ds",
-                   "ES": "es", "SS": "ss", "FS": "fs", "GS": "gs",
-                   "MSR_GS_BASE": "gs_base", "MSR_FS_BASE": "fs_base"}
+    _CENSUS_REG = {
+        "CR0": "cr0",
+        "CR2": "cr2",
+        "CR3": "cr3",
+        "CR4": "cr4",
+        "MSR_EFER": "efer",
+        "RFLAGS": "eflags",
+        "CS": "cs",
+        "DS": "ds",
+        "ES": "es",
+        "SS": "ss",
+        "FS": "fs",
+        "GS": "gs",
+        "MSR_GS_BASE": "gs_base",
+        "MSR_FS_BASE": "fs_base",
+    }
 
     def census_read(self, name):
         r = self._CENSUS_REG.get(name)
@@ -952,55 +1002,108 @@ class X86_64(X86_64Common, KernelArch):
     # arch/x86/include/uapi/asm/processor-flags.h and asm/msr-index.h, not written
     # from memory: a wrong bit number printed beside a live CR4 reads as fact.
     entry_sysregs = (
-        "cr0", "cr2", "cr3", "cr4", "cr8", "efer",
-        "cs", "ss", "ds", "es", "fs", "gs",
-        "fs_base", "gs_base", "k_gs_base",
+        "cr0",
+        "cr2",
+        "cr3",
+        "cr4",
+        "cr8",
+        "efer",
+        "cs",
+        "ss",
+        "ds",
+        "es",
+        "fs",
+        "gs",
+        "fs_base",
+        "gs_base",
+        "k_gs_base",
     )
     flags_reg = "eflags"
 
     # A segment selector, same shape for every one of them.
-    _SEG = (("RPL", 1, 0, None), ("TI", 2, 2, {0: "GDT", 1: "LDT"}),
-            ("index", 15, 3, None))
+    _SEG = (("RPL", 1, 0, None), ("TI", 2, 2, {0: "GDT", 1: "LDT"}), ("index", 15, 3, None))
 
     sysreg_fields = {
-        "cr0": (("PE", 0, 0, {0: "real mode", 1: "protected mode"}),
-                ("MP", 1, 1, None), ("EM", 2, 2, None), ("TS", 3, 3, None),
-                ("ET", 4, 4, None), ("NE", 5, 5, None),
-                ("WP", 16, 16, {0: "RO pages writable in ring 0", 1: "write-protect on"}),
-                ("AM", 18, 18, None), ("NW", 29, 29, None),
-                ("CD", 30, 30, {0: "caches on", 1: "caches disabled"}),
-                ("PG", 31, 31, {0: "paging off", 1: "paging on"})),
+        "cr0": (
+            ("PE", 0, 0, {0: "real mode", 1: "protected mode"}),
+            ("MP", 1, 1, None),
+            ("EM", 2, 2, None),
+            ("TS", 3, 3, None),
+            ("ET", 4, 4, None),
+            ("NE", 5, 5, None),
+            ("WP", 16, 16, {0: "RO pages writable in ring 0", 1: "write-protect on"}),
+            ("AM", 18, 18, None),
+            ("NW", 29, 29, None),
+            ("CD", 30, 30, {0: "caches on", 1: "caches disabled"}),
+            ("PG", 31, 31, {0: "paging off", 1: "paging on"}),
+        ),
         # CR3 deliberately has no field table.  Bits[11:0] are PCID when CR4.PCIDE
         # is set and PWT/PCD when it is not, so naming them without reading CR4
         # would state one layout while the other is live; and bits[51:12] are the
         # table base, which is an address and is already printed as the value.
-        "cr4": (("VME", 0, 0, None), ("PVI", 1, 1, None), ("TSD", 2, 2, None),
-                ("DE", 3, 3, None), ("PSE", 4, 4, None),
-                ("PAE", 5, 5, {0: "32-bit paging", 1: "PAE/long-mode paging"}),
-                ("MCE", 6, 6, None), ("PGE", 7, 7, {0: "no global pages", 1: "global pages"}),
-                ("PCE", 8, 8, None), ("OSFXSR", 9, 9, None), ("OSXMMEXCPT", 10, 10, None),
-                ("UMIP", 11, 11, None),
-                ("LA57", 12, 12, {0: "4-level paging", 1: "5-level paging"}),
-                ("VMXE", 13, 13, None), ("SMXE", 14, 14, None), ("FSGSBASE", 16, 16, None),
-                ("PCIDE", 17, 17, {0: "PCID off", 1: "PCID on"}),
-                ("OSXSAVE", 18, 18, None), ("SMEP", 20, 20, None), ("SMAP", 21, 21, None),
-                ("PKE", 22, 22, None), ("CET", 23, 23, None), ("LASS", 27, 27, None),
-                ("FRED", 32, 32, None)),
+        "cr4": (
+            ("VME", 0, 0, None),
+            ("PVI", 1, 1, None),
+            ("TSD", 2, 2, None),
+            ("DE", 3, 3, None),
+            ("PSE", 4, 4, None),
+            ("PAE", 5, 5, {0: "32-bit paging", 1: "PAE/long-mode paging"}),
+            ("MCE", 6, 6, None),
+            ("PGE", 7, 7, {0: "no global pages", 1: "global pages"}),
+            ("PCE", 8, 8, None),
+            ("OSFXSR", 9, 9, None),
+            ("OSXMMEXCPT", 10, 10, None),
+            ("UMIP", 11, 11, None),
+            ("LA57", 12, 12, {0: "4-level paging", 1: "5-level paging"}),
+            ("VMXE", 13, 13, None),
+            ("SMXE", 14, 14, None),
+            ("FSGSBASE", 16, 16, None),
+            ("PCIDE", 17, 17, {0: "PCID off", 1: "PCID on"}),
+            ("OSXSAVE", 18, 18, None),
+            ("SMEP", 20, 20, None),
+            ("SMAP", 21, 21, None),
+            ("PKE", 22, 22, None),
+            ("CET", 23, 23, None),
+            ("LASS", 27, 27, None),
+            ("FRED", 32, 32, None),
+        ),
         "cr8": (("TPR", 3, 0, None),),
-        "efer": (("SCE", 0, 0, {0: "no syscall/sysret", 1: "syscall/sysret on"}),
-                 ("LME", 8, 8, {0: "long mode disabled", 1: "long mode enabled"}),
-                 ("LMA", 10, 10, {0: "long mode inactive", 1: "long mode active"}),
-                 ("NX", 11, 11, {0: "NX off", 1: "NX on"}),
-                 ("SVME", 12, 12, None), ("LMSLE", 13, 13, None), ("FFXSR", 14, 14, None),
-                 ("TCE", 15, 15, None), ("AUTOIBRS", 21, 21, None)),
-        "eflags": (("CF", 0, 0, None), ("PF", 2, 2, None), ("AF", 4, 4, None),
-                   ("ZF", 6, 6, None), ("SF", 7, 7, None), ("TF", 8, 8, None),
-                   ("IF", 9, 9, {0: "interrupts masked", 1: "interrupts enabled"}),
-                   ("DF", 10, 10, None), ("OF", 11, 11, None), ("IOPL", 13, 12, None),
-                   ("NT", 14, 14, None), ("RF", 16, 16, None), ("VM", 17, 17, None),
-                   ("AC", 18, 18, None), ("VIF", 19, 19, None), ("VIP", 20, 20, None),
-                   ("ID", 21, 21, None)),
-        "cs": _SEG, "ss": _SEG, "ds": _SEG, "es": _SEG, "fs": _SEG, "gs": _SEG,
+        "efer": (
+            ("SCE", 0, 0, {0: "no syscall/sysret", 1: "syscall/sysret on"}),
+            ("LME", 8, 8, {0: "long mode disabled", 1: "long mode enabled"}),
+            ("LMA", 10, 10, {0: "long mode inactive", 1: "long mode active"}),
+            ("NX", 11, 11, {0: "NX off", 1: "NX on"}),
+            ("SVME", 12, 12, None),
+            ("LMSLE", 13, 13, None),
+            ("FFXSR", 14, 14, None),
+            ("TCE", 15, 15, None),
+            ("AUTOIBRS", 21, 21, None),
+        ),
+        "eflags": (
+            ("CF", 0, 0, None),
+            ("PF", 2, 2, None),
+            ("AF", 4, 4, None),
+            ("ZF", 6, 6, None),
+            ("SF", 7, 7, None),
+            ("TF", 8, 8, None),
+            ("IF", 9, 9, {0: "interrupts masked", 1: "interrupts enabled"}),
+            ("DF", 10, 10, None),
+            ("OF", 11, 11, None),
+            ("IOPL", 13, 12, None),
+            ("NT", 14, 14, None),
+            ("RF", 16, 16, None),
+            ("VM", 17, 17, None),
+            ("AC", 18, 18, None),
+            ("VIF", 19, 19, None),
+            ("VIP", 20, 20, None),
+            ("ID", 21, 21, None),
+        ),
+        "cs": _SEG,
+        "ss": _SEG,
+        "ds": _SEG,
+        "es": _SEG,
+        "fs": _SEG,
+        "gs": _SEG,
     }
 
     census = (

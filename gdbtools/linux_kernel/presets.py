@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 from ..common import config
 
 
@@ -16,34 +17,94 @@ from ..common import config
 # ----------------------------------------------------------------------------
 PRESETS = {
     # x86_64
-    "x86-default": {"arch": "x86_64", "anchor": None, "break_kind": None, "verified": True,
-                    "desc": "-M pc/q35 + -kernel bzImage + SeaBIOS, nokaslr (lab default)"},
-    "x86-pvh": {"arch": "x86_64", "anchor": "pvh_start_xen", "break_kind": "sw", "verified": False,
-                "desc": "-kernel vmlinux PVH boot; needs CONFIG_PVH=y so pvh_start_xen exists"},
-    "x86-uefi": {"arch": "x86_64", "anchor": None, "break_kind": "hw", "verified": False,
-                 "desc": "OVMF/EFI-stub; if the kernel relocates off 0x1000000 set $GDBTOOLS_ENTRY_PA"},
-    "x86-grub": {"arch": "x86_64", "anchor": None, "break_kind": "hw", "verified": False,
-                 "desc": "GRUB multiboot/EFI chainload; load addr varies -> set $GDBTOOLS_ENTRY_PA"},
+    "x86-default": {
+        "arch": "x86_64",
+        "anchor": None,
+        "break_kind": None,
+        "verified": True,
+        "desc": "-M pc/q35 + -kernel bzImage + SeaBIOS, nokaslr (lab default)",
+    },
+    "x86-pvh": {
+        "arch": "x86_64",
+        "anchor": "pvh_start_xen",
+        "break_kind": "sw",
+        "verified": False,
+        "desc": "-kernel vmlinux PVH boot; needs CONFIG_PVH=y so pvh_start_xen exists",
+    },
+    "x86-uefi": {
+        "arch": "x86_64",
+        "anchor": None,
+        "break_kind": "hw",
+        "verified": False,
+        "desc": "OVMF/EFI-stub; if the kernel relocates off 0x1000000 set $GDBTOOLS_ENTRY_PA",
+    },
+    "x86-grub": {
+        "arch": "x86_64",
+        "anchor": None,
+        "break_kind": "hw",
+        "verified": False,
+        "desc": "GRUB multiboot/EFI chainload; load addr varies -> set $GDBTOOLS_ENTRY_PA",
+    },
     # arm64
-    "arm64-default": {"arch": "arm64", "anchor": None, "break_kind": None, "verified": True,
-                      "desc": "-M virt + -kernel Image + QEMU boot stub (lab default)"},
-    "arm64-uefi": {"arch": "arm64", "anchor": "primary_entry", "break_kind": "hw", "verified": False,
-                   "desc": "edk2/EFI-stub enters primary_entry, skipping the _text header"},
-    "arm64-uboot": {"arch": "arm64", "anchor": None, "break_kind": "hw", "verified": False,
-                    "desc": "u-boot booti; like default, supply $GDBTOOLS_DTB/$GDBTOOLS_RAM_BASE for the load addr"},
-    "arm64-atf": {"arch": "arm64", "anchor": None, "break_kind": "hw", "verified": False,
-                  "desc": "ATF/TF-A BL31 -> kernel at EL1; same image base, use $GDBTOOLS_DTB for RAM base"},
+    "arm64-default": {
+        "arch": "arm64",
+        "anchor": None,
+        "break_kind": None,
+        "verified": True,
+        "desc": "-M virt + -kernel Image + QEMU boot stub (lab default)",
+    },
+    "arm64-uefi": {
+        "arch": "arm64",
+        "anchor": "primary_entry",
+        "break_kind": "hw",
+        "verified": False,
+        "desc": "edk2/EFI-stub enters primary_entry, skipping the _text header",
+    },
+    "arm64-uboot": {
+        "arch": "arm64",
+        "anchor": None,
+        "break_kind": "hw",
+        "verified": False,
+        "desc": "u-boot booti; like default, supply $GDBTOOLS_DTB/$GDBTOOLS_RAM_BASE for the load addr",
+    },
+    "arm64-atf": {
+        "arch": "arm64",
+        "anchor": None,
+        "break_kind": "hw",
+        "verified": False,
+        "desc": "ATF/TF-A BL31 -> kernel at EL1; same image base, use $GDBTOOLS_DTB for RAM base",
+    },
     # riscv64
-    "riscv-default": {"arch": "riscv64", "anchor": None, "break_kind": None, "verified": True,
-                      "desc": "-M virt + OpenSBI fw_jump/fw_dynamic (lab default)"},
-    "riscv-uefi": {"arch": "riscv64", "anchor": "_start_kernel", "break_kind": "hw", "verified": False,
-                   "desc": "EFI-stub enters _start_kernel, skipping _start"},
-    "riscv-uboot": {"arch": "riscv64", "anchor": None, "break_kind": "hw", "verified": False,
-                    "desc": "u-boot booti after SBI; supply $GDBTOOLS_DTB/$GDBTOOLS_RAM_BASE for the load addr"},
-    "riscv-mmode": {"arch": "riscv64", "anchor": None, "break_kind": "sw", "verified": False,
-                    "desc": "M-mode/nommu; satp stays 0 -- set $GDBTOOLS_RAM_BASE=0x80000000"},
+    "riscv-default": {
+        "arch": "riscv64",
+        "anchor": None,
+        "break_kind": None,
+        "verified": True,
+        "desc": "-M virt + OpenSBI fw_jump/fw_dynamic (lab default)",
+    },
+    "riscv-uefi": {
+        "arch": "riscv64",
+        "anchor": "_start_kernel",
+        "break_kind": "hw",
+        "verified": False,
+        "desc": "EFI-stub enters _start_kernel, skipping _start",
+    },
+    "riscv-uboot": {
+        "arch": "riscv64",
+        "anchor": None,
+        "break_kind": "hw",
+        "verified": False,
+        "desc": "u-boot booti after SBI; supply $GDBTOOLS_DTB/$GDBTOOLS_RAM_BASE for the load addr",
+    },
+    "riscv-mmode": {
+        "arch": "riscv64",
+        "anchor": None,
+        "break_kind": "sw",
+        "verified": False,
+        "desc": "M-mode/nommu; satp stays 0 -- set $GDBTOOLS_RAM_BASE=0x80000000",
+    },
 }
 
 config.provide("PRESET", choices=PRESETS)
 
-__all__ = ['PRESETS']
+__all__ = ["PRESETS"]

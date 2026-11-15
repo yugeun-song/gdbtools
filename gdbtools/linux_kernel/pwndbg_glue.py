@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import os
 import re
 import json
@@ -26,6 +27,7 @@ class _Pwndbg:
             import pwndbg.ui as _u
             import pwndbg.color as _col
             import pwndbg.chain as _ch
+
             if isinstance(getattr(_c, "context_sections", None), dict):
                 self._ctx, self._ui, self._color, self._chain = _c, _u, _col, _ch
                 self.ok = True
@@ -130,8 +132,9 @@ def context_flow(*args, **kwargs):
             return []
         if kwargs.get("with_banner", True):
             title = "disasm + arrows"
-            try:                                # match pwndbg's disasm banner arch tag
-                import pwndbg.aglib             # `arch` is an attribute, not a module
+            try:  # match pwndbg's disasm banner arch tag
+                import pwndbg.aglib  # `arch` is an attribute, not a module
+
                 title = "disasm + arrows / %s" % pwndbg.aglib.arch.name
             except Exception:
                 pass
@@ -177,17 +180,17 @@ def context_flow(*args, **kwargs):
 class _SafeProbe:
     def __init__(self):
         self.installed = False
-        self.mode = "off"           # auto | on | off; GDBTOOLS_SAFEMEM, off unless stated
+        self.mode = "off"  # auto | on | off; GDBTOOLS_SAFEMEM, off unless stated
         self._orig = None
         self._mod = None
-        self._cache = {}            # page -> True/False (mapped)
+        self._cache = {}  # page -> True/False (mapped)
         self.blocked = 0
-        self.rescued = 0            # reads re-served from monitor xp at a physical stop
-        self._in_rescue = False     # reentrancy guard around the monitor read
-        self._ram_cache = {}        # page -> is-guest-RAM (gpa2hva), for the rescue bound
-        self._v2p_cache = {}        # va-page -> gpa-page (gva2gpa), for the VA rescue
-        self._pinned = None         # core HMP is pointed at, as far as WE set it
-        self._mon = None            # does this target answer HMP at all (session-wide)
+        self.rescued = 0  # reads re-served from monitor xp at a physical stop
+        self._in_rescue = False  # reentrancy guard around the monitor read
+        self._ram_cache = {}  # page -> is-guest-RAM (gpa2hva), for the rescue bound
+        self._v2p_cache = {}  # va-page -> gpa-page (gva2gpa), for the VA rescue
+        self._pinned = None  # core HMP is pointed at, as far as WE set it
+        self._mon = None  # does this target answer HMP at all (session-wide)
         self._level = ""
 
     # One 4 KiB page: the largest block the rescue re-serves through `monitor xp`.
@@ -229,8 +232,9 @@ class _SafeProbe:
             elif getattr(cls.read_memory, "_gdbtools_safeprobe", False):
                 cls.read_memory = orig
             self._mod, self._orig = cls, orig
-            guard = self                       # SAFEPROBE instance, closed over
+            guard = self  # SAFEPROBE instance, closed over
             _orig = orig
+
             def _wrapped(inferior, address, size, partial=False, _g=guard, _o=_orig):
                 # Bound as a CLASS method: `inferior` is the GDBProcess self.
                 #
@@ -279,6 +283,7 @@ class _SafeProbe:
                     if r is not None:
                         return r
                     raise
+
             _wrapped._gdbtools_safeprobe = True
             cls.read_memory = _wrapped
             self.installed = True
@@ -332,7 +337,7 @@ class _SafeProbe:
                     pass
             LOG.add("safeprobe: restored %s" % lvl)
         self.installed = False
-        self._mon = None            # the next target may not be a QEMU guest at all
+        self._mon = None  # the next target may not be a QEMU guest at all
 
     def flush(self):
         self._cache.clear()
@@ -400,7 +405,7 @@ class _SafeProbe:
         try:
             t = gdb.selected_thread()
             if t is not None:
-                order.append(int(t.num) - 1)        # gdb thread N <-> QEMU cpu N-1
+                order.append(int(t.num) - 1)  # gdb thread N <-> QEMU cpu N-1
         except Exception:
             pass
         try:
@@ -413,15 +418,15 @@ class _SafeProbe:
             for idx in order:
                 if idx < 0:
                     continue
-                self._pin_cpu(idx)                   # translate via THIS core's page tables
+                self._pin_cpu(idx)  # translate via THIS core's page tables
                 out = execstr("monitor gva2gpa 0x%x" % page) or ""
                 mm = re.search(r"gpa:\s*(0x[0-9a-fA-F]+)", out)
                 if not mm:
                     continue
                 gpa = int(mm.group(1), 16) & ~0xFFF
-                if gpa == page:                      # identity -> Bare/MMU-off core, not real
+                if gpa == page:  # identity -> Bare/MMU-off core, not real
                     continue
-                if a is not None and a._is_va(gpa):   # still a VA -> not a physical answer
+                if a is not None and a._is_va(gpa):  # still a VA -> not a physical answer
                     continue
                 return gpa
             return None
@@ -464,7 +469,7 @@ class _SafeProbe:
         self._ram_cache[page] = ok
         return ok
 
-    @safe(default=None, boundary="hook")      # runs inside pwndbg's read path
+    @safe(default=None, boundary="hook")  # runs inside pwndbg's read path
     def _rescue(self, addr, size):
         """A live pwndbg read of `addr` failed -- re-serve it from QEMU's `monitor xp`.
 
@@ -495,15 +500,15 @@ class _SafeProbe:
         n = max(int(size), 0)
         if n == 0:
             return bytearray()
-        if n > self._MAX_RESCUE_BYTES:          # pwndbg reads are small; cap monitor cost
+        if n > self._MAX_RESCUE_BYTES:  # pwndbg reads are small; cap monitor cost
             return None
         if a._is_va(addr):
-            pa = self._va_to_pa(addr)           # translate a mapped VA; None if not live
+            pa = self._va_to_pa(addr)  # translate a mapped VA; None if not live
             if pa is None:
                 return None
         else:
             pa = addr
-        if not self._is_ram(pa):                # RAM only -> never dispatch to a device
+        if not self._is_ram(pa):  # RAM only -> never dispatch to a device
             return None
         return self._monitor_read(pa, n)
 
@@ -536,7 +541,7 @@ class _SafeProbe:
         self._pin_cpu(self._gdb_cpu())
         out = execstr("monitor gva2gpa 0x%x" % page)
         if not out:
-            return None                      # no monitor -> cannot judge, allow
+            return None  # no monitor -> cannot judge, allow
         m = re.search(r"gpa:\s*(0x[0-9a-fA-F]+)", out)
         if m is not None:
             # Translating is not the same as being safe to read, and that difference is
@@ -552,7 +557,7 @@ class _SafeProbe:
         elif "Unmapped" in out:
             ok = False
         else:
-            return None                      # unrecognised answer -> allow
+            return None  # unrecognised answer -> allow
         self._cache[page] = ok
         return ok
 
@@ -571,11 +576,10 @@ class _SafeProbe:
         if self._mon is not None:
             return self._mon
         if gdb.selected_thread() is None:
-            return False                     # nothing attached yet -- ask again later
+            return False  # nothing attached yet -- ask again later
         out = execstr("monitor gpa2hva 0") or ""
         self._mon = bool(re.search(r"Host virtual address|is not RAM|No memory is mapped", out))
-        LOG.add("safeprobe: QEMU monitor %s"
-                % ("answers" if self._mon else "absent -- guard inert"))
+        LOG.add("safeprobe: QEMU monitor %s" % ("answers" if self._mon else "absent -- guard inert"))
         return self._mon
 
     def _active(self):
@@ -631,7 +635,7 @@ class _SafeProbe:
         try:
             block = self._active() and self._mapped(addr) is False
         except Exception:
-            block = False                     # never let the guard break a read
+            block = False  # never let the guard break a read
         if block:
             self.blocked += 1
             raise self._unmapped_error(addr)
@@ -704,6 +708,7 @@ def _translation_off():
     would break the steady-state case it is not meant to touch."""
     try:
         import pwndbg.aglib.kernel as _k
+
         return _k.paging_enabled() is False
     except Exception:
         return False
@@ -738,6 +743,7 @@ def install_kernel_guards():
     no-op for any entry whose module or symbol is absent, so a pwndbg that has moved
     or fixed one of these simply gets one guard fewer."""
     import importlib
+
     installed = []
     for modname, name, fallback in _KGUARDS:
         try:
@@ -747,12 +753,14 @@ def install_kernel_guards():
         orig = getattr(mod, name, None)
         if orig is None or getattr(orig, "_kgdb_guarded", False):
             continue
+
         def _wrapped(*a, _o=orig, _f=fallback, _n=name, **kw):
             try:
                 return _o(*a, **kw)
             except Exception:
                 KGUARD_HITS[_n] = KGUARD_HITS.get(_n, 0) + 1
                 return _f
+
         _wrapped._kgdb_guarded = True
         _wrapped._kgdb_orig = orig
         setattr(mod, name, _wrapped)
@@ -765,6 +773,7 @@ def install_kernel_guards():
         orig = getattr(mod, name, None)
         if orig is None or getattr(orig, "_kgdb_guarded", False):
             continue
+
         def _refusing(*a, _o=orig, _p=predicate, _r=refusal, _n=name, **kw):
             if _p():
                 KGUARD_HITS[_n] = KGUARD_HITS.get(_n, 0) + 1
@@ -774,21 +783,21 @@ def install_kernel_guards():
             except Exception:
                 KGUARD_HITS[_n] = KGUARD_HITS.get(_n, 0) + 1
                 return _r
+
         _refusing._kgdb_guarded = True
         _refusing._kgdb_orig = orig
         setattr(mod, name, _refusing)
         installed.append(name)
     if installed:
-        LOG.add("kguard: wrapped %s (a failed decorative read no longer kills context)"
-                % ", ".join(installed))
+        LOG.add("kguard: wrapped %s (a failed decorative read no longer kills context)" % ", ".join(installed))
     return bool(installed)
 
 
 def uninstall_kernel_guards():
     import importlib
+
     restored = []
-    for modname, name in ([(m, n) for m, n, _f in _KGUARDS]
-                          + [(m, n) for m, n, _p, _r in _KREFUSALS]):
+    for modname, name in [(m, n) for m, n, _f in _KGUARDS] + [(m, n) for m, n, _p, _r in _KREFUSALS]:
         try:
             mod = importlib.import_module(modname)
         except Exception:
@@ -803,5 +812,15 @@ def uninstall_kernel_guards():
     return bool(restored)
 
 
-__all__ = ['_Pwndbg', 'PWN', '_SafeProbe', 'SAFEPROBE', 'context_kgdb', 'context_flow', 'context_msysreg',
-           'install_kernel_guards', 'uninstall_kernel_guards', 'KGUARD_HITS']
+__all__ = [
+    "_Pwndbg",
+    "PWN",
+    "_SafeProbe",
+    "SAFEPROBE",
+    "context_kgdb",
+    "context_flow",
+    "context_msysreg",
+    "install_kernel_guards",
+    "uninstall_kernel_guards",
+    "KGUARD_HITS",
+]

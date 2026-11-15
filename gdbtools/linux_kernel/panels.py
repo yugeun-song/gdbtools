@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import gdb
 from ..common.runtime import *
 from .pwndbg_glue import PWN, context_kgdb, context_flow, context_msysreg
@@ -54,7 +55,7 @@ class PanelMixin:
         cells = []
         for fname, hi, lo, reading in specs:
             if hi < lo:
-                continue                       # malformed entry: say nothing, never guess
+                continue  # malformed entry: say nothing, never guess
             v = a.field_extract(value, hi, lo)
             span = "[%d]" % lo if hi == lo else "[%d:%d]" % (hi, lo)
             # The field's KIND picks the base, not its value: flipping base with
@@ -82,7 +83,8 @@ class PanelMixin:
         for c in cells:
             add = c if not cur else (cur + "  " + c)
             if len(add) > avail and cur:
-                rows.append(cur); cur = c
+                rows.append(cur)
+                cur = c
             else:
                 cur = add
         if cur:
@@ -107,7 +109,7 @@ class PanelMixin:
         names = getattr(a, "entry_sysregs", ())
         if not names:
             return []
-        full = (self.msysreg_mode == "full")
+        full = self.msysreg_mode == "full"
         meta = {}
         for ent in getattr(a, "census", ()):
             if len(ent) >= 3:
@@ -156,12 +158,13 @@ class PanelMixin:
         if fr:
             fv = reg(fr)
             if fv is None and fr == "pstate":
-                fv = reg("cpsr")          # older gdb spells the same register cpsr
+                fv = reg("cpsr")  # older gdb spells the same register cpsr
             if fv is not None:
                 lines.append(PWN.color("blue", "flags") or "flags")
                 nmc = PWN.color("cyan", "%-16s" % fr.upper()) or ("%-16s" % fr.upper())
-                lines.append("%s%s %s" % (self._MSYSREG_LEAD, nmc,
-                                          PWN.color("yellow", "0x%016x" % fv) or ("0x%016x" % fv)))
+                lines.append(
+                    "%s%s %s" % (self._MSYSREG_LEAD, nmc, PWN.color("yellow", "0x%016x" % fv) or ("0x%016x" % fv))
+                )
                 lines += self._msysreg_field_lines(a, fr, fv, width)
         return lines
 
@@ -187,7 +190,7 @@ class PanelMixin:
             return
         existing = secs.get("m")
         if existing is not None and getattr(existing, "__name__", "") != "context_msysreg":
-            return                            # 'm' taken by a different tool
+            return  # 'm' taken by a different tool
         secs["m"] = context_msysreg
         cfg = getattr(PWN._ctx, "config_context_sections", None)
         val = getattr(cfg, "value", None)
@@ -201,7 +204,7 @@ class PanelMixin:
                 else:
                     parts.append("msysreg")
                 try:
-                    cfg.value = " ".join(parts)   # direct: avoid the list-reverting validator
+                    cfg.value = " ".join(parts)  # direct: avoid the list-reverting validator
                 except Exception:
                     exec_confirmless("set context-sections %s" % " ".join(parts))
             nv = getattr(cfg, "value", "")
@@ -221,7 +224,7 @@ class PanelMixin:
         if isinstance(val, str) and "msysreg" in val.split():
             new = " ".join(p for p in val.split() if p != "msysreg")
             try:
-                cfg.value = new               # direct: avoid pwndbg's list-reverting validator
+                cfg.value = new  # direct: avoid pwndbg's list-reverting validator
             except Exception:
                 exec_confirmless("set context-sections %s" % new)
         self._msysreg_installed = False
@@ -229,10 +232,22 @@ class PanelMixin:
     # --- cross-regime register twins (tool's own panel; pwndbg REGISTERS untouched) ---
     # Registers that carry a flags/status word, not an address -- excluded from the twin
     # scan so a value like cpsr=0x800003c5 (the N flag set) is not mistaken for a pointer.
-    _FLAG_REGS = frozenset((
-        "cpsr", "pstate", "spsr", "spsr_el1", "daif", "nzcv", "fpsr", "fpcr",
-        "eflags", "rflags", "mxcsr", "cct_status",
-    ))
+    _FLAG_REGS = frozenset(
+        (
+            "cpsr",
+            "pstate",
+            "spsr",
+            "spsr_el1",
+            "daif",
+            "nzcv",
+            "fpsr",
+            "fpcr",
+            "eflags",
+            "rflags",
+            "mxcsr",
+            "cct_status",
+        )
+    )
 
     @safe(default=[])
     def _gp_registers(self):
@@ -276,13 +291,13 @@ class PanelMixin:
         a = self.ensure_arch()
         if a is None or self.offset is None:
             return []
-        if self.which_map() == "virtual":        # VAs are reachable here -> no twin needed
+        if self.which_map() == "virtual":  # VAs are reachable here -> no twin needed
             return []
         hits = []
         for name, val in self._gp_registers():
             if not val or name.lower() in self._FLAG_REGS:
-                continue                         # a flags/status word is not an address
-            if not a._is_va(val):                # only a VA has an unreachable-here twin
+                continue  # a flags/status word is not an address
+            if not a._is_va(val):  # only a VA has an unreachable-here twin
                 continue
             pa = self.v2p(val)
             if self._pa_plausible(pa):
@@ -291,8 +306,10 @@ class PanelMixin:
                 break
         if not hits:
             return []
-        head = PWN.color("blue", "cross-regime regs (VA -> reachable PA twin):") \
+        head = (
+            PWN.color("blue", "cross-regime regs (VA -> reachable PA twin):")
             or "cross-regime regs (VA -> reachable PA twin):"
+        )
         return [" " + head] + ["   " + h for h in hits]
 
     # --- early-boot register census rendering ---------------------------
@@ -325,8 +342,7 @@ class PanelMixin:
                         val = "0x%x" % v
                         dec = a.decode_sysreg(name, v) or ""
                     nmc = PWN.color("cyan", "%-18s" % name) or ("%-18s" % name)
-                    lines.append("  %s %-3s %-20s %s" %
-                                 (nmc, acc, val, dec if dec else purpose))
+                    lines.append("  %s %-3s %-20s %s" % (nmc, acc, val, dec if dec else purpose))
             else:
                 parts = []
                 for name, acc, _purpose in groups[cat]:
@@ -334,7 +350,7 @@ class PanelMixin:
                         continue
                     v = a.census_read(name)
                     if v is None:
-                        self._census_dead.add(name)      # skip next time (fast)
+                        self._census_dead.add(name)  # skip next time (fast)
                         continue
                     nmc = PWN.color("cyan", name) or name
                     parts.append("%s=0x%x" % (nmc, v & MASK))
@@ -361,8 +377,8 @@ class PanelMixin:
         # also makes (re)install idempotent.
         existing = secs.get("k")
         if existing is not None and getattr(existing, "__name__", "") != "context_kgdb":
-            return                            # 'k' taken by a different tool; use the line
-        secs["k"] = context_kgdb              # (re)point to the current function object
+            return  # 'k' taken by a different tool; use the line
+        secs["k"] = context_kgdb  # (re)point to the current function object
         cfg = getattr(PWN._ctx, "config_context_sections", None)
         val = getattr(cfg, "value", None)
         if cfg is not None and isinstance(val, str):
@@ -434,16 +450,17 @@ class PanelMixin:
         if pc is None:
             return []
         arch = self.ensure_arch() or detect_arch()
-        _hdr, rows = _kdismod._kdis_disasm("")            # current function, or $pc,+0x60
+        _hdr, rows = _kdismod._kdis_disasm("")  # current function, or $pc,+0x60
         if not rows:
             return []
         pci = next((i for i, r in enumerate(rows) if r[1]), None)
-        if pci is None:                          # no '=>' (range disasm): match $pc
+        if pci is None:  # no '=>' (range disasm): match $pc
             pci = next((i for i, r in enumerate(rows) if r[0] == (pc & MASK)), 0)
         lo = max(0, pci - self.kdis_before)
         hi = min(len(rows), pci + self.kdis_after + 1)
-        return _kdismod._kdis_lines(rows[lo:hi], arch, color=not config.get("NO_COLOR"),
-                                    ascii_mode=bool(config.get("KDIS_ASCII")))
+        return _kdismod._kdis_lines(
+            rows[lo:hi], arch, color=not config.get("NO_COLOR"), ascii_mode=bool(config.get("KDIS_ASCII"))
+        )
 
     @safe()
     def _install_kdisasm_section(self):
@@ -460,14 +477,14 @@ class PanelMixin:
             return
         existing = secs.get("f")
         if existing is not None and getattr(existing, "__name__", "") != "context_flow":
-            return                            # 'f' taken by a different tool
+            return  # 'f' taken by a different tool
         secs["f"] = context_flow
         cfg = getattr(PWN._ctx, "config_context_sections", None)
         val = getattr(cfg, "value", None)
         if cfg is not None and isinstance(val, str):
             if "flow" not in val.split():
                 parts = val.split()
-                if "disasm" in parts:               # KEEP pwndbg's rich disasm, add flow next to it
+                if "disasm" in parts:  # KEEP pwndbg's rich disasm, add flow next to it
                     parts.insert(parts.index("disasm") + 1, "flow")
                 elif "code" in parts:
                     parts.insert(parts.index("code") + 1, "flow")
@@ -475,7 +492,7 @@ class PanelMixin:
                     parts.append("flow")
                 new = " ".join(parts)
                 try:
-                    cfg.value = new           # direct: avoid pwndbg's list-reverting validator
+                    cfg.value = new  # direct: avoid pwndbg's list-reverting validator
                 except Exception:
                     exec_confirmless("set context-sections %s" % new)
             nv = getattr(cfg, "value", "")
@@ -496,7 +513,7 @@ class PanelMixin:
             # The install only inserted `flow`; take exactly that back out.
             new = " ".join(p for p in val.split() if p != "flow")
             try:
-                cfg.value = new                 # direct: avoid pwndbg's list-reverting validator
+                cfg.value = new  # direct: avoid pwndbg's list-reverting validator
             except Exception:
                 exec_confirmless("set context-sections %s" % new)
         self._kdisasm_installed = False
@@ -504,14 +521,24 @@ class PanelMixin:
     @safe()
     def set_msysreg(self, mode):
         mode = (mode or "").lower()
-        aliases = {"on": "compact", "c": "compact", "1": "compact",
-                   "full": "full", "all": "full", "f": "full",
-                   "off": "off", "0": "off", "no": "off"}
+        aliases = {
+            "on": "compact",
+            "c": "compact",
+            "1": "compact",
+            "full": "full",
+            "all": "full",
+            "f": "full",
+            "off": "off",
+            "0": "off",
+            "no": "off",
+        }
         mode = aliases.get(mode, mode)
         if mode not in ("off", "compact", "full"):
-            print("usage: kearly msysreg <off|compact|full>  "
-                  "(compact = only registers this target answers for; "
-                  "full = every one, unreadable ones as '?')")
+            print(
+                "usage: kearly msysreg <off|compact|full>  "
+                "(compact = only registers this target answers for; "
+                "full = every one, unreadable ones as '?')"
+            )
             return
         # The window is one of PANELS, so the hand control states PANELS too and a
         # later `kearly on` or re-source keeps what was chosen here.
@@ -527,20 +554,29 @@ class PanelMixin:
 
     def set_census(self, mode):
         mode = (mode or "").lower()
-        aliases = {"on": "compact", "c": "compact", "1": "compact",
-                   "full": "full", "all": "full", "f": "full",
-                   "off": "off", "0": "off", "no": "off"}
+        aliases = {
+            "on": "compact",
+            "c": "compact",
+            "1": "compact",
+            "full": "full",
+            "all": "full",
+            "f": "full",
+            "off": "off",
+            "0": "off",
+            "no": "off",
+        }
         mode = aliases.get(mode, mode)
         if mode not in ("off", "compact", "full"):
-            print("usage: kearly census <off|compact|full>  "
-                  "(compact = dense per-category row; full = annotated dump)")
+            print("usage: kearly census <off|compact|full>  (compact = dense per-category row; full = annotated dump)")
             return
         self.census_mode = mode
-        self._census_dead.clear()          # re-probe exposure on the next stop
+        self._census_dead.clear()  # re-probe exposure on the next stop
         a = self.ensure_arch()
         n = len(getattr(a, "census", ())) if a else 0
-        print("[%s] census panel = %s  (%d early-boot registers tracked for %s; "
-              "full annotated dump: kcensus)" % (NAME, mode, n, a.key if a else "?"))
+        print(
+            "[%s] census panel = %s  (%d early-boot registers tracked for %s; "
+            "full annotated dump: kcensus)" % (NAME, mode, n, a.key if a else "?")
+        )
 
     @safe()
     def set_chain_hops(self, val):
@@ -549,13 +585,13 @@ class PanelMixin:
         try:
             n = int(str(val), 0)
         except Exception:
-            print("usage: kearly chaindepth <N>   (telescope hop depth, current=%d)"
-                  % self.chain_hops)
+            print("usage: kearly chaindepth <N>   (telescope hop depth, current=%d)" % self.chain_hops)
             return
         self.chain_hops = max(1, min(n, 256))
-        print("[%s] telescope depth = %d hops  (safe_chain: bounded, cycle-guarded; "
-              "applies to the panel TTBR/addr telescopes, ksregs, chain)"
-              % (NAME, self.chain_hops))
+        print(
+            "[%s] telescope depth = %d hops  (safe_chain: bounded, cycle-guarded; "
+            "applies to the panel TTBR/addr telescopes, ksregs, chain)" % (NAME, self.chain_hops)
+        )
 
     @safe(default=None)
     def _emulate_state(self):
@@ -584,9 +620,11 @@ class PanelMixin:
             print("[%s] saferender=%s   pwndbg emulate=%s" % (NAME, self.saferender, cur))
             return
         if mode not in ("warn", "on", "off", "auto"):
-            print("usage: kearly saferender <warn|on|off|auto|status>   (on/auto turn "
-                  "pwndbg's emulated disasm OFF -- it SIGABRTs gdb on some arm64 instructions; "
-                  "off restores it; warn only prints a heads-up)")
+            print(
+                "usage: kearly saferender <warn|on|off|auto|status>   (on/auto turn "
+                "pwndbg's emulated disasm OFF -- it SIGABRTs gdb on some arm64 instructions; "
+                "off restores it; warn only prints a heads-up)"
+            )
             return
         config.set_session("SAFERENDER", mode)
         if mode in ("on", "auto"):
@@ -595,12 +633,14 @@ class PanelMixin:
             elif self._pwndbg_emulates():
                 self._param_set("emulate", "off")
                 LOG.add("saferender: pwndbg emulate -> off")
-                print("[%s] saferender=%s: pwndbg 'emulate' OFF for this session (guards the "
-                      "arm64 emulated-disasm SIGABRT; restored on 'kearly off' / 'saferender off')."
-                      % (NAME, mode))
+                print(
+                    "[%s] saferender=%s: pwndbg 'emulate' OFF for this session (guards the "
+                    "arm64 emulated-disasm SIGABRT; restored on 'kearly off' / 'saferender off')." % (NAME, mode)
+                )
             else:
-                print("[%s] saferender=%s  (pwndbg emulate already off / pwndbg absent -- nothing to do)"
-                      % (NAME, mode))
+                print(
+                    "[%s] saferender=%s  (pwndbg emulate already off / pwndbg absent -- nothing to do)" % (NAME, mode)
+                )
         elif mode == "off":
             self._param_restore("emulate")
             print("[%s] saferender=off  (pwndbg emulate restored to its previous value)" % NAME)
@@ -619,10 +659,14 @@ class PanelMixin:
             if "emulate" not in self._saved_params:
                 self._param_set("emulate", "off")
                 LOG.add("saferender: pwndbg emulate -> off (auto, arm64)")
-                print("[%s] saferender=%s: pwndbg 'emulate' OFF (arm64 disasm crash guard; "
-                      "restored on 'kearly off')." % (NAME, self.saferender))
+                print(
+                    "[%s] saferender=%s: pwndbg 'emulate' OFF (arm64 disasm crash guard; "
+                    "restored on 'kearly off')." % (NAME, self.saferender)
+                )
             return
-        print("[%s] heads-up (arm64): pwndbg's emulated disasm (Unicorn) can SIGABRT gdb on "
-              "some instructions -- notably early secondary-CPU stops on the v4.6 tree. If gdb "
-              "core-dumps on a stop, run 'kearly saferender on' (or 'set emulate off') and "
-              "re-continue.  pwndbg/Unicorn bug, not the stub." % NAME)
+        print(
+            "[%s] heads-up (arm64): pwndbg's emulated disasm (Unicorn) can SIGABRT gdb on "
+            "some instructions -- notably early secondary-CPU stops on the v4.6 tree. If gdb "
+            "core-dumps on a stop, run 'kearly saferender on' (or 'set emulate off') and "
+            "re-continue.  pwndbg/Unicorn bug, not the stub." % NAME
+        )

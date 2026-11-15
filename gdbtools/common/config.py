@@ -11,6 +11,7 @@ be checked without gdb:
 
     python3 -B -m gdbtools.common.config --check README.md
 """
+
 import os
 import shutil
 import sys
@@ -123,83 +124,146 @@ _TYPES = {
 
 # (name, type, choices or None, meaning).  README's table is rendered from this.
 _DECL = (
-    ("AUTO", "bool", None,
-     "arm the kernel session once a kernel image is loaded: stop hook, calibration, "
-     "MMU-transition notices. The behaviours below stay off unless stated. Unset: "
-     "`kearly on` is manual"),
-    ("BOOT", "enum", ("direct", "uboot", "uefi"),
-     "how the guest was booted. `uboot` and `uefi` make the entry break `hw` unless "
-     "`BREAK_KIND` says otherwise; on x86_64 `direct` puts the decompressor at the "
-     "boot-protocol address 0x100000 unless `X86_DECOMP_PA` says otherwise"),
-    ("SAFEMEM", "enum", ("off", "auto", "on"),
-     "guard pwndbg's memory probes by asking QEMU whether a page is RAM before reading "
-     "it (`kearly safemem`). Unset: off"),
-    ("PWNDBG_GUARDS", "bool", None,
-     "keep pwndbg's context alive on early-boot reads that throw. Unset: off"),
-    ("PANELS", "list", ("kgdb", "flow", "msysreg"),
-     "pwndbg context sections to add: `kgdb` (regime badge), `flow` (branch arrows), "
-     "`msysreg` (system registers and their fields). Unset: none"),
-    ("EXPLORE_PAGES", "enum", ("keep", "off"),
-     "`off` sets pwndbg's `auto-explore-pages` to `no` while the session is on and "
-     "restores it after. Unset: keep"),
-    ("SAFERENDER", "enum", ("off", "warn", "auto", "on"),
-     "arm64 guard for pwndbg's emulated disassembly: `auto` and `on` turn pwndbg "
-     "`emulate` off, `warn` only prints a notice (`kearly saferender`). Unset: off"),
-    ("SHADOW", "bool", None,
-     "load vmlinux again at the physical offset once calibrated, so physical "
-     "addresses symbolize. Unset: off"),
-    ("KASLR_APPLY", "enum", ("off", "auto"),
-     "`auto` relocates gdb's symbols to the KASLR slide at the first virtual stop "
-     "where it is readable (`symbol-file -o`). Unset: off"),
-    ("CROSSING", "bool", None,
-     "when a high-VA probe is set before the slide is known, arm a hidden hardware "
-     "breakpoint on the MMU crossing that applies the slide in passing. Unset: off"),
-    ("ADOPT", "bool", None,
-     "give a plain `b SYM` hardware siblings at its physical and runtime addresses. "
-     "Unset: off"),
-    ("BPFIX", "bool", None,
-     "disable a breakpoint's physical location while the MMU is on (`kearly bpfix`). "
-     "Unset: off"),
-    ("STEPLOCK", "enum", ("off", "on", "auto"),
-     "gdb `scheduler-locking step` while stepping; `auto` only while the MMU is off "
-     "(`kearly steplock`). Unset: off"),
-    ("ENTRY_PA", "address", None,
-     "physical address of the kernel image base. On x86_64 a stated base suppresses "
-     "the decompressor recovery"),
+    (
+        "AUTO",
+        "bool",
+        None,
+        "arm the kernel session once a kernel image is loaded: stop hook, calibration, "
+        "MMU-transition notices. The behaviours below stay off unless stated. Unset: "
+        "`kearly on` is manual",
+    ),
+    (
+        "BOOT",
+        "enum",
+        ("direct", "uboot", "uefi"),
+        "how the guest was booted. `uboot` and `uefi` make the entry break `hw` unless "
+        "`BREAK_KIND` says otherwise; on x86_64 `direct` puts the decompressor at the "
+        "boot-protocol address 0x100000 unless `X86_DECOMP_PA` says otherwise",
+    ),
+    (
+        "SAFEMEM",
+        "enum",
+        ("off", "auto", "on"),
+        "guard pwndbg's memory probes by asking QEMU whether a page is RAM before reading "
+        "it (`kearly safemem`). Unset: off",
+    ),
+    ("PWNDBG_GUARDS", "bool", None, "keep pwndbg's context alive on early-boot reads that throw. Unset: off"),
+    (
+        "PANELS",
+        "list",
+        ("kgdb", "flow", "msysreg"),
+        "pwndbg context sections to add: `kgdb` (regime badge), `flow` (branch arrows), "
+        "`msysreg` (system registers and their fields). Unset: none",
+    ),
+    (
+        "EXPLORE_PAGES",
+        "enum",
+        ("keep", "off"),
+        "`off` sets pwndbg's `auto-explore-pages` to `no` while the session is on and restores it after. Unset: keep",
+    ),
+    (
+        "SAFERENDER",
+        "enum",
+        ("off", "warn", "auto", "on"),
+        "arm64 guard for pwndbg's emulated disassembly: `auto` and `on` turn pwndbg "
+        "`emulate` off, `warn` only prints a notice (`kearly saferender`). Unset: off",
+    ),
+    (
+        "SHADOW",
+        "bool",
+        None,
+        "load vmlinux again at the physical offset once calibrated, so physical addresses symbolize. Unset: off",
+    ),
+    (
+        "KASLR_APPLY",
+        "enum",
+        ("off", "auto"),
+        "`auto` relocates gdb's symbols to the KASLR slide at the first virtual stop "
+        "where it is readable (`symbol-file -o`). Unset: off",
+    ),
+    (
+        "CROSSING",
+        "bool",
+        None,
+        "when a high-VA probe is set before the slide is known, arm a hidden hardware "
+        "breakpoint on the MMU crossing that applies the slide in passing. Unset: off",
+    ),
+    ("ADOPT", "bool", None, "give a plain `b SYM` hardware siblings at its physical and runtime addresses. Unset: off"),
+    (
+        "BPFIX",
+        "bool",
+        None,
+        "disable a breakpoint's physical location while the MMU is on (`kearly bpfix`). Unset: off",
+    ),
+    (
+        "STEPLOCK",
+        "enum",
+        ("off", "on", "auto"),
+        "gdb `scheduler-locking step` while stepping; `auto` only while the MMU is off (`kearly steplock`). Unset: off",
+    ),
+    (
+        "ENTRY_PA",
+        "address",
+        None,
+        "physical address of the kernel image base. On x86_64 a stated base suppresses the decompressor recovery",
+    ),
     ("SCAN", "range", None, "physical range searched for the image magic; replaces every derived range"),
     ("RAM_BASE", "address", None, "RAM base; the scan covers `SCAN_SPAN` bytes from it"),
-    ("SCAN_SPAN", "count", None,
-     "bytes scanned past `RAM_BASE` or a DTB `/memory` base. Default 128 MiB"),
-    ("PHYS_WINDOW", "range", None,
-     "physical range the image may occupy, for the calibration sanity check. Unset: "
-     "the check is skipped"),
+    ("SCAN_SPAN", "count", None, "bytes scanned past `RAM_BASE` or a DTB `/memory` base. Default 128 MiB"),
+    (
+        "PHYS_WINDOW",
+        "range",
+        None,
+        "physical range the image may occupy, for the calibration sanity check. Unset: the check is skipped",
+    ),
     ("PROFILE", "file", None, "JSON machine description (see `profiles/`), validated field by field"),
     ("DTB", "file", None, "device tree blob describing the board"),
     ("PRESET", "enum", None, "boot-combination preset (`kearly preset list`)"),
     ("ANCHOR", "symbol", None, "calibration and entry-break anchor symbol, overriding the preset"),
     ("BREAK_KIND", "enum", ("sw", "hw"), "breakpoint kind for the entry break"),
     ("X86_KASLR", "bool", None, "recover the decompressor-randomized physical base in `kearly bootbreak`"),
-    ("X86_DECOMP_PA", "address", None,
-     "where a direct boot loads the bzImage decompressor; selects the direct-boot "
-     "recovery. Unset: 0x100000 when `BOOT` is `direct`, else the EFI-stub recovery"),
+    (
+        "X86_DECOMP_PA",
+        "address",
+        None,
+        "where a direct boot loads the bzImage decompressor; selects the direct-boot "
+        "recovery. Unset: 0x100000 when `BOOT` is `direct`, else the EFI-stub recovery",
+    ),
     ("X86_DECOMP_VMLINUX", "file", None, "`arch/x86/boot/compressed/vmlinux`, read by the x86 base recovery"),
     ("BINUTIL_NM", "program", None, "`nm` for the x86 decompressor parse. Unset: `nm` on `$PATH`"),
     ("BINUTIL_OBJDUMP", "program", None, "`objdump` for the same parse. Unset: `objdump` on `$PATH`"),
     ("NO_COLOR", "bool", None, "monochrome `cfgdis` and pwndbg flow panel"),
     ("KDIS_ASCII", "bool", None, "ASCII arrows in `cfgdis` and the pwndbg flow panel"),
-    ("DEBUG", "bool", None,
-     "report every exception the safety layer swallows on gdb's stderr; NameError, "
-     "AttributeError and TypeError are reported regardless"),
+    (
+        "DEBUG",
+        "bool",
+        None,
+        "report every exception the safety layer swallows on gdb's stderr; NameError, "
+        "AttributeError and TypeError are reported regardless",
+    ),
     ("MAP_CAP_LEAVES", "count", None, "`mmview` leaf cap (default 20000); `mmview` says when it truncated"),
     ("MAP_CAP_NODES", "count", None, "`mmview` table-node cap (default 60000)"),
-    ("MEMBLOCK_CAP", "count", None, "regions `kmemblock` prints per type (default 512); `kmemblock TYPE full` lifts it"),
+    (
+        "MEMBLOCK_CAP",
+        "count",
+        None,
+        "regions `kmemblock` prints per type (default 512); `kmemblock TYPE full` lifts it",
+    ),
     ("FZF", "program", None, "fzf binary for `fz`. Unset: `fzf` on `$PATH`, else a numbered prompt"),
     ("FZF_OPTS", "words", None, "options appended to fzf's arguments"),
-    ("FZ_KEY", "custom", None,
-     "readline key, optionally with a subject (`\\C-t`, `\\C-r history`), bound to `fz` at load"),
-    ("RISCV_KERNEL_MAP_VIRT_OFF", "int", None,
-     "offset of `virt_addr` in `struct kernel_mapping`, for a riscv vmlinux without "
-     "DWARF (8 on 6.12, 0 on mainline)"),
+    (
+        "FZ_KEY",
+        "custom",
+        None,
+        "readline key, optionally with a subject (`\\C-t`, `\\C-r history`), bound to `fz` at load",
+    ),
+    (
+        "RISCV_KERNEL_MAP_VIRT_OFF",
+        "int",
+        None,
+        "offset of `virt_addr` in `struct kernel_mapping`, for a riscv vmlinux without "
+        "DWARF (8 on 6.12, 0 on mainline)",
+    ),
 )
 
 _BY_NAME = {d[0]: d for d in _DECL}
@@ -272,7 +336,7 @@ def key(name):
     """`shadow`, `SHADOW` or `GDBTOOLS_SHADOW` -> `SHADOW`; KeyError if unknown."""
     n = str(name).strip().upper()
     if n.startswith(PREFIX):
-        n = n[len(PREFIX):]
+        n = n[len(PREFIX) :]
     if n not in _BY_NAME:
         raise KeyError(name)
     return n
@@ -378,20 +442,17 @@ def parse_profile(data, label):
         if key.startswith("_"):
             continue
         if key not in _PROFILE:
-            raise ConfigError("%s: unknown field %r (known: %s)"
-                              % (label, key, ", ".join(sorted(_PROFILE))))
+            raise ConfigError("%s: unknown field %r (known: %s)" % (label, key, ", ".join(sorted(_PROFILE))))
         kind, choices = _PROFILE[key]
         try:
             out[key] = _profile_value(kind, choices, v)
         except (ValueError, TypeError, OverflowError) as e:
-            why = e.args[0] if (isinstance(e, ValueError) and e.args) else \
-                _PROFILE_EXPECT.get(kind) or _TYPES[kind][1]
+            why = e.args[0] if (isinstance(e, ValueError) and e.args) else _PROFILE_EXPECT.get(kind) or _TYPES[kind][1]
             raise ConfigError("%s: field %r is %r, which is not %s" % (label, key, v, why))
     return out
 
 
-_PROFILE_EXPECT = {"ranges": "a lo:hi range or a list of them",
-                   "mmu": '{"reg": NAME, "bit": N}'}
+_PROFILE_EXPECT = {"ranges": "a lo:hi range or a list of them", "mmu": '{"reg": NAME, "bit": N}'}
 
 
 def _type_label(kind, choices):
@@ -419,8 +480,9 @@ def _check(path):
         return 1
     have = text.split(_BEGIN, 1)[1].split(_END, 1)[0].strip()
     if have != markdown_table():
-        print("%s: the GDBTOOLS_* table differs from gdbtools/common/config.py; expected:\n%s"
-              % (path, markdown_table()))
+        print(
+            "%s: the GDBTOOLS_* table differs from gdbtools/common/config.py; expected:\n%s" % (path, markdown_table())
+        )
         return 1
     return 0
 

@@ -26,6 +26,7 @@ the name is the string literal that class's own source passes to __init__.
 Whatever is left is gdb's own.  A `lx-` prefix rule would be wrong on its first
 counterexample and the kernel ships one: scripts/gdb registers `translate-vm`.
 """
+
 import ast
 import gc
 import inspect
@@ -41,12 +42,12 @@ GROUPS = ("gdbtools", "kept", "pwndbg", "kernel", "python", "user", "gdb")
 
 _LABEL = {
     "gdbtools": "this package",
-    "kept":     "abbreviations this package's names made ambiguous, kept as aliases of what they meant",
-    "pwndbg":   "pwndbg, its aliases included",
-    "kernel":   "the kernel's own scripts/gdb",
-    "python":   "other Python extensions, gdb's bundled ones included",
-    "user":     "`define` macros, or a Python command that could not be placed",
-    "gdb":      "gdb itself",
+    "kept": "abbreviations this package's names made ambiguous, kept as aliases of what they meant",
+    "pwndbg": "pwndbg, its aliases included",
+    "kernel": "the kernel's own scripts/gdb",
+    "python": "other Python extensions, gdb's bundled ones included",
+    "user": "`define` macros, or a Python command that could not be placed",
+    "gdb": "gdb itself",
 }
 
 _CACHE_ATTR = "_gdbtools_cmdinfo_cache"
@@ -166,8 +167,7 @@ def _registered_name(cls):
                 break
         else:
             for kw in node.keywords:
-                if kw.arg == "name" and isinstance(kw.value, ast.Constant) \
-                        and isinstance(kw.value.value, str):
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                     found.append(kw.value.value)
                     break
     uniq = list(dict.fromkeys(found))
@@ -205,8 +205,7 @@ def _python_commands(skip=("pwndbg", "gdbtools")):
             if not f:
                 # __main__ has no __file__ once `source` has finished, so the
                 # class's own code object is where the path survives.
-                f = getattr(getattr(vars(cls).get("__init__"), "__code__", None),
-                            "co_filename", "") or ""
+                f = getattr(getattr(vars(cls).get("__init__"), "__code__", None), "co_filename", "") or ""
             names[n] = f
     return (names, unplaced, subs)
 
@@ -223,7 +222,7 @@ def _pwndbg_names():
         n = getattr(c, "command_name", None)
         if n:
             cmds.add(n)
-        for a in (getattr(c, "aliases", None) or ()):
+        for a in getattr(c, "aliases", None) or ():
             aliases.add(a)
     if not cmds:
         return (cmds, aliases, "pwndbg is importable but its command list is empty")
@@ -236,8 +235,7 @@ def _columns(names, width, indent="  "):
         return [indent + "(none)"]
     col = max(len(n) for n in names) + 2
     per = max(1, (width - len(indent)) // col)
-    return [indent + "".join(n.ljust(col) for n in names[i:i + per]).rstrip()
-            for i in range(0, len(names), per)]
+    return [indent + "".join(n.ljust(col) for n in names[i : i + per]).rstrip() for i in range(0, len(names), per)]
 
 
 @safe(default=None)
@@ -325,21 +323,34 @@ def classify():
     if pw_note:
         notes.append(pw_note + ", so its commands are reported as gdb's own")
     if unplaced:
-        notes.append("%d Python command class(es) build their name at runtime and are "
-                     "not listed: %s" % (len(unplaced), ", ".join(sorted(unplaced))))
+        notes.append(
+            "%d Python command class(es) build their name at runtime and are "
+            "not listed: %s" % (len(unplaced), ", ".join(sorted(unplaced)))
+        )
     if derived_gone:
-        notes.append("registered by a Python class but not answered by gdb now: %s"
-                     % " ".join(derived_gone))
+        notes.append("registered by a Python class but not answered by gdb now: %s" % " ".join(derived_gone))
     if unrecognised:
-        notes.append("listed by `help all` but not resolvable on their own: %s"
-                     % " ".join(unrecognised))
+        notes.append("listed by `help all` but not resolvable on their own: %s" % " ".join(unrecognised))
 
-    groups = {"gdbtools": ours_r, "kept": kept, "pwndbg": pwndbg_r, "kernel": kernel,
-              "python": other_py, "user": user, "gdb": builtin}
-    res = {"groups": groups, "recognised": recognised, "subs": subs,
-           "alias": pw_alias, "contested": contested,
-           "dirs": sorted({f.rsplit("/", 1)[0] for f in py.values() if f}),
-           "py_subs": sorted(py_subs), "notes": notes}
+    groups = {
+        "gdbtools": ours_r,
+        "kept": kept,
+        "pwndbg": pwndbg_r,
+        "kernel": kernel,
+        "python": other_py,
+        "user": user,
+        "gdb": builtin,
+    }
+    res = {
+        "groups": groups,
+        "recognised": recognised,
+        "subs": subs,
+        "alias": pw_alias,
+        "contested": contested,
+        "dirs": sorted({f.rsplit("/", 1)[0] for f in py.values() if f}),
+        "py_subs": sorted(py_subs),
+        "notes": notes,
+    }
     setattr(gdb, _CACHE_ATTR, (key, res))
     return res
 
@@ -347,25 +358,25 @@ def classify():
 class CmdInfo(gdb.Command):
     """cmdinfo [GROUP | COMMAND] [-1] [-c] [--sub] : who registered what gdb answers to.
 
-  gdbtools   this package
-  kept       abbreviations this package made ambiguous, kept as aliases
-  pwndbg     pwndbg, aliases included
-  kernel     the kernel's own scripts/gdb
-  python     other Python extensions, gdb's bundled ones included
-  user       `define` macros from a gdbinit
-  gdb        gdb itself
+      gdbtools   this package
+      kept       abbreviations this package made ambiguous, kept as aliases
+      pwndbg     pwndbg, aliases included
+      kernel     the kernel's own scripts/gdb
+      python     other Python extensions, gdb's bundled ones included
+      user       `define` macros from a gdbinit
+      gdb        gdb itself
 
-Every name shown is one gdb resolves right now -- present in `help all` and
-answered by `help NAME`.  Prefix commands are listed apart from leaves with
-their subcommand counts, because `set` alone is not a command you can run.
+    Every name shown is one gdb resolves right now -- present in `help all` and
+    answered by `help NAME`.  Prefix commands are listed apart from leaves with
+    their subcommand counts, because `set` alone is not a command you can run.
 
-  cmdinfo                every group
-  cmdinfo gdb            one group
-  cmdinfo kpgd           who registered one command
-  cmdinfo set            a prefix: its subcommands
-  cmdinfo gdb --sub      include every subcommand path
-  cmdinfo -1             one name per line, for piping
-  cmdinfo -c             counts only"""
+      cmdinfo                every group
+      cmdinfo gdb            one group
+      cmdinfo kpgd           who registered one command
+      cmdinfo set            a prefix: its subcommands
+      cmdinfo gdb --sub      include every subcommand path
+      cmdinfo -1             one name per line, for piping
+      cmdinfo -c             counts only"""
 
     def __init__(self, name="cmdinfo"):
         super(CmdInfo, self).__init__(name, gdb.COMMAND_USER)
@@ -451,8 +462,7 @@ their subcommand counts, because `set` alone is not a command you can run.
             for d in r["dirs"]:
                 print("registered from: %s" % d)
         if r["contested"]:
-            print("[%s] names taken from another extension: %s"
-                  % (NAME, " ".join(r["contested"])))
+            print("[%s] names taken from another extension: %s" % (NAME, " ".join(r["contested"])))
         for n in r["notes"]:
             print("[%s] %s" % (NAME, n))
 

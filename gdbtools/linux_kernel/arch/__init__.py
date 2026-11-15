@@ -3,6 +3,7 @@
 Importing this module registers them over the target-independent ones, so
 `gdbtools.common.arch.detect_arch()` starts returning the full class.
 """
+
 from ...common.arch import register
 from .base import KernelArch
 from .x86_64 import X86_64

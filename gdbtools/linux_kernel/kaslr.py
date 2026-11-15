@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import gdb
 import re
 from ..common.runtime import *
@@ -25,14 +26,14 @@ class KaslrMixin:
         if a is None or self.offset is None:
             return None
         pc = reg("pc")
-        if pc is None or not a._is_va(pc):          # high-VA regime only
+        if pc is None or not a._is_va(pc):  # high-VA regime only
             return None
-        pw = a.pagewalk(pc)                          # monitor-xp walk; no CPU resume
+        pw = a.pagewalk(pc)  # monitor-xp walk; no CPU resume
         if not pw or pw.get("leaf_pa") is None:
             return None
         pa = pw["leaf_pa"] & MASK
-        sym = self.symbolize(pa)                     # pa -> link VA (slide 0) -> symbol
-        if not sym or sym[2] is None:                # not in-image -> defer, no guess
+        sym = self.symbolize(pa)  # pa -> link VA (slide 0) -> symbol
+        if not sym or sym[2] is None:  # not in-image -> defer, no guess
             return None
         return (pc - pa + self.offset) & MASK
 
@@ -96,8 +97,11 @@ class KaslrMixin:
                 out = execstr('printf "%s", ' + s).strip()
             except Exception:
                 out = ""
-            if out and "=" in out and ("root=" in out or "console=" in out
-                                       or "rw" in out.split() or "ro" in out.split()):
+            if (
+                out
+                and "=" in out
+                and ("root=" in out or "console=" in out or "rw" in out.split() or "ro" in out.split())
+            ):
                 return out
         return None
 
@@ -106,8 +110,11 @@ class KaslrMixin:
         if cl is None:
             return ("cmdline", "(unparsed)", "set at start_kernel; KASLR unknown until then")
         no = "nokaslr" in cl.split()
-        return ("cmdline kaslr", "off (nokaslr)" if no else "on",
-                "runtime VA == linked VA" if no else "VAs may be slid")
+        return (
+            "cmdline kaslr",
+            "off (nokaslr)" if no else "on",
+            "runtime VA == linked VA" if no else "VAs may be slid",
+        )
 
     @safe(default=[])
     def _koff_clues(self, a, st):
@@ -119,13 +126,17 @@ class KaslrMixin:
             if sctlr is None:
                 sctlr = a.sysreg("SCTLR_EL1")
             m = None if sctlr is None else (sctlr & 1)
-            c.append(("SCTLR_EL1.M", "?" if m is None else str(m),
-                      "MMU %s -> ptrs %s" % (("on", "VIRTUAL") if m else ("off", "PHYSICAL"))))
+            c.append(
+                (
+                    "SCTLR_EL1.M",
+                    "?" if m is None else str(m),
+                    "MMU %s -> ptrs %s" % (("on", "VIRTUAL") if m else ("off", "PHYSICAL")),
+                )
+            )
             ttbr1 = evi("$TTBR1_EL1")
             if ttbr1 is None:
                 ttbr1 = a.sysreg("TTBR1_EL1")
-            c.append(("TTBR1_EL1", _h(ttbr1),
-                      "kernel page-table base" if ttbr1 else "kernel tables not installed"))
+            c.append(("TTBR1_EL1", _h(ttbr1), "kernel page-table base" if ttbr1 else "kernel tables not installed"))
             if st == "on":
                 kv = evi("kimage_voffset")
                 if kv:
@@ -135,8 +146,13 @@ class KaslrMixin:
         elif a.key == "x86_64":
             cr0 = evi("$cr0")
             pg = None if cr0 is None else ((cr0 >> 31) & 1)
-            c.append(("CR0.PG", "?" if pg is None else str(pg),
-                      "paging %s -> ptrs %s" % (("on", "VIRTUAL") if pg else ("off", "PHYSICAL"))))
+            c.append(
+                (
+                    "CR0.PG",
+                    "?" if pg is None else str(pg),
+                    "paging %s -> ptrs %s" % (("on", "VIRTUAL") if pg else ("off", "PHYSICAL")),
+                )
+            )
             c.append(("CR3", _h(evi("$cr3")), "top-level page-table base"))
             cr4 = evi("$cr4")
             if cr4 is not None:
@@ -151,12 +167,16 @@ class KaslrMixin:
             satp = evi("$satp")
             mode = None if satp is None else ((satp >> 60) & 0xF)
             mn = {0: "Bare(off)", 8: "Sv39", 9: "Sv48", 10: "Sv57"}.get(mode, str(mode))
-            c.append(("satp.MODE", "?" if mode is None else ("%s (%s)" % (mode, mn)),
-                      "MMU %s -> ptrs %s" % (("off", "PHYSICAL") if mode == 0 else ("on", "VIRTUAL"))))
+            c.append(
+                (
+                    "satp.MODE",
+                    "?" if mode is None else ("%s (%s)" % (mode, mn)),
+                    "MMU %s -> ptrs %s" % (("off", "PHYSICAL") if mode == 0 else ("on", "VIRTUAL")),
+                )
+            )
             if satp is not None:
                 ppn = (satp & ((1 << 44) - 1)) << 12
-                c.append(("satp.PPN<<12", _h(ppn),
-                          "page-table base" if mode else "unused (Bare)"))
+                c.append(("satp.PPN<<12", _h(ppn), "page-table base" if mode else "unused (Bare)"))
         k = self._nokaslr_clue()
         if k:
             c.append(k)
@@ -172,9 +192,9 @@ class KaslrMixin:
         if a is None:
             return ["[%s] koff: no supported arch on this target" % NAME]
         if self.offset is None:
-            self.calibrate(quiet=True)           # runtime attach: derive PA-VA if we can
+            self.calibrate(quiet=True)  # runtime attach: derive PA-VA if we can
         st, src = self.mmu_state()
-        mapping = self.which_map()               # 'physical' / 'virtual' / 'unknown'
+        mapping = self.which_map()  # 'physical' / 'virtual' / 'unknown'
         pc = reg("pc")
         sym = sym or getattr(a, "entry_symbol", None) or "_text"
         elf_va = symval(sym)
@@ -186,12 +206,13 @@ class KaslrMixin:
             regime = "pc PHYSICAL (MMU off)"
         else:
             regime = "regime unknown"
-        out = ["[%s] koff  arch=%s  %s   [MMU=%s %s]" % (NAME, a.key, regime, st, src),
-               "  clues (CPU flag / register / mem  ->  what it pins down):"]
+        out = [
+            "[%s] koff  arch=%s  %s   [MMU=%s %s]" % (NAME, a.key, regime, st, src),
+            "  clues (CPU flag / register / mem  ->  what it pins down):",
+        ]
         clues = []
         if pc is not None:
-            clues.append(("$pc", _h(pc),
-                          "high-half VA" if mapping == "virtual" else "physical / low (identity)"))
+            clues.append(("$pc", _h(pc), "high-half VA" if mapping == "virtual" else "physical / low (identity)"))
         clues += self._koff_clues(a, st)
         w = max((len(k) for k, _v, _t in clues), default=1)
         for k, v, t in clues:
@@ -206,8 +227,7 @@ class KaslrMixin:
             now_s = fmt(elf_va) if elf_va is not None else "?"
             out.append("    address now (VA)      = %s   (linked VA + KASLR slide)" % now_s)
             if applied:
-                slide = ("0x%x  (applied via 'kearly kaslr'; symbols relocated to runtime VAs)"
-                         % applied)
+                slide = "0x%x  (applied via 'kearly kaslr'; symbols relocated to runtime VAs)" % applied
             else:
                 cl = self._cmdline()
                 if cl is None:
@@ -220,11 +240,17 @@ class KaslrMixin:
             out.append("    offset(PA-VA)         = %s   (VA + offset = PHYS; page-walk/aliases)" % off_s)
         elif mapping == "physical":
             pa = self.v2p(linked_va) if (linked_va is not None and self.offset is not None) else None
-            out.append("    address now (PA)      = %s   (QEMU loaded the image here)"
-                       % (fmt(pa) if pa is not None else "?"))
-            out.append("    why differ: %s" %
-                       ("paging ON but identity-mapped -> pc runs at PHYSICAL/low addrs"
-                        if st == "on" else "MMU off -> addresses are PHYSICAL"))
+            out.append(
+                "    address now (PA)      = %s   (QEMU loaded the image here)" % (fmt(pa) if pa is not None else "?")
+            )
+            out.append(
+                "    why differ: %s"
+                % (
+                    "paging ON but identity-mapped -> pc runs at PHYSICAL/low addrs"
+                    if st == "on"
+                    else "MMU off -> addresses are PHYSICAL"
+                )
+            )
             out.append("    offset(PA-VA)         = %s   (ELF VA + offset = its PHYS)" % off_s)
         else:
             out.append("    (regime unknown -- stop in the kernel and retry)")
@@ -254,7 +280,7 @@ class KaslrMixin:
         a = self.ensure_arch()
         if a is None or self.offset is None:
             return None
-        if a.pc_is_virtual() is True:            # already relocated -> detect handles it
+        if a.pc_is_virtual() is True:  # already relocated -> detect handles it
             return None
         cr = a.find_crossing(self)
         if not cr or cr.get("pa") is None:
@@ -271,20 +297,22 @@ class KaslrMixin:
         bpnum = None
         if at_crossing:
             LOG.add("kaslr: already stopped on the crossing (phys 0x%x) -- reading in place" % pa)
-            print("[%s] kaslr: already stopped ON the MMU-crossing (%s, phys 0x%x) -- "
-                  "reading the slide in place (not continuing)."
-                  % (NAME, cr.get("land") or "crossing", pa))
+            print(
+                "[%s] kaslr: already stopped ON the MMU-crossing (%s, phys 0x%x) -- "
+                "reading the slide in place (not continuing)." % (NAME, cr.get("land") or "crossing", pa)
+            )
         else:
-            out = exec_confirmless("thbreak *0x%x" % pa)   # HW bp fires MMU-off/idmap
+            out = exec_confirmless("thbreak *0x%x" % pa)  # HW bp fires MMU-off/idmap
             m = re.search(r"[Bb]reakpoint\s+(\d+)", out or "")
             if not m:
-                out = exec_confirmless("tbreak *0x%x" % pa)   # sw temp fallback
+                out = exec_confirmless("tbreak *0x%x" % pa)  # sw temp fallback
                 m = re.search(r"[Bb]reakpoint\s+(\d+)", out or "")
             bpnum = m.group(1) if m else None
             LOG.add("kaslr: advancing to MMU-crossing %s (phys 0x%x)" % (cr.get("desc", ""), pa))
-            print("[%s] kaslr: continuing to the MMU-crossing (%s, phys 0x%x, primary CPU, "
-                  "post-relocation, pre-start_kernel) to read the slide ..."
-                  % (NAME, cr.get("land") or "crossing", pa))
+            print(
+                "[%s] kaslr: continuing to the MMU-crossing (%s, phys 0x%x, primary CPU, "
+                "post-relocation, pre-start_kernel) to read the slide ..." % (NAME, cr.get("land") or "crossing", pa)
+            )
         self._in_advance = True
         try:
             if not at_crossing:
@@ -292,8 +320,7 @@ class KaslrMixin:
                 pc = reg("pc")
                 landed = pc is not None and (pc & MASK) == pa
                 if not landed:
-                    LOG.add("kaslr crossing: landed at %s, expected 0x%x -- arming catcher"
-                            % (fmt(pc), pa))
+                    LOG.add("kaslr crossing: landed at %s, expected 0x%x -- arming catcher" % (fmt(pc), pa))
                     self._arm_crossing_catcher(cr, pa, bpnum)
                     return None
             slide = self._read_slide_at_crossing(cr, a)
@@ -321,12 +348,12 @@ class KaslrMixin:
                 if tv is not None and a._is_va(tv):
                     slide = (tv - tl) & MASK
             if slide is None and cr.get("stepi") and tl is not None:
-                execstr("stepi")                            # execute the crossing branch
+                execstr("stepi")  # execute the crossing branch
                 npc = reg("pc")
                 if npc is not None and a._is_va(npc):
                     slide = (npc - tl) & MASK
             elif cr.get("reg") and tl is not None:
-                rv = evi("$" + cr["reg"])                   # register holds landing runtime VA
+                rv = evi("$" + cr["reg"])  # register holds landing runtime VA
                 if rv is not None and a._is_va(rv):
                     slide = (rv - tl) & MASK
             if slide is None and cr.get("detect_fallback", True):
@@ -346,7 +373,7 @@ class KaslrMixin:
         between.  This is what makes `kearly kaslr auto` robust against arbitrary
         breakpoints armed anywhere in head.S."""
         if tempnum:
-            exec_confirmless("delete %s" % tempnum)     # drop the spent one-shot
+            exec_confirmless("delete %s" % tempnum)  # drop the spent one-shot
         if self._kaslr_pending and self._kaslr_pending.get("pa") == pa:
             bp = self._kaslr_pending.get("bp")
         else:
@@ -358,10 +385,12 @@ class KaslrMixin:
             bp = m.group(1) if m else None
             self._kaslr_pending = {"pa": pa, "bp": bp, "cr": cr}
         LOG.add("kaslr: persistent crossing catcher armed at 0x%x (bp %s)" % (pa, bp))
-        print("[%s] kaslr: another breakpoint stopped first (pc=%s) -- left a PERSISTENT "
-              "catcher%s on the crossing (phys 0x%x).  Keep debugging: the slide is read and "
-              "applied automatically the moment execution reaches it."
-              % (NAME, fmt(reg("pc")), ("  [bp %s]" % bp) if bp else "", pa))
+        print(
+            "[%s] kaslr: another breakpoint stopped first (pc=%s) -- left a PERSISTENT "
+            "catcher%s on the crossing (phys 0x%x).  Keep debugging: the slide is read and "
+            "applied automatically the moment execution reaches it."
+            % (NAME, fmt(reg("pc")), ("  [bp %s]" % bp) if bp else "", pa)
+        )
 
     @safe()
     def _warn_unslid_literal(self, bp, n):
@@ -374,7 +403,7 @@ class KaslrMixin:
             return
         loc = (getattr(bp, "location", None) or "").strip()
         if not loc.startswith("*"):
-            return                                  # only literal-address probes
+            return  # only literal-address probes
         addr = evi(loc[1:].strip())
         if addr is None or not a._is_va(addr):
             return
@@ -388,24 +417,28 @@ class KaslrMixin:
             if self.info_symbol(addr):
                 return
             adopted = " -- armed there for you as a sibling location" if n in self._adopted else ""
-            print("[%s] note: %s is a LINK address; this kernel runs at slide 0x%x, so that "
-                  "byte is never executed.  The live one is *0x%x%s (`b SYM` follows the "
-                  "slide by itself)."
-                  % (NAME, fmt(addr), slide, (addr + slide) & MASK, adopted))
+            print(
+                "[%s] note: %s is a LINK address; this kernel runs at slide 0x%x, so that "
+                "byte is never executed.  The live one is *0x%x%s (`b SYM` follows the "
+                "slide by itself)." % (NAME, fmt(addr), slide, (addr + slide) & MASK, adopted)
+            )
         elif self._kaslr_pending:
-            adopted = ("  Its physical twin has been armed alongside, so a probe here still "
-                       "fires while the MMU is off." if n in self._adopted else "")
-            print("[%s] note: %s is a LINK address and this kernel is KASLR-relocated, so that "
-                  "exact byte will not be executed once the slide is known.%s"
-                  % (NAME, fmt(addr), adopted))
+            adopted = (
+                "  Its physical twin has been armed alongside, so a probe here still fires while the MMU is off."
+                if n in self._adopted
+                else ""
+            )
+            print(
+                "[%s] note: %s is a LINK address and this kernel is KASLR-relocated, so that "
+                "exact byte will not be executed once the slide is known.%s" % (NAME, fmt(addr), adopted)
+            )
 
     @safe()
     def _service_catch_wanted(self):
         """Arm a deferred catcher from a context where creating a breakpoint is safe --
         a gdb prompt, a stop, or one of our own commands.  Never from inside gdb's own
         breakpoint create/delete callbacks."""
-        if not self._catch_wanted or self.kaslr_slide or self._kaslr_pending \
-                or not self._flag("CROSSING"):
+        if not self._catch_wanted or self.kaslr_slide or self._kaslr_pending or not self._flag("CROSSING"):
             self._catch_wanted = False
             return
         self._catch_wanted = False
@@ -469,10 +502,11 @@ class KaslrMixin:
         # was wrong -- a hardware breakpoint is not BP_BREAKPOINT either, so every hbreak
         # the tool makes for itself was misread as a watchpoint and deferred the catcher
         # onto the unsafe CLI path, where a later `delete` could remove it.
-        _WP = tuple(getattr(gdb, _n) for _n in
-                    ("BP_WATCHPOINT", "BP_HARDWARE_WATCHPOINT",
-                     "BP_READ_WATCHPOINT", "BP_ACCESS_WATCHPOINT")
-                    if hasattr(gdb, _n))
+        _WP = tuple(
+            getattr(gdb, _n)
+            for _n in ("BP_WATCHPOINT", "BP_HARDWARE_WATCHPOINT", "BP_READ_WATCHPOINT", "BP_ACCESS_WATCHPOINT")
+            if hasattr(gdb, _n)
+        )
         if _WP and getattr(bp, "type", None) in _WP:
             self._catch_wanted = True
             LOG.add("catcher: deferred (a watchpoint is being created -- unsafe here)")
@@ -499,12 +533,12 @@ class KaslrMixin:
         except Exception:
             return False
         obj = pend.get("obj")
-        if obj is not None:                     # internal catcher: gdb.breakpoints() hides
-            try:                                # it, so ask the object itself
+        if obj is not None:  # internal catcher: gdb.breakpoints() hides
+            try:  # it, so ask the object itself
                 return bool(obj.is_valid())
             except Exception:
                 return False
-        for bp in (gdb.breakpoints() or []):
+        for bp in gdb.breakpoints() or []:
             if getattr(bp, "number", None) == want:
                 return True
         return False
@@ -556,21 +590,33 @@ class KaslrMixin:
                 # that happens to interrupt userspace, whose pc is low but is not the
                 # pre-kernel boot path -- that path is always ring 0.
                 _cpl = evi("$cs")
-                if _pc is not None and not a._is_va(_pc) and (_cpl is None or (_cpl & 3) == 0) and (
-                        (self.x86_kaslr and config.get("ENTRY_PA") is None
-                         and not self._entry_pinned and not self._entry_recovered)
-                        or (_dpa is not None and (_pc & MASK) < _dpa)):
+                if (
+                    _pc is not None
+                    and not a._is_va(_pc)
+                    and (_cpl is None or (_cpl & 3) == 0)
+                    and (
+                        (
+                            self.x86_kaslr
+                            and config.get("ENTRY_PA") is None
+                            and not self._entry_pinned
+                            and not self._entry_recovered
+                        )
+                        or (_dpa is not None and (_pc & MASK) < _dpa)
+                    )
+                ):
                     LOG.add("catcher: x86 still compressed -- not calibrating from the reset vector")
-                    print("[%s] kaslr: the kernel is still compressed at this point, so there is "
-                          "nothing to calibrate against yet.  Run `kearly bootbreak` (it recovers "
-                          "the randomized base); probes you have already armed follow the "
-                          "relocation by themselves -- no need to re-arm." % NAME)
+                    print(
+                        "[%s] kaslr: the kernel is still compressed at this point, so there is "
+                        "nothing to calibrate against yet.  Run `kearly bootbreak` (it recovers "
+                        "the randomized base); probes you have already armed follow the "
+                        "relocation by themselves -- no need to re-arm." % NAME
+                    )
                     return
-            self.calibrate(quiet=True)          # e.g. armed at the reset vector, pre-entry
+            self.calibrate(quiet=True)  # e.g. armed at the reset vector, pre-entry
         if self.offset is None:
             LOG.add("catcher: skipped (uncalibrated -- run `kearly bootbreak` first)")
             return
-        if a.pc_is_virtual() is not False:      # already virtual/unknown -> detect handles it
+        if a.pc_is_virtual() is not False:  # already virtual/unknown -> detect handles it
             LOG.add("catcher: skipped (pc_is_virtual=%s)" % a.pc_is_virtual())
             return
         cr = a.find_crossing(self)
@@ -613,15 +659,25 @@ class KaslrMixin:
                 if bp is None:
                     return
                 self._kaslr_pending = {"pa": pa, "bp": bp, "cr": cr, "auto": True, "silent": False}
-                print("[%s] kaslr: %s targets a high VA but the slide is still unknown -- armed a "
-                      "catcher on the MMU-crossing (phys 0x%x) so the slide is applied before that "
-                      "address is reached.  You will stop there once, then continue." % (NAME, why or "that location", pa))
+                print(
+                    "[%s] kaslr: %s targets a high VA but the slide is still unknown -- armed a "
+                    "catcher on the MMU-crossing (phys 0x%x) so the slide is applied before that "
+                    "address is reached.  You will stop there once, then continue." % (NAME, why or "that location", pa)
+                )
             else:
-                self._kaslr_pending = {"pa": pa, "bp": bp, "cr": cr, "auto": True, "silent": True,
-                                   "obj": self._catcher_obj}
-                print("[%s] kaslr: %s targets a high VA but the slide is still unknown -- armed a "
-                      "silent catcher on the MMU-crossing (phys 0x%x); the slide is read and applied "
-                      "in passing, without stopping." % (NAME, why or "that location", pa))
+                self._kaslr_pending = {
+                    "pa": pa,
+                    "bp": bp,
+                    "cr": cr,
+                    "auto": True,
+                    "silent": True,
+                    "obj": self._catcher_obj,
+                }
+                print(
+                    "[%s] kaslr: %s targets a high VA but the slide is still unknown -- armed a "
+                    "silent catcher on the MMU-crossing (phys 0x%x); the slide is read and applied "
+                    "in passing, without stopping." % (NAME, why or "that location", pa)
+                )
             LOG.add("kaslr: auto crossing catcher armed at 0x%x (%s)" % (pa, why))
         finally:
             self._in_catcher = False
@@ -637,11 +693,11 @@ class KaslrMixin:
                 try:
                     slide = sess._read_slide_at_crossing(cr)
                     if slide is None:
-                        return True             # cannot read it -> let the user see the stop
+                        return True  # cannot read it -> let the user see the stop
                     sess._kaslr_pending = None
                     self.enabled = False
                     sess.apply_kaslr(slide)
-                    return False                # keep going; nothing to report to the user
+                    return False  # keep going; nothing to report to the user
                 except Exception:
                     return True
 
@@ -676,8 +732,7 @@ class KaslrMixin:
         if pend.get("bp"):
             exec_confirmless("delete %s" % pend["bp"])
         self._kaslr_pending = None
-        print("[%s] kaslr: crossing reached (the catcher armed earlier) -- applying the slide now."
-              % NAME)
+        print("[%s] kaslr: crossing reached (the catcher armed earlier) -- applying the slide now." % NAME)
         self.apply_kaslr(slide)
 
     @safe()
@@ -697,16 +752,17 @@ class KaslrMixin:
         self.kaslr_slide = slide
         if had_shadow:
             self._shadow_load()
-        self._rearm_kb(slide)                # move kb IMG locations to linkVA+slide
-        self._rearm_kw(slide)                # ... and kw IMG watchpoints
+        self._rearm_kb(slide)  # move kb IMG locations to linkVA+slide
+        self._rearm_kw(slide)  # ... and kw IMG watchpoints
         if "kgdb" in self.panels():
             self._install_pwndbg_section()
         if slide == 0:
             print("[%s] KASLR slide = 0 (symbols at link addresses; nothing shifted)." % NAME)
         else:
-            print("[%s] KASLR slide = 0x%x applied: all symbols relocated to runtime VAs -- "
-                  "`b SYM` now targets the running kernel.  Undo with 'kearly kaslr off'."
-                  % (NAME, slide))
+            print(
+                "[%s] KASLR slide = 0x%x applied: all symbols relocated to runtime VAs -- "
+                "`b SYM` now targets the running kernel.  Undo with 'kearly kaslr off'." % (NAME, slide)
+            )
 
     @safe()
     def set_kaslr(self, arg):
@@ -728,8 +784,10 @@ class KaslrMixin:
             return
         if arg == "status":
             s = self.detect_kaslr_slide()
-            print("[%s] KASLR: applied slide=0x%x  detected(now)=%s" %
-                  (NAME, self.kaslr_slide, ("0x%x" % s) if s is not None else "?"))
+            print(
+                "[%s] KASLR: applied slide=0x%x  detected(now)=%s"
+                % (NAME, self.kaslr_slide, ("0x%x" % s) if s is not None else "?")
+            )
             return
         if arg not in ("", "auto", "detect"):
             v = evi(arg)
@@ -741,11 +799,11 @@ class KaslrMixin:
         config.set_session("KASLR_APPLY", "auto")
         s = self.detect_kaslr_slide()
         if not s:
-            s2 = self._advance_to_crossing()      # frozen boot: advance to the crossing, read slide
+            s2 = self._advance_to_crossing()  # frozen boot: advance to the crossing, read slide
             if s2 is not None:
                 s = s2
         if not s:
-            s3 = self._slide_via_pc_pa()          # fresh high-VA attach: derive from pc's PA
+            s3 = self._slide_via_pc_pa()  # fresh high-VA attach: derive from pc's PA
             if s3 is not None:
                 s = s3
         if s is None:
@@ -754,15 +812,21 @@ class KaslrMixin:
             if self._kaslr_pending:
                 # Not a missing anchor: the anchor is armed and waiting.  Saying
                 # "no anchor for this arch" here would be plainly wrong.
-                print("[%s] kaslr: slide not readable yet -- a catcher is armed on the "
-                      "crossing (phys 0x%x). Carry on debugging; it applies itself when "
-                      "execution gets there." % (NAME, self._kaslr_pending["pa"]))
+                print(
+                    "[%s] kaslr: slide not readable yet -- a catcher is armed on the "
+                    "crossing (phys 0x%x). Carry on debugging; it applies itself when "
+                    "execution gets there." % (NAME, self._kaslr_pending["pa"])
+                )
             elif self.offset is None:
                 print("[%s] kaslr: uncalibrated -- run `kearly calibrate` (or bootbreak) first." % NAME)
             else:
                 print("[%s] kaslr: no automatic slide anchor for arch=%s at this phase." % (NAME, arch))
                 print("      set it by hand:   kearly kaslr <hex-slide>")
-                print("      get the slide (guest, kptr_restrict=0):  (runtime `_text` from /proc/kallsyms) - (link `_text` from vmlinux)")
-                print("      or debug slide-free:  `kb SYM` still catches the PA (MMU-off/idmap) location regardless of slide.")
+                print(
+                    "      get the slide (guest, kptr_restrict=0):  (runtime `_text` from /proc/kallsyms) - (link `_text` from vmlinux)"
+                )
+                print(
+                    "      or debug slide-free:  `kb SYM` still catches the PA (MMU-off/idmap) location regardless of slide."
+                )
             return
         self.apply_kaslr(s)

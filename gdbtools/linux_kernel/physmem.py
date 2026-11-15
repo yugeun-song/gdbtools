@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import os
 import json
 import gdb
@@ -33,7 +34,7 @@ def _mon_xp_words(pa, count):
         return None
     vals = []
     for line in out.splitlines():
-        if ":" not in line:                       # "<addr>: 0xWORD 0xWORD ..."
+        if ":" not in line:  # "<addr>: 0xWORD 0xWORD ..."
             continue
         for m in re.finditer(r"0x([0-9a-fA-F]+)", line.split(":", 1)[1]):
             vals.append(int(m.group(1), 16) & MASK)
@@ -104,7 +105,7 @@ def read_phys_u64(pa):
         return w[0]
     if not _phys_fallback_ok():
         return None
-    b = read_guest_bytes(pa, 8)                    # only physical while MMU off
+    b = read_guest_bytes(pa, 8)  # only physical while MMU off
     return struct.unpack("<Q", b)[0] if b and len(b) == 8 else None
 
 
@@ -139,4 +140,12 @@ def read_phys_words(pa, count):
 
 # Underscore-prefixed helpers are part of this module's public surface for the
 # rest of the package (`from .physmem import *`), which would otherwise skip them.
-__all__ = ['_mon_xp_words', '_pa_in_ram', '_phys_fallback_ok', 'read_phys_u64', 'read_phys_u32', 'read_phys_words', 'safe_chain']
+__all__ = [
+    "_mon_xp_words",
+    "_pa_in_ram",
+    "_phys_fallback_ok",
+    "read_phys_u64",
+    "read_phys_u32",
+    "read_phys_words",
+    "safe_chain",
+]

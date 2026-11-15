@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 from ..common.runtime import *
 from .pwndbg_glue import PWN
 
@@ -25,8 +26,9 @@ class AddressingMixin:
             return "MMU on but execution is still identity-mapped (VA==PA)"
         if st == "off":
             return "MMU off, so addresses here are PHYSICAL"
-        return ("MMU state UNKNOWN (no control register answered), so whether these "
-                "addresses are physical cannot be stated")
+        return (
+            "MMU state UNKNOWN (no control register answered), so whether these addresses are physical cannot be stated"
+        )
 
     # --- translation ---
     def p2v(self, pa):

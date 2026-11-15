@@ -15,11 +15,23 @@ MODE="library"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --check)              MODE="check"; shift ;;
-        --uninstall)          MODE="uninstall"; shift ;;
-        --library|--no-global) MODE="library"; shift ;;
-        --global)             MODE="install"; shift ;;
-        -h|--help)
+        --check)
+            MODE="check"
+            shift
+            ;;
+        --uninstall)
+            MODE="uninstall"
+            shift
+            ;;
+        --library | --no-global)
+            MODE="library"
+            shift
+            ;;
+        --global)
+            MODE="install"
+            shift
+            ;;
+        -h | --help)
             cat <<'USAGE'
 usage: setup.sh [--global] [--check] [--uninstall]
 
@@ -32,12 +44,16 @@ usage: setup.sh [--global] [--check] [--uninstall]
   --check      report the current state and change nothing
   --uninstall  remove what this script added; the checkout is left alone
 USAGE
-            exit 0 ;;
-        *) echo "setup.sh: unknown option '$1'" >&2; exit 2 ;;
+            exit 0
+            ;;
+        *)
+            echo "setup.sh: unknown option '$1'" >&2
+            exit 2
+            ;;
     esac
 done
 
-say()  { printf '  %s\n' "$*"; }
+say() { printf '  %s\n' "$*"; }
 warn() { printf '  [!] %s\n' "$*" >&2; }
 
 # Which file does gdb actually read?  Asked, not assumed.  gdb reads exactly ONE
@@ -48,10 +64,16 @@ gdb_init_file() {
     local f
     if command -v gdb >/dev/null 2>&1; then
         f="$(gdb --help 2>/dev/null | sed -n 's/^ *\* user-specific init file: *//p' | head -1)"
-        [[ -n "$f" ]] && { printf '%s\n' "$f"; return 0; }
+        [[ -n "$f" ]] && {
+            printf '%s\n' "$f"
+            return 0
+        }
     fi
     f="${XDG_CONFIG_HOME:-$HOME/.config}/gdb/gdbinit"
-    [[ -f "$f" ]] && { printf '%s\n' "$f"; return 0; }
+    [[ -f "$f" ]] && {
+        printf '%s\n' "$f"
+        return 0
+    }
     printf '%s\n' "$HOME/.gdbinit"
 }
 
@@ -69,7 +91,7 @@ ${END}
 BLOCK
 }
 
-has_block()   { [[ -f "$INIT" ]] && grep -qF "$BEGIN" "$INIT"; }
+has_block() { [[ -f "$INIT" ]] && grep -qF "$BEGIN" "$INIT"; }
 # Rewritten in place (cat >), never replaced (mv): a symlinked init file stays a
 # symlink and keeps its mode.  Untouched when there is no block to remove.
 strip_block() {
@@ -77,11 +99,11 @@ strip_block() {
     local tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/gdbtools-init.XXXXXX")"
     if ! awk -v b="$BEGIN" -v e="$END" '
-            index($0,b){skip=1} !skip{print} index($0,e){skip=0}' "$INIT" > "$tmp"; then
+            index($0,b){skip=1} !skip{print} index($0,e){skip=0}' "$INIT" >"$tmp"; then
         rm -f "$tmp"
         return 1
     fi
-    cat "$tmp" > "$INIT"
+    cat "$tmp" >"$INIT"
     rm -f "$tmp"
 }
 
@@ -93,8 +115,7 @@ if [[ "$MODE" == "check" ]]; then
     if has_block; then
         say "loader line   present (global source)"
         if grep -q 'source .*pwndbg' "$INIT" 2>/dev/null; then
-            if [[ "$(grep -n 'source .*pwndbg' "$INIT" | head -1 | cut -d: -f1)" \
-                  -lt "$(grep -n "$BEGIN" "$INIT" | head -1 | cut -d: -f1)" ]]; then
+            if [[ "$(grep -n 'source .*pwndbg' "$INIT" | head -1 | cut -d: -f1)" -lt "$(grep -n "$BEGIN" "$INIT" | head -1 | cut -d: -f1)" ]]; then
                 say "pwndbg order  ok (pwndbg first)"
             else
                 warn "pwndbg is sourced AFTER this block; move the block below it"
@@ -127,7 +148,7 @@ if [[ "$MODE" == "library" ]]; then
         say "gdb init file ${INIT}  (not touched)"
     fi
     mkdir -p "$CONF"
-    printf '%s\n' "$REPO" > "${CONF}/root"
+    printf '%s\n' "$REPO" >"${CONF}/root"
     say "root pointer  ${CONF}/root"
     say "gdb stays stock; a caller sources ${LOADER}"
     echo
@@ -159,11 +180,11 @@ strip_block
 # Appended, never prepended.  pwndbg refuses to load over a command another
 # extension already registered and aborts its whole command set, so anything of
 # ours that shares a name has to come second.
-block >> "$INIT"
+block >>"$INIT"
 say "gdb init file ${INIT}  (loader line written)"
 
 mkdir -p "$CONF"
-printf '%s\n' "$REPO" > "${CONF}/root"
+printf '%s\n' "$REPO" >"${CONF}/root"
 say "root pointer  ${CONF}/root"
 
 echo

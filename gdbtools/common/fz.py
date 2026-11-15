@@ -36,6 +36,7 @@ pty, rather than assumed:
            readline state Python sees -- measured as length 0 in a pty after
            two commands -- and gdb writes its history file at exit.
 """
+
 import os
 import subprocess
 
@@ -46,7 +47,7 @@ from .runtime import *
 
 SUBJECTS = ("history", "commands", "functions", "variables", "files", "breakpoints")
 
-_MAX_PRINT = 200          # how many lines the last-resort listing prints
+_MAX_PRINT = 200  # how many lines the last-resort listing prints
 
 
 def _fzf_bin():
@@ -73,14 +74,12 @@ def _have_tty():
 @safe(default=(None, "fzf could not be run"))
 def _pick_fzf(items, prompt, query):
     """(selected line, note).  (None, note) when fzf is absent or declined."""
-    argv = [_fzf_bin(), "--prompt", prompt + "> ", "--height", "60%", "--reverse",
-            "--no-multi", "--exit-0"]
+    argv = [_fzf_bin(), "--prompt", prompt + "> ", "--height", "60%", "--reverse", "--no-multi", "--exit-0"]
     if query:
         argv += ["--query", query]
     argv += config.get("FZF_OPTS") or []
     try:
-        p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             text=True)
+        p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     except OSError as e:
         return (None, "no fzf on this machine (%s); set $GDBTOOLS_FZF to name one" % e.strerror)
     try:
@@ -115,8 +114,7 @@ def _pick_prompt(items, prompt):
             for i, it in enumerate(shown, 1):
                 tty.write("%4d  %s\n" % (i, it))
             if len(items) > len(shown):
-                tty.write("      ... %d more; narrow it with a query argument\n"
-                          % (len(items) - len(shown)))
+                tty.write("      ... %d more; narrow it with a query argument\n" % (len(items) - len(shown)))
             tty.write("%s [1-%d, empty to cancel]: " % (prompt, len(shown)))
             tty.flush()
             ans = tty.readline().strip()
@@ -166,7 +164,7 @@ def _pick(items, prompt, query):
     if sel:
         return sel
     if note is None:
-        return None                          # the user cancelled; say nothing
+        return None  # the user cancelled; say nothing
     items = narrowed
     sel, note2 = _pick_prompt(items, prompt)
     if sel:
@@ -177,6 +175,7 @@ def _pick(items, prompt, query):
 
 
 # ----------------------------------------------------------------- subjects
+
 
 @safe(default=[])
 def _items_history():
@@ -213,6 +212,7 @@ def _items_history():
 def _items_commands():
     """Every command gdb answers to, tagged with who registered it."""
     from .cmdinfo import classify, GROUPS
+
     r = classify()
     if not r:
         return []
@@ -244,7 +244,7 @@ def _items_syms(kind, query=""):
         line = line.strip()
         if not line or line.endswith(":") or line.startswith(("File ", "Non-debugging")):
             continue
-        if line.startswith("0x"):                     # non-debugging: "0xADDR  name"
+        if line.startswith("0x"):  # non-debugging: "0xADDR  name"
             parts = line.split()
             if len(parts) >= 2:
                 names.add(parts[-1])
@@ -275,16 +275,16 @@ def _items_files():
 @safe(default=[])
 def _items_breakpoints():
     out = gdb.execute("info breakpoints", from_tty=False, to_string=True) or ""
-    return [l.rstrip() for l in out.splitlines()
-            if l[:1].isdigit() or l.strip().startswith("stop only")]
+    return [l.rstrip() for l in out.splitlines() if l[:1].isdigit() or l.strip().startswith("stop only")]
 
 
 DEFAULT_KEY = r"\C-t"
 
 # Keys that submit the line.  Bound to a macro, the macro runs instead of the
 # line being accepted, and nothing else can be entered.
-_LINE_KEYS = frozenset((r"\C-m", r"\C-M", r"\C-j", r"\C-J", r"\r", r"\n",
-                        r"\015", r"\012", r"\x0d", r"\x0D", r"\x0a", r"\x0A"))
+_LINE_KEYS = frozenset(
+    (r"\C-m", r"\C-M", r"\C-j", r"\C-J", r"\r", r"\n", r"\015", r"\012", r"\x0d", r"\x0D", r"\x0a", r"\x0A")
+)
 
 
 def _refuse_key(key):
@@ -330,8 +330,7 @@ def bind_key(key, subject="history"):
         print("[%s] fz bind: no readline in this gdb's Python (%s)" % (NAME, e))
         return False
     if subject not in SUBJECTS:
-        print("[%s] fz bind: unknown subject %r; one of: %s"
-              % (NAME, subject, " ".join(SUBJECTS)))
+        print("[%s] fz bind: unknown subject %r; one of: %s" % (NAME, subject, " ".join(SUBJECTS)))
         return False
     why = _refuse_key(key)
     if why:
@@ -377,36 +376,36 @@ def bind_from_env():
 class Fz(gdb.Command):
     r"""fz [SUBJECT] [QUERY] [--run] [--dry] : pick something with fzf.
 
-  fz                     past commands from gdb's history file; runs the pick
-  fz history [QUERY]     the same, with fzf started on QUERY
-  fz commands            every command gdb answers to, tagged with its owner;
-                         shows `help` for the pick, or runs it with --run
-  fz functions [QUERY]   function names; QUERY is gdb's own regex, so it
-                         narrows the image before fzf ever sees it
-  fz variables [QUERY]   the same for variables
-  fz files               source files gdb knows about
-  fz breakpoints         the breakpoint table
+      fz                     past commands from gdb's history file; runs the pick
+      fz history [QUERY]     the same, with fzf started on QUERY
+      fz commands            every command gdb answers to, tagged with its owner;
+                             shows `help` for the pick, or runs it with --run
+      fz functions [QUERY]   function names; QUERY is gdb's own regex, so it
+                             narrows the image before fzf ever sees it
+      fz variables [QUERY]   the same for variables
+      fz files               source files gdb knows about
+      fz breakpoints         the breakpoint table
 
-  fz bind [KEY] [SUBJECT]  put it on a key, default \C-t running `fz history`.
-                         KEY is readline syntax: \C-t, \C-r, \e[15~.  The key
-                         clears a half-typed line first, so it behaves the same
-                         wherever the cursor is.  Set $GDBTOOLS_FZ_KEY to have
-                         this happen when gdbtools loads.
+      fz bind [KEY] [SUBJECT]  put it on a key, default \C-t running `fz history`.
+                             KEY is readline syntax: \C-t, \C-r, \e[15~.  The key
+                             clears a half-typed line first, so it behaves the same
+                             wherever the cursor is.  Set $GDBTOOLS_FZ_KEY to have
+                             this happen when gdbtools loads.
 
---dry prints the pick instead of acting on it.
+    --dry prints the pick instead of acting on it.
 
-A bound key RUNS the pick; it cannot offer it for editing the way a shell's
-Ctrl-R does.  gdb drives readline through its callback interface and keeps its
-own line state, so text inserted from Python is displayed and then ignored --
-measured, not assumed.
+    A bound key RUNS the pick; it cannot offer it for editing the way a shell's
+    Ctrl-R does.  gdb drives readline through its callback interface and keeps its
+    own line state, so text inserted from Python is displayed and then ignored --
+    measured, not assumed.
 
-fzf is used when it is there and a terminal is attached; otherwise a numbered
-prompt on /dev/tty; otherwise the list is printed with the reason it could not
-ask.  Which fzf, and with what options, comes from $GDBTOOLS_FZF and
-$GDBTOOLS_FZF_OPTS.
+    fzf is used when it is there and a terminal is attached; otherwise a numbered
+    prompt on /dev/tty; otherwise the list is printed with the reason it could not
+    ask.  Which fzf, and with what options, comes from $GDBTOOLS_FZF and
+    $GDBTOOLS_FZF_OPTS.
 
-gdb writes its history file at exit, so `fz history` sees previous sessions and
-not the commands typed in this one."""
+    gdb writes its history file at exit, so `fz history` sees previous sessions and
+    not the commands typed in this one."""
 
     def __init__(self, name="fz"):
         super(Fz, self).__init__(name, gdb.COMMAND_SUPPORT)
@@ -423,8 +422,7 @@ not the commands typed in this one."""
             if bind_key(key, subject):
                 print("[%s] fz: %s now runs `fz %s`" % (NAME, key, subject))
                 if key in (r"\C-r", r"\C-R"):
-                    print("[%s]   that key was readline's reverse-i-search; inside "
-                          "gdb it is this now" % NAME)
+                    print("[%s]   that key was readline's reverse-i-search; inside gdb it is this now" % NAME)
             return
 
         subject = rest[0] if rest and rest[0] in SUBJECTS else "history"
@@ -433,9 +431,11 @@ not the commands typed in this one."""
         if subject == "history":
             items, action = _items_history(), "run"
             if not items:
-                print("[%s] fz: gdb's history file is empty or unreadable "
-                      "(`show history filename`); gdb writes it when it exits, so a "
-                      "session that has not ended yet contributes nothing" % NAME)
+                print(
+                    "[%s] fz: gdb's history file is empty or unreadable "
+                    "(`show history filename`); gdb writes it when it exits, so a "
+                    "session that has not ended yet contributes nothing" % NAME
+                )
                 return
         elif subject == "commands":
             items, action = _items_commands(), ("run" if run else "help")

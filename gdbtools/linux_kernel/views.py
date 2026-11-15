@@ -1,4 +1,5 @@
 """part of gdbtools; see the package docstring."""
+
 import struct
 from ..common.runtime import *
 from .physmem import *
@@ -30,13 +31,15 @@ class ViewMixin:
         if not syms:
             return ("unknown", "this architecture names no kernel page-table roots")
         if self.offset is None:
-            return ("unknown", "PA<->VA offset is not calibrated, so the kernel's "
-                               "own table addresses cannot be computed")
+            return (
+                "unknown",
+                "PA<->VA offset is not calibrated, so the kernel's own table addresses cannot be computed",
+            )
         known = []
         for nm in syms:
             va = symval(nm)
             if va is None:
-                continue                      # absent on this kernel version
+                continue  # absent on this kernel version
             pa = self.v2p(va)
             if pa is not None:
                 known.append((nm, pa & ~0xFFF))
@@ -71,18 +74,25 @@ class ViewMixin:
         if tv is not None:
             w = a.pagewalk(tv, root_pa=root_pa)
             if w and w.get("leaf_pa") is not None:
-                return ("kernel", "not one of (%s) and not inside the image, but it maps "
-                                  "the kernel's own text" % ", ".join(n for n, _ in known))
+                return (
+                    "kernel",
+                    "not one of (%s) and not inside the image, but it maps "
+                    "the kernel's own text" % ", ".join(n for n, _ in known),
+                )
             if w is not None:
                 # Says what was checked and nothing more.  "The kernel has not
                 # installed its tables yet" was a claim about a sequence this code
                 # has no way to observe.
-                return ("foreign", "not one of (%s), not inside the kernel image, and does "
-                                   "not map the kernel's own text"
-                                   % ", ".join("%s@PA 0x%x" % (n, p) for n, p in known))
-        return ("unknown", "not one of (%s); whether it maps the kernel's own text could "
-                           "not be determined" %
-                           ", ".join("%s@PA 0x%x" % (n, p) for n, p in known))
+                return (
+                    "foreign",
+                    "not one of (%s), not inside the kernel image, and does "
+                    "not map the kernel's own text" % ", ".join("%s@PA 0x%x" % (n, p) for n, p in known),
+                )
+        return (
+            "unknown",
+            "not one of (%s); whether it maps the kernel's own text could "
+            "not be determined" % ", ".join("%s@PA 0x%x" % (n, p) for n, p in known),
+        )
 
     @safe(default="")
     def _shape_caveat(self):
@@ -98,8 +108,9 @@ class ViewMixin:
         ts = (a.translation_state() if a is not None else None) or {}
         if ts.get("state") == "on":
             return ""
-        return ("   [shape read from control registers that do NOT govern now -- "
-                "translation is %s]" % ts.get("state", "unknown"))
+        return "   [shape read from control registers that do NOT govern now -- translation is %s]" % ts.get(
+            "state", "unknown"
+        )
 
     @safe(default=None)
     def _no_live_tables(self, cmd, hint_extra=""):
@@ -111,45 +122,36 @@ class ViewMixin:
         a = self.ensure_arch()
         ts = (a.translation_state() if a is not None else None) or {}
         state = ts.get("state", "unknown")
-        lines = ["[%s] %s needs a live translation regime, and there is none here."
-                 % (NAME, cmd)]
+        lines = ["[%s] %s needs a live translation regime, and there is none here." % (NAME, cmd)]
         if state == "off":
-            lines.append("  translation OFF   %s   (source %s)"
-                         % (ts.get("evidence") or "?", ts.get("source") or "?"))
-            lines.append("  With translation off there is no current page table: the base "
-                         "register keeps")
-            lines.append("  whatever the previous stage left in it, so a dump of it would "
-                         "describe the")
+            lines.append("  translation OFF   %s   (source %s)" % (ts.get("evidence") or "?", ts.get("source") or "?"))
+            lines.append("  With translation off there is no current page table: the base register keeps")
+            lines.append("  whatever the previous stage left in it, so a dump of it would describe the")
             lines.append("  bootloader's tables, not the kernel's.")
         elif state == "unknown":
-            lines.append("  translation UNKNOWN   %s" % (ts.get("evidence") or
-                         "no register answered"))
-            lines.append("  Neither the gdb register set, nor the QEMU monitor, nor a "
-                         "profile 'mmu' hint")
-            lines.append("  could say whether translation is on.  Refusing rather than "
-                         "guessing: a wrong")
+            lines.append("  translation UNKNOWN   %s" % (ts.get("evidence") or "no register answered"))
+            lines.append("  Neither the gdb register set, nor the QEMU monitor, nor a profile 'mmu' hint")
+            lines.append("  could say whether translation is on.  Refusing rather than guessing: a wrong")
             lines.append("  'on' here prints a plausible table that means nothing.")
         else:
-            lines.append("  the page-table base register did not answer, though "
-                         "translation reads as on")
+            lines.append("  the page-table base register did not answer, though translation reads as on")
         raw = a.pt_base_raw(reg("pc") or 0) if a is not None else None
         if raw:
-            lines.append("  base register now: %s = 0x%x  (NOT a live table root)"
-                         % (raw[0], raw[1]))
-            lines.append("  To dump that table anyway, say so explicitly:  %s 0x%x"
-                         % (cmd, raw[1]))
-        lines.append("  Or reach a regime where the kernel's own tables are live:  "
-                     "kearly overmmu")
+            lines.append("  base register now: %s = 0x%x  (NOT a live table root)" % (raw[0], raw[1]))
+            lines.append("  To dump that table anyway, say so explicitly:  %s 0x%x" % (cmd, raw[1]))
+        lines.append("  Or reach a regime where the kernel's own tables are live:  kearly overmmu")
         if hint_extra:
             lines.append("  %s" % hint_extra)
         return lines
 
     # regime id -> (label, is_physical)
-    _REGIME_ORDER = (("entry",    "kernel entry, MMU off, PC physical",        True),
-                     ("mmuon",    "translation turned on, PC still physical",  True),
-                     ("crossing", "the phys->high-VA transfer instruction",    True),
-                     ("virtual",  "first instruction at a true high VA",       False),
-                     ("start",    "start_kernel, steady state",                False))
+    _REGIME_ORDER = (
+        ("entry", "kernel entry, MMU off, PC physical", True),
+        ("mmuon", "translation turned on, PC still physical", True),
+        ("crossing", "the phys->high-VA transfer instruction", True),
+        ("virtual", "first instruction at a true high VA", False),
+        ("start", "start_kernel, steady state", False),
+    )
 
     @safe(default=[])
     def regime_map(self):
@@ -167,8 +169,7 @@ class ViewMixin:
         rows, seen = [], {}
         ent = self.link_entry_va()
         if ent is not None:
-            seen["entry"] = {"link": ent, "pa": (ent + self.offset) & MASK,
-                             "desc": a.entry_symbol or "entry"}
+            seen["entry"] = {"link": ent, "pa": (ent + self.offset) & MASK, "desc": a.entry_symbol or "entry"}
         me = a.find_mmu_enable(self)
         if me:
             seen["mmuon"] = {"link": me.get("link"), "pa": me.get("pa"), "desc": me.get("desc", "")}
@@ -184,8 +185,11 @@ class ViewMixin:
             if cr.get("target_link") is None and me and me.get("pa") is not None:
                 pa = me["pa"]
                 seen["mmuon"]["desc"] += "  -- also the phys->virt transfer on this arch"
-            seen["crossing"] = {"link": (pa - self.offset) & MASK if pa is not None else None,
-                                "pa": pa, "desc": cr.get("desc", "")}
+            seen["crossing"] = {
+                "link": (pa - self.offset) & MASK if pa is not None else None,
+                "pa": pa,
+                "desc": cr.get("desc", ""),
+            }
             tl = cr.get("target_link")
             if tl is None and me:
                 # riscv reaches its high map by trapping: `csrw satp` makes the NEXT
@@ -198,8 +202,11 @@ class ViewMixin:
             else:
                 land = cr.get("land") or "?"
             if tl is not None:
-                seen["virtual"] = {"link": tl, "pa": (tl + self.offset) & MASK,
-                                   "desc": "landing of the transfer (%s)" % land}
+                seen["virtual"] = {
+                    "link": tl,
+                    "pa": (tl + self.offset) & MASK,
+                    "desc": "landing of the transfer (%s)" % land,
+                }
         sk = self._link_va(symval("start_kernel"))
         if sk is not None:
             seen["start"] = {"link": sk, "pa": (sk + self.offset) & MASK, "desc": "start_kernel"}
@@ -225,17 +232,20 @@ class ViewMixin:
             self.calibrate(quiet=True)
         rows = self.regime_map()
         if not rows:
-            print("[%s] regimes: uncalibrated, or this arch exposes no early-boot anchors "
-                  "-- try `kearly bootbreak` first" % NAME)
+            print(
+                "[%s] regimes: uncalibrated, or this arch exposes no early-boot anchors "
+                "-- try `kearly bootbreak` first" % NAME
+            )
             return
         sub = (sub or "").lower()
 
         if sub in ("", "list", "show"):
             print("[%s] early-boot MMU regimes for this build" % NAME)
             for r in rows:
-                print("  %-9s %-18s link %s  PA %s"
-                      % (r["id"], "PHYS" if r["phys"] else "VIRT",
-                         fmt(r["link"]), fmt(r["pa"])))
+                print(
+                    "  %-9s %-18s link %s  PA %s"
+                    % (r["id"], "PHYS" if r["phys"] else "VIRT", fmt(r["link"]), fmt(r["pa"]))
+                )
                 print("            %s  -- %s" % (r["label"], r["desc"]))
             print("  (`kearly regimes walk` arms them all; `kearly regimes stop <id>` runs to one)")
             return
@@ -246,18 +256,18 @@ class ViewMixin:
                 # start_kernel never from the physical one, so arming both twins
                 # would double the hardware-slot cost for locations that can never
                 # match.  The IMG side re-arms itself at the crossing as usual.
-                self.kb("%s (%s)" % (r["id"], r["label"]), link=r["link"],
-                        sides=("pa" if r["phys"] else "img"))
-            print("[%s] %d regimes armed -- plain `continue` now steps through the "
-                  "MMU transition in order" % (NAME, len(rows)))
+                self.kb("%s (%s)" % (r["id"], r["label"]), link=r["link"], sides=("pa" if r["phys"] else "img"))
+            print(
+                "[%s] %d regimes armed -- plain `continue` now steps through the "
+                "MMU transition in order" % (NAME, len(rows))
+            )
             return
 
         if sub == "stop":
             want = (name or "").lower()
             r = next((x for x in rows if x["id"] == want), None)
             if r is None:
-                print("[%s] regimes: no regime '%s'  (have: %s)"
-                      % (NAME, name, ", ".join(x["id"] for x in rows)))
+                print("[%s] regimes: no regime '%s'  (have: %s)" % (NAME, name, ", ".join(x["id"] for x in rows)))
                 return
             pc = reg("pc")
             if r["phys"]:
@@ -267,14 +277,12 @@ class ViewMixin:
             if pc is not None and here is not None and pc == here:
                 print("[%s] already at '%s' (%s)" % (NAME, r["id"], r["label"]))
                 return
-            self.kb("%s (%s)" % (r["id"], r["label"]), link=r["link"],
-                    sides=("pa" if r["phys"] else "img"))
+            self.kb("%s (%s)" % (r["id"], r["label"]), link=r["link"], sides=("pa" if r["phys"] else "img"))
             print("[%s] running to '%s' (%s)..." % (NAME, r["id"], r["label"]))
             exec_confirmless("continue")
             return
 
-        print("[%s] usage: kearly regimes [walk | stop <%s>]"
-              % (NAME, "|".join(x["id"] for x in rows)))
+        print("[%s] usage: kearly regimes [walk | stop <%s>]" % (NAME, "|".join(x["id"] for x in rows)))
 
     @safe(default="unknown")
     def boot_phase(self):
@@ -321,11 +329,14 @@ class ViewMixin:
             out.append("  pc       %s  %s" % (fmt(pc), sym.split(" of ")[0]))
             other = self.p2v(pc) if not a._is_va(pc) else self.v2p(pc)
             if other is not None:
-                out.append("  twin     %s  (%s)"
-                           % (fmt(other), "virtual" if not a._is_va(pc) else "physical"))
-        out.append("  offset   %s%s"
-                   % (fmt(self.offset) if self.offset is not None else "(uncalibrated)",
-                      "   shadow @%s" % fmt(self.shadow_addr) if self.shadow_addr is not None else ""))
+                out.append("  twin     %s  (%s)" % (fmt(other), "virtual" if not a._is_va(pc) else "physical"))
+        out.append(
+            "  offset   %s%s"
+            % (
+                fmt(self.offset) if self.offset is not None else "(uncalibrated)",
+                "   shadow @%s" % fmt(self.shadow_addr) if self.shadow_addr is not None else "",
+            )
+        )
         out.append("  KASLR    %s" % self._kaslr_field())
         out.append("  phase    %s" % self.boot_phase())
         out.append("  next     %s" % self._where_suggestion())
@@ -344,8 +355,7 @@ class ViewMixin:
         if pc is not None and entry is not None and not a._is_va(pc) and pc < entry:
             return "kearly bootbreak    (still before the kernel entry)"
         if pc is not None and not a._is_va(pc):
-            return ("kearly regimes      (list this build's MMU stop points), or "
-                    "kearly overmmu to cross now")
+            return "kearly regimes      (list this build's MMU stop points), or kearly overmmu to cross now"
         return "nothing -- virtual addressing is up; `b SYM` targets the running kernel"
 
     # --- hardware page-table walk rendering -----------------------------
@@ -369,26 +379,32 @@ class ViewMixin:
                 cfg = getattr(a, "_ptcfg", None) or {}
                 if not cfg:
                     ts = a.translation_state() or {}
-                    return ["[%s] cannot walk through the table at 0x%x: the paging SHAPE "
-                            "is unknown." % (NAME, root_pa),
-                            "  %s, so the registers that would give the granule and level "
-                            "count" % (ts.get("evidence") or "translation is not on"),
-                            "  describe nothing right now.  A walk needs a shape; the raw "
-                            "bytes do not:",
-                            "    kpthex 0x%x full" % root_pa]
-                return ["[%s] cannot walk VA 0x%x through the table at 0x%x -- the "
-                        "physical read failed" % (NAME, va & MASK, root_pa)]
-            return (self._no_live_tables("kpt")
-                        or ["[%s] kpt: translation is not on, and the reason could not "
-                            "be rendered -- see 'kearly log'" % NAME])
+                    return [
+                        "[%s] cannot walk through the table at 0x%x: the paging SHAPE is unknown." % (NAME, root_pa),
+                        "  %s, so the registers that would give the granule and level "
+                        "count" % (ts.get("evidence") or "translation is not on"),
+                        "  describe nothing right now.  A walk needs a shape; the raw bytes do not:",
+                        "    kpthex 0x%x full" % root_pa,
+                    ]
+                return [
+                    "[%s] cannot walk VA 0x%x through the table at 0x%x -- the "
+                    "physical read failed" % (NAME, va & MASK, root_pa)
+                ]
+            return self._no_live_tables("kpt") or [
+                "[%s] kpt: translation is not on, and the reason could not be rendered -- see 'kearly log'" % NAME
+            ]
         lines = ["VA 0x%x   %s   [%s]" % (w["va"], w["regime"], w["config"])]
         if root_pa is None:
             prov, why = self.pt_provenance(w["base"])
-            lines.append("  top-table PA 0x%x%s   provenance %s -- %s"
-                         % (w["base"], self._sym_suffix(w["base"]), prov.upper(), why))
+            lines.append(
+                "  top-table PA 0x%x%s   provenance %s -- %s"
+                % (w["base"], self._sym_suffix(w["base"]), prov.upper(), why)
+            )
         else:
-            lines.append("  top-table PA 0x%x%s   (EXPLICIT root -- not read from a "
-                         "translation register)" % (w["base"], self._sym_suffix(w["base"])))
+            lines.append(
+                "  top-table PA 0x%x%s   (EXPLICIT root -- not read from a "
+                "translation register)" % (w["base"], self._sym_suffix(w["base"]))
+            )
         for depth, lv in enumerate(w["levels"]):
             nm, idx, ent, desc = lv["name"], lv["index"], lv["entry_pa"], lv["desc"]
             if desc is None:
@@ -397,7 +413,11 @@ class ViewMixin:
             kind = lv["kind"]
             if kind == "table":
                 tail = "table -> 0x%x%s  (kpgd 0x%x level %d)" % (
-                    lv["next_pa"], self._sym_suffix(lv["next_pa"]), lv["next_pa"], depth + 1)
+                    lv["next_pa"],
+                    self._sym_suffix(lv["next_pa"]),
+                    lv["next_pa"],
+                    depth + 1,
+                )
             elif kind in ("block", "page"):
                 tail = "%s  %s" % (kind.upper(), lv.get("attrs", ""))
             else:
@@ -411,9 +431,10 @@ class ViewMixin:
             if self.offset is not None:
                 exp = self.v2p(va)
                 if exp is not None and getattr(a, "_is_va", None) and a._is_va(va):
-                    lines.append("     (kv2p(VA)=0x%x  %s)" %
-                                 (exp, "MATCH" if exp == w["leaf_pa"] else
-                                  "differs: image-window guess vs real HW walk"))
+                    lines.append(
+                        "     (kv2p(VA)=0x%x  %s)"
+                        % (exp, "MATCH" if exp == w["leaf_pa"] else "differs: image-window guess vs real HW walk")
+                    )
         else:
             lines.append("  => NOT MAPPED (no valid leaf descriptor)")
         return lines
@@ -427,11 +448,9 @@ class ViewMixin:
         nlevels = cfg.get("nlevels") or len(names)
         level = level or 0
         if level and not explicit:
-            return ["[%s] %s: `level` applies to an explicit TABLE_PA; the live root is "
-                    "the top table" % (NAME, cmd)]
+            return ["[%s] %s: `level` applies to an explicit TABLE_PA; the live root is the top table" % (NAME, cmd)]
         if not 0 <= level < nlevels:
-            return ["[%s] %s: level %d is outside this shape's 0..%d"
-                    % (NAME, cmd, level, nlevels - 1)]
+            return ["[%s] %s: level %d is outside this shape's 0..%d" % (NAME, cmd, level, nlevels - 1)]
         shift = a.pt_index(0, level)[1]
         label = names[level] if level < len(names) else "L%d" % level
         return level, shift, a.pt_entries(top=(level == 0)), label
@@ -446,9 +465,9 @@ class ViewMixin:
             probe = va if va is not None else reg("pc")
             rb = a.pt_base(probe if probe is not None else 0)
             if rb is None:
-                return (self._no_live_tables("kpgd")
-                        or ["[%s] kpgd: translation is not on, and the reason could not "
-                            "be rendered -- see 'kearly log'" % NAME])
+                return self._no_live_tables("kpgd") or [
+                    "[%s] kpgd: translation is not on, and the reason could not be rendered -- see 'kearly log'" % NAME
+                ]
             regime, table_pa = rb
             prov, why = self.pt_provenance(table_pa)
             note = "   provenance %s -- %s" % (prov.upper(), why)
@@ -466,11 +485,11 @@ class ViewMixin:
             note += self._shape_caveat()
         cfg = getattr(a, "_ptcfg", {}) or {}
         if not cfg:
-            return ["[%s] the paging shape could not be read from the target "
-                    "(no TCR/CR4/satp), so the entries at 0x%x cannot be decoded."
-                    % (NAME, table_pa),
-                    "  Raw bytes are still available and need no shape:  kpthex 0x%x full"
-                    % table_pa]
+            return [
+                "[%s] the paging shape could not be read from the target "
+                "(no TCR/CR4/satp), so the entries at 0x%x cannot be decoded." % (NAME, table_pa),
+                "  Raw bytes are still available and need no shape:  kpthex 0x%x full" % table_pa,
+            ]
         lv = self._table_level(a, level, regime == "explicit TABLE_PA", "kpgd")
         if isinstance(lv, list):
             return lv
@@ -479,9 +498,10 @@ class ViewMixin:
         words = read_phys_words(table_pa, _n)
         if not words:
             return ["[%s] cannot read table @0x%x (physical read failed)" % (NAME, table_pa)]
-        lines = ["table %s (level %d%s) @PA 0x%x   regime %s   [%s]%s   (non-zero of %d entries)" %
-                 (label, level, ", top" if level == 0 else "", table_pa, regime,
-                  a.pt_config_desc(), note, _n)]
+        lines = [
+            "table %s (level %d%s) @PA 0x%x   regime %s   [%s]%s   (non-zero of %d entries)"
+            % (label, level, ", top" if level == 0 else "", table_pa, regime, a.pt_config_desc(), note, _n)
+        ]
         shown = 0
         for i, d in enumerate(words):
             if not d:
@@ -491,8 +511,10 @@ class ViewMixin:
                 break
             kind, nxt, leaf, attrs = a.pt_decode(d, level, shift, nlevels)
             out = nxt if kind == "table" else (leaf if leaf is not None else 0)
-            lines.append("  [%3d] 0x%016x  %-7s -> 0x%-10x%s %s" %
-                         (i, d, kind, out or 0, self._sym_suffix(out or 0), attrs or ""))
+            lines.append(
+                "  [%3d] 0x%016x  %-7s -> 0x%-10x%s %s"
+                % (i, d, kind, out or 0, self._sym_suffix(out or 0), attrs or "")
+            )
             shown += 1
         if shown == 0:
             lines.append("  (all %d entries are zero / not-present)" % _n)
@@ -512,9 +534,10 @@ class ViewMixin:
                 # needs a table to dump, and with no live root there is none to
                 # pick.  The refusal names the stale register value so the
                 # operator can pass it explicitly.
-                return (self._no_live_tables("kpthex")
-                        or ["[%s] kpthex: translation is not on, and the reason could not "
-                            "be rendered -- see 'kearly log'" % NAME])
+                return self._no_live_tables("kpthex") or [
+                    "[%s] kpthex: translation is not on, and the reason could not "
+                    "be rendered -- see 'kearly log'" % NAME
+                ]
             regime, table_pa = rb
             prov, why = self.pt_provenance(table_pa)
             note = "   provenance %s -- %s" % (prov.upper(), why)
@@ -532,8 +555,7 @@ class ViewMixin:
         if cfg.get("top_shift") is None or nlevels is None:
             note += "   [no decode -- paging shape unread]"
             if level:
-                return ["[%s] kpthex: level %d needs the paging shape, which could not be read"
-                        % (NAME, level)]
+                return ["[%s] kpthex: level %d needs the paging shape, which could not be read" % (NAME, level)]
             _n = a.pt_entries()
         else:
             lv = self._table_level(a, level, regime == "explicit TABLE_PA", "kpthex")
@@ -542,16 +564,15 @@ class ViewMixin:
             level, shift, _n, _label = lv
             note += "   level %d" % level
         if full:
-            _n = a.pt_entries()                # the whole granule page, raw
+            _n = a.pt_entries()  # the whole granule page, raw
         words = read_phys_words(table_pa, _n)
         if not words:
             return ["[%s] cannot read table @0x%x (physical read failed)" % (NAME, table_pa)]
-        lines = ["page-table page @PA 0x%x   regime %s%s   little-endian, as stored in RAM" %
-                 (table_pa, regime, note)]
+        lines = ["page-table page @PA 0x%x   regime %s%s   little-endian, as stored in RAM" % (table_pa, regime, note)]
         if full:
             blob = b"".join(struct.pack("<Q", w & MASK) for w in words)
             for off in range(0, len(blob), 16):
-                ch = blob[off:off + 16]
+                ch = blob[off : off + 16]
                 hx = " ".join("%02x" % c for c in ch)
                 asc = "".join(chr(c) if 32 <= c < 127 else "." for c in ch)
                 lines.append("  +0x%03x  %-47s  |%s|" % (off, hx, asc))
@@ -563,15 +584,16 @@ class ViewMixin:
             if not d:
                 continue
             if shown >= maxrows:
-                lines.append("  ... (%d-row cap; raise with 'kpthex 0x%x %d', or the whole "
-                             "page with 'kpthex 0x%x full')" % (maxrows, table_pa, maxrows * 4, table_pa))
+                lines.append(
+                    "  ... (%d-row cap; raise with 'kpthex 0x%x %d', or the whole "
+                    "page with 'kpthex 0x%x full')" % (maxrows, table_pa, maxrows * 4, table_pa)
+                )
                 break
             ent_pa = table_pa + i * 8
             bstr = " ".join("%02x" % c for c in struct.pack("<Q", d & MASK))
             if shift is None:
                 # Bytes are a fact; a decode without a known granule is not.
-                lines.append("  [%3d] 0x%-11x  %s   0x%016x   (shape unread)"
-                             % (i, ent_pa, bstr, d))
+                lines.append("  [%3d] 0x%-11x  %s   0x%016x   (shape unread)" % (i, ent_pa, bstr, d))
                 shown += 1
                 continue
             kind, nxt, leaf, attrs = a.pt_decode(d, level, shift, nlevels)
@@ -635,8 +657,7 @@ class ViewMixin:
             return ["[%s] no arch" % NAME]
         st, src = self.mmu_state()
         off = fmt(self.offset) if self.offset is not None else "(uncalibrated)"
-        lines = ["mmview -- kernel memory layout   [MMU=%s %s | %s | offset(PA-VA)=%s]"
-                 % (st, src, a.key, off)]
+        lines = ["mmview -- kernel memory layout   [MMU=%s %s | %s | offset(PA-VA)=%s]" % (st, src, a.key, off)]
         # (1) symbol landmarks -- always available (needs only symbols + offset),
         # so this half of the map works even pre-MMU on physical addresses.
         lm = []
@@ -650,12 +671,13 @@ class ViewMixin:
             lines.append("")
             lines.append("kernel image / key symbols  (VA -> PA):")
             for sym, v, pa, desc in lm:
-                lines.append("  %-17s 0x%016x  %-16s %s" %
-                             (sym, v, ("-> PA 0x%x" % pa) if pa is not None else "-> PA ?", desc))
+                lines.append(
+                    "  %-17s 0x%016x  %-16s %s" % (sym, v, ("-> PA 0x%x" % pa) if pa is not None else "-> PA ?", desc)
+                )
         # (2) live mappings if paging is on; otherwise the physical placement.
         if st == "on" and getattr(a, "pagewalk_supported", False):
             cap = 400
-            for label, repva, prefix in (a.pt_dump_roots() or []):
+            for label, repva, prefix in a.pt_dump_roots() or []:
                 is_idmap = ("idmap" in label.lower()) or ("ttbr0" in label.lower())
                 if is_idmap and not want_idmap:
                     continue
@@ -679,25 +701,25 @@ class ViewMixin:
                 # "kernel TTBR1") states something the operator cannot check.
                 prov, why = self.pt_provenance(base)
                 lines.append("")
-                lines.append("live mappings: %s  root@PA 0x%x   (%d%s regions)   [%s]"
-                             % (label, base, len(regions),
-                                "/%d" % total if hidden else "", a.pt_config_desc()))
+                lines.append(
+                    "live mappings: %s  root@PA 0x%x   (%d%s regions)   [%s]"
+                    % (label, base, len(regions), "/%d" % total if hidden else "", a.pt_config_desc())
+                )
                 lines.append("  provenance %s -- %s" % (prov.upper(), why))
                 if hidden:
-                    lines.append("  (%d user/low-half regions hidden -- 'mmview all' to include)"
-                                 % hidden)
+                    lines.append("  (%d user/low-half regions hidden -- 'mmview all' to include)" % hidden)
                 if not regions:
                     lines.append("  (root present but no kernel-space leaf mappings)")
                 shown = 0
                 for vs, pa, size, attrs, kind in regions:
                     if shown >= cap:
-                        lines.append("  ... (%d more regions; narrow with kpt <VA> / kpgd)"
-                                     % (len(regions) - shown))
+                        lines.append("  ... (%d more regions; narrow with kpt <VA> / kpgd)" % (len(regions) - shown))
                         break
                     ve = (vs + size) & MASK
-                    lines.append("  0x%016x-0x%016x %6s -> 0x%-11x %-5s %-22s %s" %
-                                 (vs, (vs + size - 1) & MASK, self._hsize(size), pa,
-                                  kind, attrs, self._label_region(vs, ve)))
+                    lines.append(
+                        "  0x%016x-0x%016x %6s -> 0x%-11x %-5s %-22s %s"
+                        % (vs, (vs + size - 1) & MASK, self._hsize(size), pa, kind, attrs, self._label_region(vs, ve))
+                    )
                     shown += 1
         else:
             lines.append("")
@@ -706,13 +728,13 @@ class ViewMixin:
             lines.append("     ('kearly overmmu', or step past 'msr sctlr_el1') for live tables.")
             t, e = symval("_text"), symval("_end")
             if t is not None and e is not None and self.offset is not None:
-                lines.append("  kernel image PA:     0x%x - 0x%x   (%s)" %
-                             (self.v2p(t), self.v2p(e), self._hsize(e - t)))
+                lines.append(
+                    "  kernel image PA:     0x%x - 0x%x   (%s)" % (self.v2p(t), self.v2p(e), self._hsize(e - t))
+                )
             epa = self.resolve_entry()
             if epa is not None:
                 lines.append("  image-base entry PA: 0x%x" % epa)
             regs = TARGET.ram_regions(a)
             if regs:
-                lines.append("  RAM (DTB/profile):   " +
-                             ", ".join("0x%x+0x%x" % (b, s) for b, s in regs))
+                lines.append("  RAM (DTB/profile):   " + ", ".join("0x%x+0x%x" % (b, s) for b, s in regs))
         return lines

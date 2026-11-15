@@ -1,4 +1,5 @@
 """Command registration and conditional autostart."""
+
 import gdb
 
 from .common.runtime import *
@@ -10,7 +11,7 @@ from .common.stackscan import StackScan
 from .common.enumvals import EnumVals
 from .common.cmdinfo import CmdInfo
 from .common.fz import Fz, bind_from_env
-from .linux_kernel import arch as _kernel_arch     # registers the full arch classes
+from .linux_kernel import arch as _kernel_arch  # registers the full arch classes
 from .linux_kernel.session import SESSION
 from .linux_kernel.commands import *
 from .linux_kernel.fdt import KDtb
@@ -22,15 +23,34 @@ from .linux_kernel.pwndbg_glue import *
 # rather than derived from the class, because the gdb name is a user-facing
 # contract and a rename must be a visible edit here.
 COMMON_COMMANDS = (
-    (CfgJson, "cfgjson"), (CfgDis, "cfgdis"),
-    (Sym, "addr2sym"), (StackScan, "stackscan"), (Chain, "chain"),
-    (EnumVals, "enumvals"), (CmdInfo, "cmdinfo"), (Fz, "fz"),
+    (CfgJson, "cfgjson"),
+    (CfgDis, "cfgdis"),
+    (Sym, "addr2sym"),
+    (StackScan, "stackscan"),
+    (Chain, "chain"),
+    (EnumVals, "enumvals"),
+    (CmdInfo, "cmdinfo"),
+    (Fz, "fz"),
 )
 KERNEL_COMMANDS = (
-    (KEarly, "kearly"), (P2V, "kp2v"), (V2P, "kv2p"), (KB, "kb"), (KW, "kw"),
-    (KSr, "ksr"), (KSregs, "ksregs"), (KFin, "kfin"), (KCensus, "kcensus"),
-    (KPt, "kpt"), (KPgd, "kpgd"), (KPtHex, "kpthex"), (KOff, "koff"), (KX, "kx"),
-    (KDtb, "kdtb"), (MmView, "mmview"), (MmView, "memlayout"), (KBits, "kbits"),
+    (KEarly, "kearly"),
+    (P2V, "kp2v"),
+    (V2P, "kv2p"),
+    (KB, "kb"),
+    (KW, "kw"),
+    (KSr, "ksr"),
+    (KSregs, "ksregs"),
+    (KFin, "kfin"),
+    (KCensus, "kcensus"),
+    (KPt, "kpt"),
+    (KPgd, "kpgd"),
+    (KPtHex, "kpthex"),
+    (KOff, "koff"),
+    (KX, "kx"),
+    (KDtb, "kdtb"),
+    (MmView, "mmview"),
+    (MmView, "memlayout"),
+    (KBits, "kbits"),
     (KMemblock, "kmemblock"),
 )
 
@@ -93,8 +113,7 @@ def _completions(word):
         out = gdb.execute("complete " + word, from_tty=False, to_string=True) or ""
     except gdb.error:
         return []
-    return sorted({ln.strip() for ln in out.splitlines()
-                   if ln.strip() and " " not in ln.strip()})
+    return sorted({ln.strip() for ln in out.splitlines() if ln.strip() and " " not in ln.strip()})
 
 
 def _abbreviations(names):
@@ -152,8 +171,7 @@ def _register():
         LOG.add("abbreviations kept as aliases: %s" % ", ".join(kept))
     if taken:
         print("[%s] took over existing gdb command(s): %s" % (NAME, ", ".join(sorted(set(taken)))))
-        print("[%s]   the previous meaning is gone for this session; the full name "
-              "still works where one exists" % NAME)
+        print("[%s]   the previous meaning is gone for this session; the full name still works where one exists" % NAME)
 
 
 @safe(boundary="hook")
@@ -177,8 +195,10 @@ def main():
     _register()
     for msg in config.validate_all():
         report_config_error(msg)
-    SESSION.loaded_banner = ("[%s] early-boot symbolizer loaded (%s)"
-                             % (NAME, " | ".join(n for _c, n in KERNEL_COMMANDS)))
+    SESSION.loaded_banner = "[%s] early-boot symbolizer loaded (%s)" % (
+        NAME,
+        " | ".join(n for _c, n in KERNEL_COMMANDS),
+    )
     # Only when $GDBTOOLS_FZ_KEY says so; a debugger's keys are the user's.
     bind_from_env()
     _autostart()
