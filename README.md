@@ -276,7 +276,8 @@ bin/gdbtools                  the CLI; completions/ holds its bash and zsh compl
 To work on gdbtools: `shfmt` lays out the shell and `ruff` the Python, by
 `.editorconfig` and `ruff.toml`. `shfmt -w .` and `ruff format .` format the
 checkout, and kbuildlab's `tests/style.py DIR` fails while either would change a
-file.
+file. `ty.toml` tells the `ty` type checker, and so an editor, which modules exist
+only inside gdb.
 
 **Depended on by**
 
