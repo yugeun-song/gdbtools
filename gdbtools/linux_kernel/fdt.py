@@ -13,7 +13,7 @@ import re
 import struct
 import gdb
 from ..common.runtime import *
-from .physmem import *
+from . import physmem
 
 
 FDT_MAGIC = 0xD00DFEED
@@ -476,7 +476,7 @@ def _read_chunk(addr, n, phys):
         return read_guest_bytes(addr, n)
     base = addr & ~7
     words = min((n + (addr & 7) + 7) // 8, _PHYS_WORDS_PER_XP)
-    got = read_phys_words(base, words)
+    got = physmem.read_phys_words(base, words)
     if not got:
         return None
     raw = b"".join(struct.pack("<Q", w) for w in got)
