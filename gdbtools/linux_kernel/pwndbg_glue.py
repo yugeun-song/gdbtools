@@ -703,12 +703,16 @@ KGUARD_HITS = {}
 def _translation_off():
     """True only when translation is definitely OFF right now.
 
-    Deliberately conservative: pwndbg's own paging_enabled() is the source, and any
-    failure to answer means "do not refuse".  A guard that refuses on a failed probe
-    would break the steady-state case it is not meant to touch."""
+    Deliberately conservative: pwndbg's own paging state is the source (`paging.enabled`,
+    `paging_enabled()` before pwndbg 2026.10.22), and any failure to answer means "do not
+    refuse".  A guard that refuses on a failed probe would break the steady-state case it
+    is not meant to touch."""
     try:
         import pwndbg.aglib.kernel as _k
 
+        paging = getattr(_k, "paging", None)
+        if paging is not None:
+            return paging.enabled is False
         return _k.paging_enabled() is False
     except Exception:
         return False
@@ -717,7 +721,7 @@ def _translation_off():
 _KREFUSALS = (
     # With translation off there is no current page table: TTBR still holds whatever
     # the previous boot stage left in it.  pwndbg knows this in ONE of its two map
-    # builders -- kernel_vmmap_via_page_tables() checks paging_enabled() and returns
+    # builders -- kernel_vmmap_via_page_tables() checks paging.enabled and returns
     # nothing -- but the scan path does not, so at head.S _text it walks u-boot's
     # tables and `vmmap` prints them as the kernel's memory map: five ranges spanning
     # 0x0-0x200000000000 and up, none of which the kernel has mapped.  vmmap not
